@@ -1,0 +1,23 @@
+# @package _global_
+
+# Stage 4: Evaluation Configuration
+stage: evaluate
+
+# Hydra settings
+hydra:
+  run:
+    dir: outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}/stage_4_eval
+
+# Evaluation settings defined in the design document
+eval:
+  model:
+    base_model_path: "Qwen/Qwen2-1.5B-Instruct"  # Base model used in Stage 3
+    adapter_path: "outputs/2025-06-12/22-00-00/stage_3_finetune/lora_adapter" # Placeholder, should be the output from stage 3
+  tasks:
+    - "mmlu"
+  batch_size: 4
+  limit: 100
+
+# Output configuration
+output:
+  results_path: "${hydra.run.dir}/evaluation_results.json"

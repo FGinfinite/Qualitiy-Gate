@@ -1,0 +1,26 @@
+# @package _global_
+
+# Stage 2: Data Selection Configuration
+
+# General settings
+stage: select
+
+# Hydra settings
+hydra:
+  run:
+    dir: outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}/stage_2_select
+
+# Selector model configuration
+selector_model:
+  name: "google/switch-base-8"
+  checkpoint_path: "google/switch-base-8"
+
+# Data selection settings
+data_selection:
+  target_dataset_path: "data/dummy_unlabeled_data.jsonl"
+  trash_expert_ratio: 0.25 # 25% of experts are considered "trash"
+  selection_percentage: 0.1 # Select top 10% of the data
+
+# Output settings
+output:
+  selected_data_path: "${hydra:run.dir}/selected_data.jsonl"
