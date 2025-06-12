@@ -11,3 +11,5 @@ wheels/
 
 # Ignore experiment outputs
 outputs/
+
+uv.lock
