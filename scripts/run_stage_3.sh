@@ -13,8 +13,8 @@ echo "Starting Stage 3: Target Model Fine-tuning..."
 # Launch the training process using Accelerate
 # We pass the config name for Hydra to pick up the correct file.
 # The `main` function in `src/main.py` will then route to the `finetune_target_model` function.
-accelerate launch --config_file "${PROJECT_ROOT}/configs/accelerate_config.yaml" \
-    "${PROJECT_ROOT}/src/main.py" \
+cd "$PROJECT_ROOT" && accelerate launch --config_file "configs/accelerate_config.yaml" \
+    -m src.main \
     --config-name=stage_3_finetune
 
 echo "Stage 3 script finished."

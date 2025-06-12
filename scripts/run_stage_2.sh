@@ -1,2 +1,2 @@
 #!/bin/bash
-uv run python src/main.py --config-name=stage_2_select
+uv run python -m src.main --config-name=stage_2_select
