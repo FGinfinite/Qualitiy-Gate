@@ -64,9 +64,7 @@ def pretrain(cfg: DictConfig) -> None:
     tokenized_dataset = dummy_dataset.map(
         tokenize_function, batched=True, fn_kwargs={"tokenizer": tokenizer}
     )
-    tokenized_dataset.set_format(
-        type="torch", columns=["input_ids", "attention_mask"]
-    )
+    tokenized_dataset.set_format(type="torch", columns=["input_ids", "attention_mask"])
 
     # Data Collator
     data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
