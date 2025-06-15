@@ -1,0 +1,19 @@
+# This configuration uses DistributedDataParallel (DDP) for multi-GPU training.
+# It's a robust and standard approach that works well for many use cases.
+# Unlike FSDP, it doesn't shard the model, making saving and loading straightforward.
+
+compute_environment: LOCAL_MACHINE
+distributed_type: 'MULTI_GPU'
+downcast_bf16: 'no'
+gpu_ids: 'all'
+machine_rank: 0
+main_training_function: main
+mixed_precision: 'bf16'
+num_machines: 1
+num_processes: 1 # This will be overridden by --num_processes in the launch command
+rdzv_backend: 'static'
+same_network: true
+tpu_env: []
+tpu_use_cluster: false
+tpu_use_sudo: false
+use_cpu: false

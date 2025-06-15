@@ -13,7 +13,6 @@ dependencies = [
     "lm-eval",
     "torchvision>=0.21.0",
     "datasets",
-    "deepspeed>=0.17.1",
 ]
 
 [tool.uv.sources]

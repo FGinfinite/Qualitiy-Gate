@@ -1,12 +1,15 @@
+import os
+import sys
+
 import hydra
 from omegaconf import DictConfig
 
-from src.stages import (
-    pretrain,
-    select_data,
-    finetune_target_model,
-    evaluate_model
-)
+# 获取当前脚本所在目录的父目录（即项目根目录）
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)  # 将项目根目录添加到sys.path的最前面
+
+from src.stages import pretrain
 
 
 @hydra.main(config_path="../configs", config_name="stage_1_pretrain", version_base=None)
@@ -16,15 +19,15 @@ def main(cfg: DictConfig) -> None:
     Selects and runs the appropriate stage based on the configuration.
     """
     stage = cfg.get("stage", "pretrain")  # Default to pretrain if not specified
-    
+
     if stage == "pretrain":
         pretrain(cfg)
     elif stage == "select":
-        select_data(cfg)
+        pass
     elif stage == "finetune":
-        finetune_target_model(cfg)
+        pass
     elif stage == "evaluate":
-        evaluate_model(cfg)
+        pass
     else:
         raise ValueError(f"Unknown stage: {stage}")
 

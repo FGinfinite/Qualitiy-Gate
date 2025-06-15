@@ -1,73 +1,179 @@
+# src/stages/selection.py
 import json
+import logging
+import os
+from typing import Dict, List, Tuple
+
+import hydra
 import torch
+from datasets import concatenate_datasets, load_dataset
 from omegaconf import DictConfig
-from transformers import AutoModelForCausalLM, AutoTokenizer
-from datasets import load_dataset
+from torch.utils.data import DataLoader
 from tqdm import tqdm
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
-def calculate_quality_score(router_logits: torch.Tensor, good_expert_indices: list[int]) -> float:
-    """Calculates the quality score based on the logits of good experts."""
-    good_expert_logits = router_logits[good_expert_indices]
-    return torch.sum(good_expert_logits).item()
 
-def select_data(cfg: DictConfig) -> None:
+def get_model_and_tokenizer(
+    model_path: str,
+) -> Tuple[AutoModelForCausalLM, AutoTokenizer]:
     """
-    Selects data based on the quality score from a pre-trained selector model.
+    Loads a pre-trained model and its tokenizer from a local checkpoint.
     """
-    print("--- Starting Stage 2: Data Selection ---")
-
-    # Load Model and Tokenizer
-    print(f"Loading model from checkpoint: {cfg.selector_model.checkpoint_path}")
-    model = AutoModelForCausalLM.from_pretrained(cfg.selector_model.checkpoint_path)
-    tokenizer = AutoTokenizer.from_pretrained(cfg.selector_model.name)
+    model_kwargs = {
+        "low_cpu_mem_usage": True,
+        "torch_dtype": torch.bfloat16,
+        "device_map": "auto",
+    }
+    model = AutoModelForCausalLM.from_pretrained(model_path, **model_kwargs)
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-    
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model.to(device)
     model.eval()
+    return model, tokenizer
 
-    # Define Expert Roles
+
+def calculate_quality_score(
+    logits: torch.Tensor, quality_expert_indices: List[int]
+) -> float:
+    """
+    Calculates the quality score for a single data point based on router logits.
+    """
+    quality_logits = logits[quality_expert_indices]
+    return torch.sum(quality_logits).item()
+
+
+@hydra.main(
+    config_path="../../configs", config_name="stage_2_selection", version_base=None
+)
+def select_data(cfg: DictConfig) -> None:
+    """
+    Main function for the data selection stage, managed by Hydra.
+    """
+    log = logging.getLogger(__name__)
+    log.info("--- Starting Stage 2: Data Selection ---")
+
+    # 1. Load Model and Tokenizer
+    log.info(f"Loading model from checkpoint: {cfg.model_checkpoint_path}")
+    model, tokenizer = get_model_and_tokenizer(cfg.model_checkpoint_path)
     num_experts = model.config.num_experts
-    num_trash_experts = int(num_experts * cfg.data_selection.trash_expert_ratio)
-    good_expert_indices = list(range(num_trash_experts, num_experts))
-    print(f"Total experts: {num_experts}, Good experts: {len(good_expert_indices)}, Trash experts: {num_trash_experts}")
+    num_hidden_layers = model.config.num_hidden_layers
 
-    # Load Dataset
-    print(f"Loading target dataset from: {cfg.data_selection.target_dataset_path}")
-    # This is a placeholder for actual dataset loading.
-    # We'll create a dummy dataset for now.
-    dataset = load_dataset("text", data_files={"train": cfg.data_selection.target_dataset_path})['train']
+    # 2. Define Expert Roles
+    num_trash_experts = int(num_experts * cfg.trash_expert_ratio)
+    quality_expert_indices = list(range(num_trash_experts, num_experts))
+    log.info(f"Total experts: {num_experts}")
+    log.info(f"Trash experts: {num_trash_experts} (Indices 0 to {num_trash_experts - 1})")
+    log.info(
+        f"Quality experts: {len(quality_expert_indices)} (Indices {num_trash_experts} to {num_experts - 1})"
+    )
 
-    # Score Data
+    # 3. Load and Prepare Dataset
+    log.info(f"Loading datasets: {cfg.dataset.paths}")
+    all_datasets = [load_dataset(path, split="train") for path in cfg.dataset.paths]
+    dataset = concatenate_datasets(all_datasets).shuffle(seed=cfg.dataset.seed)
+
+    if cfg.dataset.subset_ratio < 1.0:
+        dataset = dataset.select(range(int(len(dataset) * cfg.dataset.subset_ratio)))
+    log.info(f"Total samples to score: {len(dataset)}")
+
+    def format_text(example: Dict) -> Dict:
+        """Formats different dataset structures into a single text string."""
+        if "instruction" in example and "response" in example:
+            instruction = example.get("instruction", "")
+            context = example.get("context", "")
+            response = example.get("response", "")
+            text = f"Instruction: {instruction}"
+            if context:
+                text += f"\nContext: {context}"
+            text += f"\nResponse: {response}"
+            return {"text": text}
+        conversation_data = example.get("conversations") or example.get("conversation")
+        if conversation_data:
+            return {"text": "\n".join([f"{turn.get('from', turn.get('role', ''))}: {turn.get('value', turn.get('content', ''))}" for turn in conversation_data])}
+        if "text" in example:
+            return {"text": example["text"]}
+        raise ValueError(f"Unsupported dataset format: {example.keys()}")
+
+    dataset = dataset.map(format_text, remove_columns=dataset.column_names)
+    dataloader = DataLoader(dataset, batch_size=cfg.data_process.batch_size)
+
+    # 4. Score Data
     scored_data = []
-    for i, example in enumerate(tqdm(dataset, desc="Scoring data")):
-        inputs = tokenizer(example['text'], return_tensors="pt", truncation=True, padding=True).to(device)
+    log.info("Scoring dataset...")
+    for i, batch in enumerate(tqdm(dataloader)):
+        texts = batch["text"]
+        if i == 0:
+            log.info(f"Batch 0, first 3 texts:\n1: {texts[0][:100]}...\n2: {texts[1][:100]}...\n3: {texts[2][:100]}...")
+
+        inputs = tokenizer(
+            texts,
+            truncation=True,
+            padding="longest",
+            return_tensors="pt",
+            max_length=512,
+        )
+        inputs = {
+            k: v.to(model.device) if k != "input_ids" else v.to(model.device, dtype=torch.long)
+            for k, v in inputs.items()
+        }
+
         with torch.no_grad():
             outputs = model(**inputs, output_router_logits=True)
-        
-        # Assuming the router logits are the last element in the tuple
-        router_logits = outputs.router_logits[-1].squeeze()
-        
-        quality_score = calculate_quality_score(router_logits, good_expert_indices)
-        
-        scored_data.append({
-            "source_dataset": cfg.data_selection.target_dataset_path,
-            "source_index": i,
-            "text": example['text'],
-            "quality_score": quality_score
-        })
 
-    # Sort and Select
-    scored_data.sort(key=lambda x: x['quality_score'], reverse=True)
-    num_to_select = int(len(scored_data) * cfg.data_selection.selection_percentage)
+        # FIX: Average logits across all layers for a more robust score
+        all_router_logits = torch.stack(outputs.router_logits) # (num_layers, bs*seq_len, num_experts)
+        avg_router_logits = torch.mean(all_router_logits, dim=0) # (bs*seq_len, num_experts)
+
+        batch_size = len(texts)
+        sequence_length = inputs["input_ids"].shape[1]
+        reshaped_logits = avg_router_logits.view(
+            batch_size, sequence_length, num_experts
+        )
+        # Take the logits from the first token (e.g., CLS token)
+        batch_logits = reshaped_logits[:, 0, :]
+
+        if i == 0:
+            log.info(f"Batch 0, averaged logits (first 3 samples):\n{batch_logits[:3]}")
+
+        for j in range(batch_size):
+            quality_score = calculate_quality_score(
+                batch_logits[j], quality_expert_indices
+            )
+            if i == 0 and j < 3:
+                log.info(f"Sample {j} quality score: {quality_score}")
+            scored_data.append(
+                {
+                    "source_dataset": list(cfg.dataset.paths),
+                    "source_index": i * cfg.data_process.batch_size + j,
+                    "text": texts[j],
+                    "quality_score": quality_score,
+                }
+            )
+
+    # 5. Filter and Save Data
+    log.info("Filtering and saving data...")
+    scored_data.sort(key=lambda x: x["quality_score"], reverse=True)
+    num_to_select = int(len(scored_data) * cfg.selection_percentage)
     selected_data = scored_data[:num_to_select]
-    print(f"Selected {len(selected_data)} samples out of {len(scored_data)}")
 
-    # Save Results
-    print(f"Saving selected data to: {cfg.output.selected_data_path}")
-    with open(cfg.output.selected_data_path, 'w') as f:
+    log.info(f"Selected top {len(selected_data)} samples ({cfg.selection_percentage * 100:.2f}%)")
+    if len(selected_data) > 3:
+        log.info(f"Top 3 scores: {[d['quality_score'] for d in selected_data[:3]]}")
+        log.info(f"Bottom 3 scores: {[d['quality_score'] for d in selected_data[-3:]]}")
+
+    # Use the absolute path provided by Hydra's config interpolation
+    output_path = cfg.output_path
+    output_dir = os.path.dirname(output_path)
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+
+    with open(output_path, "w", encoding="utf-8") as f:
         for item in selected_data:
             f.write(json.dumps(item) + "\n")
-            
-    print("\n--- Stage 2: Data Selection Completed ---")
+
+    log.info(f"Filtered data saved to: {output_path}")
+    log.info("--- Stage 2: Data Selection Completed ---")
+
+
+if __name__ == "__main__":
+    select_data()

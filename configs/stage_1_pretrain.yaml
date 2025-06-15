@@ -8,19 +8,23 @@ hydra:
     dir: outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}/stage_1_pretrain
 
 # Model configuration
-model:
-  name: "placeholder_model"
-  tokenizer_name: "placeholder_tokenizer"
-  learning_rate: 1e-5
+selector_model:
+  name: "allenai/OLMoE-1B-7B-0125"
+output_dir: ${hydra:run.dir}
 
 # Dataset configuration
 dataset:
-  path: "placeholder/path/to/dataset"
-  batch_size: 4
+  paths:
+    - "teknium/OpenHermes-2.5"
+    - "allenai/WildChat-1M"
+  subset_ratio: 0.001
+  seed: 42
   max_length: 512
 
 # Training configuration
 training:
+  batch_size: 4
+  learning_rate: 1e-4
   epochs: 1
   optimizer: "AdamW"
   scheduler: "linear"

@@ -14,7 +14,7 @@
 ## 技术栈
 
 - **模型评估**: `lm-eval-harness`
-- **分布式训练**: `deepspeed`, `accelerate`
+- **分布式训练**: `accelerate`
 - **配置管理**: `hydra-core`
 - **核心库**: `torch`, `transformers`, `peft`
 - **包管理**: `uv`
