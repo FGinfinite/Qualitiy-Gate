@@ -2,11 +2,19 @@
 
 # Stage 2: Data Selection Configuration
 
+# Hydra settings to create a timestamped output directory, similar to stage 1
+hydra:
+  run:
+    dir: outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}/stage_2_selection
+
 # Path to the pretrained model from stage 1
 model_checkpoint_path: "outputs/2025-06-15/11-59-04/stage_1_pretrain"
 
+# The final output path for the selected data.
+# It uses the Hydra-generated run directory.
+output_path: "${hydra:run.dir}/selected_data.jsonl"
+
 # Datasets to be scored and filtered.
-# This uses the same structure as stage_1_pretrain for consistency.
 dataset:
   paths:
     - databricks/databricks-dolly-15k
@@ -22,13 +30,6 @@ trash_expert_ratio: 0.125
 # The percentage of data to select based on quality score.
 # 0.05 means the top 5% of the data will be selected.
 selection_percentage: 0.05
-
-# The output filename.
-output_filename: "selected_data.jsonl"
-
-# The full path to save the filtered dataset.
-# This will be inside the timestamped Hydra run directory.
-output_path: "${hydra.run.dir}/${output_filename}"
 
 # Data processing settings
 data_process:

@@ -115,3 +115,51 @@
     2.  创建了对应的配置文件 [`configs/stage_2_selection.yaml`](configs/stage_2_selection.yaml)。
     3.  创建了执行脚本 [`scripts/run_stage_2.sh`](scripts/run_stage_2.sh)。
 *   **记录**: 子任务声称已将详细过程记录在 `activeContext.md`，但该文件为空。尽管如此，核心交付物均已完成并通过用户确认。项目现在可以进入下一阶段。
+
+---
+### 2025-06-15: 优化 Stage 2 输出路径逻辑
+
+*   **问题**: Stage 2 的输出文件 `selected_data.jsonl` 被直接保存在项目根目录，覆盖了旧文件，不利于实验追踪。
+*   **决策**: 委派 `code-developer` 模式，使其输出行为与 Stage 1 对齐，将结果保存到由 Hydra 生成的唯一、带时间戳的目录中。
+*   **成果**:
+    1.  修改了 `src/stages/selection.py` 以正确解析和使用 Hydra 的动态工作目录。
+    2.  更新了 `configs/stage_2_selection.yaml` 以支持新的路径逻辑。
+    3.  现在，Stage 2 的输出会被保存到 `outputs/YYYY-MM-DD/HH-MM-SS/stage_2_selection/` 这样的路径下，确保了实验结果的一致性和可追溯性。
+
+---
+### 代码实现 [Finetune Stage]
+[2025-06-15 16:56:57] - [实现了基于PEFT和Accelerate的LoRA微调阶段]
+
+**实现细节：**
+- 创建了 `src/stages/finetune.py`，包含使用 `accelerate` 启动的 LoRA 微调训练循环。
+- 脚本支持从配置文件加载模型、数据集路径和训练参数。
+- 使用 `peft` 的 `LoraConfig` 对指定的目标模块 (`q_proj`, `k_proj`, `v_proj`) 应用LoRA。
+- 训练结束后，脚本会自动保存 LoRA 适配器权重。
+- 更新了 `src/main.py` 以集成 `finetune` 阶段。
+- 创建了 `configs/stage_3_finetune.yaml` 配置文件。
+- 创建了 `scripts/run_stage_3.sh` 以方便启动训练。
+
+**测试框架：**
+Pytest (已跳过)
+
+**测试结果：**
+- 覆盖率：N/A
+- 通过率：N/A
+
+---
+### 2025-06-15: 重构阶段三“目标模型训练”工作流
+
+*   **问题**: `src/stages/finetune.py` 脚本未使用 `transformers.Trainer`，导致训练效率低下和显存溢出问题。同时，`scripts/run_stage_3.sh` 启动脚本缺乏动态 GPU 检测和唯一的输出目录生成机制，与项目其他阶段不一致。
+*   **决策**: 委派 `code-developer` 模式，对阶段三的训练脚本和启动脚本进行重构，使其与阶段一 (`pretrain`) 的实现风格和健壮性保持一致。
+*   **成果**:
+    1.  **重构 `src/stages/finetune.py`**:
+        *   将原先手动的 `accelerate` 训练循环替换为 Hugging Face `Trainer` API。
+        *   确保了 `peft` 配置的 LoRA 模型能够正确地与 `Trainer` 集成。
+        *   保留了原有的数据加载和预处理逻辑，同时使其与 `Trainer` 兼容。
+    2.  **更新 `scripts/run_stage_3.sh`**:
+        *   实现了根据 `CUDA_VISIBLE_DEVICES` 环境变量动态计算 `NUM_GPUS`。
+        *   为每次运行生成一个带时间戳的唯一输出目录 (e.g., `outputs/YYYY-MM-DD/HH-MM-SS/stage_3_finetune`)。
+        *   在 `accelerate launch` 命令中动态传入了 `--num_processes` 和 `hydra.run.dir`。
+    3.  **更新 `configs/stage_3_finetune.yaml`**:
+        *   添加并调整了 `output_dir`, `logging_dir`, `save_strategy` 等字段，以完全兼容 `transformers.TrainingArguments`。
+*   **结论**: 此次重构统一了项目各阶段的代码风格，解决了潜在的性能问题，并显著提升了实验的可追溯性和可复现性。

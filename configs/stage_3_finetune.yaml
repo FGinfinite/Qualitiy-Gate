@@ -1,0 +1,27 @@
+# @package _global_
+
+stage: "finetune"
+
+# The output_dir will be overridden by the launch script, but a default is good practice.
+output_dir: "outputs/stage_3_finetune"
+
+model:
+  name: "Qwen/Qwen3-0.6B"
+
+dataset:
+  path: "outputs/2025-06-15/15-21-10/stage_2_selection/selected_data.jsonl"
+
+training:
+  num_train_epochs: 3
+  learning_rate: 2e-4
+  per_device_train_batch_size: 2
+  logging_dir: "${output_dir}/logs"
+  logging_steps: 10
+  save_strategy: "epoch"
+  report_to: "none"
+
+peft:
+  lora_r: 8
+  lora_alpha: 16
+  lora_dropout: 0.05
+  target_modules: ["q_proj", "k_proj", "v_proj"]
