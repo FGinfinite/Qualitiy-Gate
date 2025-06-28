@@ -103,7 +103,7 @@
 
 *   **背景**: 用户希望使用 `Qwen/Qwen3-30B-A3B-FP8` 模型进行训练。代码分析子任务确认当前脚本不支持FP8。
 *   **决策**: 暂不进行FP8训练。
-*   **理由**: 核心训练脚本 [`src/stages/pretrain.py`](src/stages/pretrain.py) 将数据类型硬编码为 `torch.bfloat16`，需要进行代码修改才能支持FP8。
+*   **理由**: 核心训练脚本 [`src/stages/pretrain.py`](src/stages/pretrain.py:21) 将数据类型硬编码为 `torch.bfloat16`，需要进行代码修改才能支持FP8。
 *   **后续步骤**: 创建一个新的开发任务，以修改代码库，使其能够通过配置文件动态设置训练的数据类型（dtype），从而支持FP8及其他精度格式。
 
 ---
@@ -163,3 +163,28 @@ Pytest (已跳过)
     3.  **更新 `configs/stage_3_finetune.yaml`**:
         *   添加并调整了 `output_dir`, `logging_dir`, `save_strategy` 等字段，以完全兼容 `transformers.TrainingArguments`。
 *   **结论**: 此次重构统一了项目各阶段的代码风格，解决了潜在的性能问题，并显著提升了实验的可追溯性和可复现性。
+
+---
+### 2025-06-17: 修复 Stage 3 启动错误
+
+*   **问题**: 运行 `scripts/run_stage_3.sh` 时，程序因 `omegaconf.errors.ConfigAttributeError: Key 'seed' is not in struct` 而崩溃。
+*   **决策**: 委派 `code-debugger` 模式进行诊断和修复。
+*   **根本原因分析**:
+    1.  `ConfigAttributeError`: `configs/stage_3_finetune.yaml` 配置文件中的 `training` 部分确实缺少 `seed` 字段。
+    2.  `max_length` 缺失: 在修复 `seed` 问题后，进一步发现 `data` 部分也缺少 `max_length` 参数。
+    3.  CUDA Out of Memory: 在修复上述两个配置问题后，训练因显存不足而失败。
+*   **成果**:
+    1.  在 `configs/stage_3_finetune.yaml` 的 `training` 部分添加了 `seed: 42`。
+    2.  在 `data` 部分添加了 `max_length: 512`。
+    3.  将 `per_device_train_batch_size` 从 `2` 减小到 `1`，以解决显存溢出问题。
+*   **结论**: 经过一系列的诊断和修复，Stage 3 的微调脚本现在可以成功启动和运行。
+---
+### 2025-06-17: 整合阶段四“模型评估”成果
+
+*   **决策**: 整合由 `trainer-implementer` 模式完成的“模型评估”子任务 (任务 5)。
+*   **成果**:
+    1.  创建了核心逻辑文件 `src/stages/evaluate.py`，用于加载模型、合并LoRA适配器并使用 `lm-eval-harness` 执行评估。
+    2.  创建了对应的配置文件 `configs/stage_4_evaluate.yaml`，其中包含模型路径、评估任务等参数。
+    3.  创建了执行脚本 `scripts/run_stage_4.sh`，用于启动评估流程并管理输出。
+    4.  更新了 `src/main.py` 以集成 `evaluate` 阶段。
+*   **结论**: 项目所有四个核心阶段的开发工作均已完成。现在可以执行完整的实验流程，从模型预热到最终评估。

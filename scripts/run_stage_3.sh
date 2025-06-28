@@ -29,4 +29,4 @@ echo "Output directory: $OUTPUT_DIR"
 accelerate launch \
   --config_file configs/accelerate_config_ddp.yaml \
   --num_processes=$NUM_GPUS \
-  src/main.py --config-name=stage_3_finetune hydra.run.dir=$OUTPUT_DIR
+  src/main.py --config-name=stage_3_finetune hydra.run.dir=$OUTPUT_DIR output_dir=$OUTPUT_DIR
