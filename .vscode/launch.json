@@ -1,0 +1,19 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        
+        {
+            "name": "Debug: Stage 4",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal",
+            "env": {
+                "CUDA_VISIBLE_DEVICES": "2",
+                "HF_ENDPOINT": "https://hf-mirror.com"
+            },
+            "args": [],
+            "justMyCode": false
+        },
+    ]
+}

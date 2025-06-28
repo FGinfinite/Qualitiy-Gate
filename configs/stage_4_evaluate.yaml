@@ -1,0 +1,14 @@
+defaults:
+  - _self_
+
+eval:
+  model:
+    pretrained: Qwen/Qwen3-0.6B
+    peft: outputs/2025-06-17/20-56-04/stage_3_finetune
+  tasks:
+    - mmlu
+  batch_size: 4
+  device: "cuda"
+
+output:
+  results_path: ${hydra:run.dir}/evaluation_results.json

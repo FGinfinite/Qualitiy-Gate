@@ -5,7 +5,7 @@
 # Hydra settings
 hydra:
   run:
-    dir: outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}/stage_1_pretrain
+    dir: outputs/stage_1_pretrain/${now:%Y-%m-%d}/${now:%H-%M-%S}
 
 # Model configuration
 selector_model:

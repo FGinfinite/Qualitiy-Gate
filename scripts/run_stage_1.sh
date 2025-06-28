@@ -20,7 +20,7 @@ echo "Found $NUM_GPUS GPUs. Launching training..."
 
 # Generate a unique timestamped directory for the run
 TIMESTAMP=$(date +"%Y-%m-%d/%H-%M-%S")
-OUTPUT_DIR="outputs/$TIMESTAMP/stage_1_pretrain"
+OUTPUT_DIR="outputs/stage_1_pretrain/$TIMESTAMP"
 echo "Output directory: $OUTPUT_DIR"
 
 # Launch the training process using Accelerate.
