@@ -1,5 +1,6 @@
 # @package _global_
 
+stage: pretrain
 # Stage 1: Pre-training Configuration
 
 # Hydra settings
@@ -17,7 +18,7 @@ dataset:
   paths:
     - "teknium/OpenHermes-2.5"
     - "allenai/WildChat-1M"
-  subset_ratio: 0.001
+  subset_ratio: 0.0001
   seed: 42
   max_length: 512
 
@@ -28,3 +29,10 @@ training:
   epochs: 1
   optimizer: "AdamW"
   scheduler: "linear"
+  peft_mode: "lora"
+  lora:
+    r: 8
+    lora_alpha: 32
+    lora_dropout: 0.1
+    target_modules:
+      - "gate"

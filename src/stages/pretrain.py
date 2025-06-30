@@ -2,9 +2,12 @@
 from typing import Dict, Tuple
 
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
 from accelerate import Accelerator
 from datasets import Dataset, concatenate_datasets, load_dataset
 from omegaconf import DictConfig
+from peft import LoraConfig, TaskType, get_peft_model
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
@@ -12,12 +15,46 @@ from transformers import (
     Trainer,
     TrainingArguments,
 )
+from transformers.models.olmoe.modeling_olmoe import OlmoeSparseMoeBlock
+
+from src.modeling import replace_moe_layers_with_trashcan
+
+
+# ---------------------------------------------------------------------------
+# 模型修改和 PEFT 配置的辅助函数
+# ---------------------------------------------------------------------------
+
+
+def get_peft_config(cfg: DictConfig) -> LoraConfig:
+    """
+    根据配置生成 PEFT LoRA 配置。
+    """
+    if cfg.training.peft_mode != "lora":
+        raise ValueError(
+            f"无效的 peft_mode: {cfg.training.peft_mode}。此函数仅为 'lora' 设计。"
+        )
+
+    # 从配置中提取 LoRA 参数
+    lora_config = cfg.training.lora
+    return LoraConfig(
+        task_type=TaskType.CAUSAL_LM,
+        inference_mode=False,
+        r=lora_config.r,
+        lora_alpha=lora_config.lora_alpha,
+        lora_dropout=lora_config.lora_dropout,
+        target_modules=list(lora_config.target_modules),
+    )
+
+
+# ---------------------------------------------------------------------------
+# 核心数据加载和模型初始化（基本不变）
+# ---------------------------------------------------------------------------
 
 
 def get_model_and_tokenizer(
     model_name: str,
 ) -> Tuple[AutoModelForCausalLM, AutoTokenizer]:
-    """Loads the model and tokenizer from Hugging Face with memory optimization."""
+    """从 Hugging Face 加载模型和分词器，并进行内存优化。"""
     model_kwargs = {
         "low_cpu_mem_usage": True,
         "torch_dtype": torch.bfloat16,
@@ -29,66 +66,32 @@ def get_model_and_tokenizer(
     return model, tokenizer
 
 
-def freeze_non_router_weights(model: AutoModelForCausalLM) -> None:
-    """Freezes all weights except for the router/gate layers."""
-    for name, param in model.named_parameters():
-        if "router" in name or "gate" in name:
-            param.requires_grad = True
-        else:
-            param.requires_grad = False
-    print("Froze non-router weights. Training only router/gate layers.")
-
-
 def load_and_prepare_dataset(cfg: DictConfig) -> Dataset:
-    """Loads, prepares, and combines datasets from Hugging Face Hub."""
-    # Load and concatenate datasets from the provided paths
+    """从 Hugging Face Hub 加载、准备和合并数据集。"""
     all_datasets = [load_dataset(path, split="train") for path in cfg.dataset.paths]
     dataset = concatenate_datasets(all_datasets)
-    print(
-        f"Loaded and concatenated datasets {cfg.dataset.paths} "
-        f"with {len(dataset)} total samples."
-    )
-
-    # Shuffle the dataset
+    print(f"已加载并合并数据集 {cfg.dataset.paths} 总共有 {len(dataset)} 个样本。")
     dataset = dataset.shuffle(seed=cfg.dataset.seed)
-
-    # Select a subset based on the ratio
     subset_size = int(len(dataset) * cfg.dataset.subset_ratio)
     dataset = dataset.select(range(subset_size))
     print(
-        f"Selected a subset of {len(dataset)} samples "
-        f"({cfg.dataset.subset_ratio * 100:.2f}% of the total)."
+        f"已选择 {len(dataset)} 个样本的子集 "
+        f"({cfg.dataset.subset_ratio * 100:.2f}% 的总量)。"
     )
-
     return dataset
 
 
 def tokenize_function(example: Dict, tokenizer: AutoTokenizer) -> Dict:
-    """
-    Tokenizes a single example from the dataset.
-    Handles different conversation formats ('conversations' vs. 'conversation')
-    and cases where conversation data might be missing or None.
-    """
+    """对数据集中的单个样本进行分词。"""
     text_parts = []
-    # Use .get() to safely access keys that might not exist and handle None values
     conversation_data = example.get("conversations") or example.get("conversation")
-
     if conversation_data:
         for turn in conversation_data:
             if isinstance(turn, dict):
-                # Handle teknium/OpenHermes-2.5 format
-                if "from" in turn and "value" in turn:
-                    role = turn.get("from", "unknown")
-                    content = turn.get("value", "")
-                    text_parts.append(f"{role}: {content}")
-                # Handle allenai/WildChat-1M format
-                elif "role" in turn and "content" in turn:
-                    role = turn.get("role", "unknown")
-                    content = turn.get("content", "")
-                    text_parts.append(f"{role}: {content}")
-
+                role = turn.get("from") or turn.get("role", "unknown")
+                content = turn.get("value") or turn.get("content", "")
+                text_parts.append(f"{role}: {content}")
     formatted_text = "\n".join(text_parts)
-
     return tokenizer(
         formatted_text,
         truncation=True,
@@ -97,35 +100,41 @@ def tokenize_function(example: Dict, tokenizer: AutoTokenizer) -> Dict:
     )
 
 
+# ---------------------------------------------------------------------------
+# 主要预训练阶段
+# ---------------------------------------------------------------------------
+
+
 def pretrain(cfg: DictConfig) -> None:
     """
-    Pre-trains the selector model using the Hugging Face Trainer API,
-    fully compatible with Accelerate and FSDP.
+    通过将标准 MoE 层替换为自定义的 'TrashCanMoE' 层，并使用 PEFT 进行微调，
+    对 MoE 模型执行高级预训练。
     """
-    print(
-        "--- Starting Stage 1: Selector Model Pre-training (Trainer with Accelerate) ---"
-    )
+    print("--- 开始阶段 1：高级 MoE 预训练 ---")
 
-    # Initialize Accelerator. The Trainer will automatically use this instance.
     accelerator = Accelerator()
 
-    # Model and Tokenizer
+    # 1. 加载模型和分词器
     model, tokenizer = get_model_and_tokenizer(cfg.selector_model.name)
 
-    # The following block is specific to FSDP and should not be run in DDP mode.
-    # It's commented out to prevent errors when not using FSDP.
-    # if accelerator.state.fsdp_plugin is not None:
-    #     accelerator.state.fsdp_plugin.model_init_kwargs = {"config": model.config}
+    # 2. 将原始 MoE 层替换为我们的自定义 TrashCanMoE 层
+    print("正在将 MoE 层替换为 TrashCanMoE...")
+    replace_moe_layers_with_trashcan(model, model.config)
+    print("MoE 层替换完成。")
 
-    # Disable `use_cache` to be compatible with gradient checkpointing enabled in FSDP.
+    # 3. 配置 PEFT 进行微调
+    # 这取代了旧的 `freeze_non_router_weights` 函数。
+    print(f"正在为 '{cfg.training.peft_mode}' 模式配置 PEFT...")
+    peft_config = get_peft_config(cfg)
+    model = get_peft_model(model, peft_config)
+    print("PEFT 模型已创建。可训练参数：")
+    model.print_trainable_parameters()
+
+    # 确保 `use_cache` 已禁用以保证训练兼容性
     model.config.use_cache = False
 
-    # Freeze weights before passing the model to the Trainer
-    freeze_non_router_weights(model)
-
-    # Dataset and Data Collator
+    # 4. 加载并准备数据集
     dataset = load_and_prepare_dataset(cfg)
-    # Determine original columns to remove after tokenization
     original_columns = dataset.column_names
     tokenized_dataset = dataset.map(
         tokenize_function,
@@ -134,10 +143,7 @@ def pretrain(cfg: DictConfig) -> None:
     )
     data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
 
-    # Training Arguments
-    # These arguments are passed to the Trainer. Note that the Trainer will
-    # automatically detect the Accelerate environment and configure itself for
-    # distributed training (including FSDP).
+    # 5. 配置训练参数
     training_args = TrainingArguments(
         output_dir=cfg.output_dir,
         num_train_epochs=cfg.training.epochs,
@@ -146,13 +152,10 @@ def pretrain(cfg: DictConfig) -> None:
         logging_dir=f"{cfg.output_dir}/logs",
         logging_steps=10,
         save_strategy="epoch",
-        # When using DDP, we don't need to worry about the FSDP-specific
-        # activation checkpointing conflicts. The `use_cache=False` setting is
-        # generally good practice when gradient checkpointing is used, so we keep it.
-        report_to="none",  # Disable wandb/tensorboard reporting
+        report_to="none",
     )
 
-    # Initialize Trainer
+    # 6. 初始化并运行训练器
     trainer = Trainer(
         model=model,
         args=training_args,
@@ -160,22 +163,20 @@ def pretrain(cfg: DictConfig) -> None:
         data_collator=data_collator,
     )
 
-    # Start training
-    print("Starting training with Hugging Face Trainer...")
+    print("正在使用 Hugging Face Trainer 开始训练...")
     trainer.train()
+    print("训练完成。")
 
-    # Wait for all processes to finish before exiting
+    # 7. 保存最终模型
     accelerator.wait_for_everyone()
-
-    # Explicitly save the final model in a format that's easy to load for inference
     if accelerator.is_main_process:
-        print(f"Saving final model to {cfg.output_dir}")
-        # This saves the consolidated model, making it easy to load with from_pretrained
+        print(f"正在将最终的 PEFT 适配模型保存到 {cfg.output_dir}")
         trainer.save_model(cfg.output_dir)
 
-    print("\n--- Stage 1: Pre-training Completed ---")
+    print("\n--- 阶段 1：预训练完成 ---")
 
 
 if __name__ == "__main__":
-    # This part is for standalone execution.
+    # 这部分用于独立执行。
+    # 这里需要一个完整的配置对象。
     pass

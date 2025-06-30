@@ -19,7 +19,7 @@ def main(cfg: DictConfig) -> None:
     Selects and runs the appropriate stage based on the configuration.
     """
     if cfg.stage == "pretrain":
-        pretrain.train(cfg)
+        pretrain(cfg)
     elif cfg.stage == "selection":
         selection.select(cfg)
     elif cfg.stage == "finetune":

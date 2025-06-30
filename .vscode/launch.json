@@ -15,5 +15,21 @@
             "args": [],
             "justMyCode": false
         },
+        {
+            "name": "Checkpoint",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal",
+            "env": {
+                "CUDA_VISIBLE_DEVICES": "2",
+                "HF_ENDPOINT": "https://hf-mirror.com"
+            },
+            "args": [
+                "--checkpoint_path",
+                "outputs/stage_1_pretrain/2025-06-30/23-58-02/checkpoint-46"
+            ],
+            "justMyCode": false
+        },
     ]
 }
