@@ -2,8 +2,6 @@
 from typing import Dict, Tuple
 
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
 from accelerate import Accelerator
 from datasets import Dataset, concatenate_datasets, load_dataset
 from omegaconf import DictConfig
@@ -11,15 +9,12 @@ from peft import LoraConfig, TaskType, get_peft_model
 from transformers import (
     AutoTokenizer,
     DataCollatorForLanguageModeling,
+    OlmoeForCausalLM,
     Trainer,
     TrainingArguments,
 )
-from transformers.models.olmoe.modeling_olmoe import OlmoeSparseMoeBlock
-
-from transformers import OlmoeForCausalLM
 
 from src.modeling import TrashCanMoEForCausalLM, replace_moe_layers_with_trashcan
-
 
 # ---------------------------------------------------------------------------
 # 模型修改和 PEFT 配置的辅助函数
@@ -68,7 +63,7 @@ def get_model_and_tokenizer(
     )
 
     # 2. 将模型中的 MoE 层替换为我们的 TrashCanMoE 层
-    replace_moe_layers_with_trashcan(base_model, base_model.config)
+    replace_moe_layers_with_trashcan(base_model, base_model.config, cfg)
 
     # 3. 将修改过的模型包装到 TrashCanMoEForCausalLM 中
     # 这个包装器包含了我们自定义的、基于挂钩的 forward 方法
@@ -77,7 +72,7 @@ def get_model_and_tokenizer(
         "trash_can_loss_beta": cfg.training.trash_can_loss_beta,
     }
     final_model = TrashCanMoEForCausalLM(base_model.config, **loss_params)
-    
+
     # 手动将修改过的模型组件（model 和 lm_head）赋给我们的包装器
     final_model.model = base_model.model
     final_model.lm_head = base_model.lm_head
@@ -86,7 +81,7 @@ def get_model_and_tokenizer(
     tokenizer = AutoTokenizer.from_pretrained(cfg.selector_model.name)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-        
+
     return final_model, tokenizer
 
 
@@ -105,7 +100,7 @@ def load_and_prepare_dataset(cfg: DictConfig) -> Dataset:
     return dataset
 
 
-def tokenize_function(example: Dict, tokenizer: AutoTokenizer) -> Dict:
+def tokenize_function(example: Dict, tokenizer: AutoTokenizer, cfg: DictConfig) -> Dict:
     """对数据集中的单个样本进行分词。"""
     text_parts = []
     conversation_data = example.get("conversations") or example.get("conversation")
@@ -120,7 +115,7 @@ def tokenize_function(example: Dict, tokenizer: AutoTokenizer) -> Dict:
         formatted_text,
         truncation=True,
         padding="max_length",
-        max_length=512,
+        max_length=cfg.dataset.max_sequence_length,
     )
 
 
@@ -160,7 +155,7 @@ def pretrain(cfg: DictConfig) -> None:
     original_columns = dataset.column_names
     tokenized_dataset = dataset.map(
         tokenize_function,
-        fn_kwargs={"tokenizer": tokenizer},
+        fn_kwargs={"tokenizer": tokenizer, "cfg": cfg},
         remove_columns=original_columns,
     )
     data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
@@ -186,7 +181,14 @@ def pretrain(cfg: DictConfig) -> None:
     )
 
     print("正在使用 Hugging Face Trainer 开始训练...")
-    trainer.train()
+    # 使用 try...finally 确保无论训练成功与否，钩子都能被正确移除
+    try:
+        # 在训练前激活前向挂钩
+        model.activate_hooks()
+        trainer.train()
+    finally:
+        # 训练结束后停用挂钩
+        model.deactivate_hooks()
     print("训练完成。")
 
     # 7. 保存最终模型

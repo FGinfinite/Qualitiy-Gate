@@ -20,7 +20,7 @@ dataset:
     - "allenai/WildChat-1M"
   subset_ratio: 0.0001
   seed: 42
-  max_length: 512
+  max_sequence_length: 512
 
 # Training configuration
 training:
@@ -29,8 +29,10 @@ training:
   epochs: 1
   optimizer: "AdamW"
   scheduler: "linear"
-  constraint_loss_weight: 0.1
+  constraint_loss_weight: 0.2
   trash_can_loss_beta: 5.0
+  trash_can_init_mean: 0.0
+  trash_can_init_std: 0.02
   peft_mode: "lora"
   lora:
     r: 8

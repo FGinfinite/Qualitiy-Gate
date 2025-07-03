@@ -22,13 +22,19 @@ class TrashCanMoE(OlmoeSparseMoeBlock):
     这些专家不执行任何计算并返回零，作为路由器的负向激励。
     """
 
-    def __init__(self, config, original_moe: OlmoeSparseMoeBlock):
+    def __init__(
+        self,
+        config,
+        original_moe: OlmoeSparseMoeBlock,
+        training_cfg: DictConfig,
+    ):
         """
         初始化 TrashCanMoE 模块。
 
         Args:
             config: 模型配置。
             original_moe: 需要被替换的原始 OlmoeSparseMoeBlock 实例。
+            training_cfg (DictConfig): 包含垃圾桶专家初始化参数的训练配置。
         """
         # 因为我们重写了 __init__，所以需要首先调用 nn.Module 的 init 方法
         nn.Module.__init__(self)
@@ -60,8 +66,8 @@ class TrashCanMoE(OlmoeSparseMoeBlock):
         # 这些权重将指导路由器何时丢弃一个令牌。
         nn.init.normal_(
             self.gate.weight.data[self.original_num_experts :, :],
-            mean=0.0,
-            std=config.initializer_range,
+            mean=training_cfg.training.trash_can_init_mean,
+            std=training_cfg.training.trash_can_init_std,
         )
         # 确保新初始化的权重也具有正确的 dtype
         self.gate.to(original_moe.gate.weight.dtype)
@@ -159,6 +165,29 @@ class TrashCanMoEForCausalLM(OlmoeForCausalLM):
         self.trash_can_loss_beta = trash_can_loss_beta
         # Beta 分布的 alpha 参数固定为 1
         self.trash_can_loss_alpha = 1.0
+        self._hook_handles = []
+        self._router_logits_list = []
+
+    def _get_router_logits_hook(self, module, input, output):
+        """一个内部挂钩函数，用于捕获并存储 router_logits。"""
+        # output 是一个元组 (final_hidden_states, router_logits)
+        self._router_logits_list.append(output[1])
+
+    def activate_hooks(self):
+        """清空现有句柄和 logits，并为所有 MoE 层注册新的前向挂钩。"""
+        # 首先确保之前的句柄已被移除且列表为空
+        self.deactivate_hooks()
+        self._router_logits_list = []
+
+        for layer in self.model.layers:
+            handle = layer.mlp.register_forward_hook(self._get_router_logits_hook)
+            self._hook_handles.append(handle)
+
+    def deactivate_hooks(self):
+        """移除所有已注册的挂钩并清空句柄列表。"""
+        for handle in self._hook_handles:
+            handle.remove()
+        self._hook_handles = []
 
     def forward(
         self,
@@ -169,22 +198,13 @@ class TrashCanMoEForCausalLM(OlmoeForCausalLM):
     ) -> CausalLMOutputWithPast:
         """
         模型的前向传播，增加了约束损失的计算。
-        这个实现使用前向挂钩来捕获 router_logits，从而避免了修改底层模型类。
+        这个重构后的版本依赖于外部管理的挂钩。
         """
-        # 1. 设置前向挂钩以捕获 router_logits
-        router_logits_list = []
-        handles = []
+        # 在每次前向传播开始时，清空 router_logits_list
+        self._router_logits_list = []
 
-        def get_router_logits_hook(module, input, output):
-            # output 是一个元组 (final_hidden_states, router_logits)
-            router_logits_list.append(output[1])
-
-        for layer in self.model.layers:
-            # 在每个 MoE 块 (即 mlp) 上注册挂钩
-            handle = layer.mlp.register_forward_hook(get_router_logits_hook)
-            handles.append(handle)
-
-        # 2. 执行标准的父类前向传播
+        # 1. 执行标准的父类前向传播
+        # 假设 `activate_hooks` 已经在外部被调用
         outputs = super().forward(
             input_ids=input_ids,
             attention_mask=attention_mask,
@@ -192,19 +212,15 @@ class TrashCanMoEForCausalLM(OlmoeForCausalLM):
             **kwargs,
         )
 
-        # 3. 立即移除挂钩以避免副作用
-        for handle in handles:
-            handle.remove()
-
-        # 4. 如果计算了 Causal LM 损失，则计算并添加约束损失
+        # 2. 如果计算了 Causal LM 损失，则计算并添加约束损失
         if (
             outputs.loss is not None
             and self.constraint_loss_weight > 0
-            and router_logits_list
+            and self._router_logits_list
         ):
             constraint_loss = torch.tensor(0.0, device=outputs.logits.device)
 
-            for router_logits in router_logits_list:
+            for router_logits in self._router_logits_list:
                 # router_logits: (batch_size * sequence_length, num_experts)
 
                 # 计算流向垃圾桶专家的概率总和
@@ -239,10 +255,10 @@ class TrashCanMoEForCausalLM(OlmoeForCausalLM):
                 constraint_loss += layer_constraint_loss
 
             # 对所有层的约束损失求平均
-            if router_logits_list:
-                constraint_loss /= len(router_logits_list)
+            if self._router_logits_list:
+                constraint_loss /= len(self._router_logits_list)
 
-            # 5. 将约束损失添加到总损失中
+            # 3. 将约束损失添加到总损失中
             outputs.loss += self.constraint_loss_weight * constraint_loss
 
         return outputs
@@ -253,19 +269,22 @@ class TrashCanMoEForCausalLM(OlmoeForCausalLM):
 # ---------------------------------------------------------------------------
 
 
-def replace_moe_layers_with_trashcan(model: nn.Module, config: DictConfig):
+def replace_moe_layers_with_trashcan(
+    model: nn.Module, config: DictConfig, training_cfg: DictConfig
+):
     """
     递归地遍历模型，将所有 OlmoeSparseMoeBlock 实例替换为 TrashCanMoE 实例。
 
     Args:
         model (nn.Module): 要修改的模型。
         config (DictConfig): 模型配置。
+        training_cfg (DictConfig): 包含垃圾桶专家初始化参数的训练配置。
     """
     for name, module in model.named_children():
         if isinstance(module, OlmoeSparseMoeBlock):
             # 创建一个新的 TrashCanMoE 实例来替换原始的 MoE 块
-            new_moe = TrashCanMoE(config, module)
+            new_moe = TrashCanMoE(config, module, training_cfg)
             setattr(model, name, new_moe)
         elif len(list(module.children())) > 0:
             # 递归到子模块中
-            replace_moe_layers_with_trashcan(module, config)
+            replace_moe_layers_with_trashcan(module, config, training_cfg)
