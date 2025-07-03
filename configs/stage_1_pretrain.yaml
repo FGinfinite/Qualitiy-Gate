@@ -29,6 +29,8 @@ training:
   epochs: 1
   optimizer: "AdamW"
   scheduler: "linear"
+  constraint_loss_weight: 0.1
+  trash_can_loss_beta: 5.0
   peft_mode: "lora"
   lora:
     r: 8

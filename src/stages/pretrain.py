@@ -9,7 +9,6 @@ from datasets import Dataset, concatenate_datasets, load_dataset
 from omegaconf import DictConfig
 from peft import LoraConfig, TaskType, get_peft_model
 from transformers import (
-    AutoModelForCausalLM,
     AutoTokenizer,
     DataCollatorForLanguageModeling,
     Trainer,
@@ -17,7 +16,9 @@ from transformers import (
 )
 from transformers.models.olmoe.modeling_olmoe import OlmoeSparseMoeBlock
 
-from src.modeling import replace_moe_layers_with_trashcan
+from transformers import OlmoeForCausalLM
+
+from src.modeling import TrashCanMoEForCausalLM, replace_moe_layers_with_trashcan
 
 
 # ---------------------------------------------------------------------------
@@ -47,23 +48,46 @@ def get_peft_config(cfg: DictConfig) -> LoraConfig:
 
 
 # ---------------------------------------------------------------------------
-# 核心数据加载和模型初始化（基本不变）
+# 核心数据加载和模型初始化（重构后）
 # ---------------------------------------------------------------------------
 
 
 def get_model_and_tokenizer(
-    model_name: str,
-) -> Tuple[AutoModelForCausalLM, AutoTokenizer]:
-    """从 Hugging Face 加载模型和分词器，并进行内存优化。"""
+    cfg: DictConfig,
+) -> Tuple[TrashCanMoEForCausalLM, AutoTokenizer]:
+    """
+    遵循“先加载标准模型，后修改”的原则，加载并准备模型和分词器。
+    """
+    # 1. 加载一个标准的、未经修改的 OlmoeForCausalLM 模型
     model_kwargs = {
         "low_cpu_mem_usage": True,
         "torch_dtype": torch.bfloat16,
     }
-    model = AutoModelForCausalLM.from_pretrained(model_name, **model_kwargs)
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    base_model = OlmoeForCausalLM.from_pretrained(
+        cfg.selector_model.name, **model_kwargs
+    )
+
+    # 2. 将模型中的 MoE 层替换为我们的 TrashCanMoE 层
+    replace_moe_layers_with_trashcan(base_model, base_model.config)
+
+    # 3. 将修改过的模型包装到 TrashCanMoEForCausalLM 中
+    # 这个包装器包含了我们自定义的、基于挂钩的 forward 方法
+    loss_params = {
+        "constraint_loss_weight": cfg.training.constraint_loss_weight,
+        "trash_can_loss_beta": cfg.training.trash_can_loss_beta,
+    }
+    final_model = TrashCanMoEForCausalLM(base_model.config, **loss_params)
+    
+    # 手动将修改过的模型组件（model 和 lm_head）赋给我们的包装器
+    final_model.model = base_model.model
+    final_model.lm_head = base_model.lm_head
+
+    # 加载分词器
+    tokenizer = AutoTokenizer.from_pretrained(cfg.selector_model.name)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-    return model, tokenizer
+        
+    return final_model, tokenizer
 
 
 def load_and_prepare_dataset(cfg: DictConfig) -> Dataset:
@@ -114,15 +138,13 @@ def pretrain(cfg: DictConfig) -> None:
 
     accelerator = Accelerator()
 
-    # 1. 加载模型和分词器
-    model, tokenizer = get_model_and_tokenizer(cfg.selector_model.name)
+    # 1. 加载自定义模型和分词器
+    # get_model_and_tokenizer 现在处理了所有复杂的设置
+    print("正在加载和配置 MoE 模型...")
+    model, tokenizer = get_model_and_tokenizer(cfg)
+    print("模型加载和修改完成。")
 
-    # 2. 将原始 MoE 层替换为我们的自定义 TrashCanMoE 层
-    print("正在将 MoE 层替换为 TrashCanMoE...")
-    replace_moe_layers_with_trashcan(model, model.config)
-    print("MoE 层替换完成。")
-
-    # 3. 配置 PEFT 进行微调
+    # 2. 配置 PEFT 进行微调
     # 这取代了旧的 `freeze_non_router_weights` 函数。
     print(f"正在为 '{cfg.training.peft_mode}' 模式配置 PEFT...")
     peft_config = get_peft_config(cfg)
