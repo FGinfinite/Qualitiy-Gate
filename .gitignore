@@ -13,3 +13,6 @@ wheels/
 outputs/
 
 uv.lock
+
+*.out
+
