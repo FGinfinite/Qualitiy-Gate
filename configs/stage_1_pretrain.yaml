@@ -29,7 +29,7 @@ training:
   epochs: 4
   optimizer: "AdamW"
   scheduler: "linear"
-  constraint_loss_weight: 0.2
+  constraint_loss_weight: 0.5
   trash_can_loss_beta: 5.0
   trash_can_init_mean: 0.0
   trash_can_init_std: 0.02
