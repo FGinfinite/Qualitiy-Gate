@@ -16,3 +16,4 @@ uv.lock
 
 *.out
 
+out/

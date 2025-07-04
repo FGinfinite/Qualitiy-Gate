@@ -18,15 +18,15 @@ dataset:
   paths:
     - "teknium/OpenHermes-2.5"
     - "allenai/WildChat-1M"
-  subset_ratio: 0.0001
+  subset_ratio: 0.01
   seed: 42
   max_sequence_length: 512
 
 # Training configuration
 training:
-  batch_size: 4
+  batch_size: 2
   learning_rate: 1e-4
-  epochs: 1
+  epochs: 4
   optimizer: "AdamW"
   scheduler: "linear"
   constraint_loss_weight: 0.2
@@ -36,7 +36,7 @@ training:
   peft_mode: "lora"
   lora:
     r: 8
-    lora_alpha: 32
+    lora_alpha: 16
     lora_dropout: 0.1
     target_modules:
       - "gate"
