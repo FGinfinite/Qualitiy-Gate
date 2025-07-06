@@ -15,6 +15,7 @@ from transformers import (
 )
 
 from src.modeling import TrashCanMoEForCausalLM, replace_moe_layers_with_trashcan
+from utils.tools import grab_gpu
 
 # ---------------------------------------------------------------------------
 # 模型修改和 PEFT 配置的辅助函数
@@ -129,11 +130,21 @@ def pretrain(cfg: DictConfig) -> None:
     通过将标准 MoE 层替换为自定义的 'TrashCanMoE' 层，并使用 PEFT 进行微调，
     对 MoE 模型执行高级预训练。
     """
+
     print("--- 开始阶段 1：高级 MoE 预训练 ---")
 
     accelerator = Accelerator()
+    if cfg.training.gpu_grab.grab:
+        # 1. 抢占GPU并持有占位符
+        print("--- 正在抢占GPU显存 ---")
+        placeholders = grab_gpu(
+            memory_need=cfg.training.gpu_grab.memory_need_gb,
+            accelerator=accelerator,
+            over_grab=cfg.training.gpu_grab.over_grab,
+        )
+        print("--- GPU显存抢占完成 ---")
 
-    # 1. 加载自定义模型和分词器
+    # 2. 加载自定义模型和分词器
     # get_model_and_tokenizer 现在处理了所有复杂的设置
     print("正在加载和配置 MoE 模型...")
     model, tokenizer = get_model_and_tokenizer(cfg)
@@ -155,6 +166,7 @@ def pretrain(cfg: DictConfig) -> None:
     original_columns = dataset.column_names
     tokenized_dataset = dataset.map(
         tokenize_function,
+        batched=True,
         fn_kwargs={"tokenizer": tokenizer, "cfg": cfg},
         remove_columns=original_columns,
     )
@@ -173,6 +185,17 @@ def pretrain(cfg: DictConfig) -> None:
     )
 
     # 6. 初始化并运行训练器
+    # 在初始化Trainer之前，释放占位符以提供干净的显存
+    if accelerator.is_main_process:
+        print("正在释放GPU占位符以准备训练...")
+        
+    if cfg.training.gpu_grab.grab:
+        del placeholders
+    torch.cuda.empty_cache()
+    
+    if accelerator.is_main_process:
+        print("占位符已释放。")
+
     trainer = Trainer(
         model=model,
         args=training_args,

@@ -18,15 +18,16 @@ fi
 
 echo "Found $NUM_GPUS GPUs. Launching training..."
 
-# Generate a unique timestamped directory for the run
-TIMESTAMP=$(date +"%Y-%m-%d/%H-%M-%S")
-OUTPUT_DIR="outputs/stage_1_pretrain/$TIMESTAMP"
-echo "Output directory: $OUTPUT_DIR"
+# Generate a random port number between 20000 and 29999
+MAIN_PORT=$((RANDOM % 100 + 29500))
+echo "Using port $MAIN_PORT for the main process."
 
 # Launch the training process using Accelerate.
 # The --num_processes argument is now set dynamically based on CUDA_VISIBLE_DEVICES.
-# We override hydra.run.dir to ensure all processes use the same output directory.
+# All arguments passed to this script ("$@") are forwarded to the python script,
+# allowing for hydra multirun capabilities.
 accelerate launch \
   --config_file configs/accelerate_config_ddp.yaml \
   --num_processes=$NUM_GPUS \
-  src/main.py --config-name=stage_1_pretrain hydra.run.dir=$OUTPUT_DIR
+  --main_process_port=$MAIN_PORT \
+  src/main.py --config-name=stage_1_pretrain "$@"

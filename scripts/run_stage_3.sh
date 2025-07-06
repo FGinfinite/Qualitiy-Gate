@@ -18,6 +18,10 @@ fi
 
 echo "Found $NUM_GPUS GPUs. Launching training..."
 
+# Generate a random port between 20000 and 29999
+MAIN_PORT=$((RANDOM % 100 + 29500))
+echo "Using port $MAIN_PORT"
+
 # Generate a unique timestamped directory for the run
 TIMESTAMP=$(date +"%Y-%m-%d/%H-%M-%S")
 OUTPUT_DIR="outputs/$TIMESTAMP/stage_3_finetune"
@@ -29,4 +33,5 @@ echo "Output directory: $OUTPUT_DIR"
 accelerate launch \
   --config_file configs/accelerate_config_ddp.yaml \
   --num_processes=$NUM_GPUS \
+  --main_process_port=$MAIN_PORT \
   src/main.py --config-name=stage_3_finetune hydra.run.dir=$OUTPUT_DIR output_dir=$OUTPUT_DIR

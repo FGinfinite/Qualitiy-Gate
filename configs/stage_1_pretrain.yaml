@@ -3,10 +3,22 @@
 stage: pretrain
 # Stage 1: Pre-training Configuration
 
-# Hydra settings
+# Hydra Configuration
 hydra:
   run:
     dir: outputs/stage_1_pretrain/${now:%Y-%m-%d}/${now:%H-%M-%S}
+  sweep:
+    dir: outputs/stage_1_pretrain
+    subdir: ${now:%Y-%m-%d}/${now:%H-%M-%S}-${hydra.job.override_dirname}
+  job:
+    config:
+      override_dirname:
+        kv_sep: "="
+        item_sep: ","
+        exclude_keys:
+          - hydra.run.dir
+          - hydra.sweep.dir
+          - hydra.sweep.subdir
 
 # Model configuration
 selector_model:
@@ -40,3 +52,8 @@ training:
     lora_dropout: 0.1
     target_modules:
       - "gate"
+  gpu_grab:
+    grab: false
+    memory_need_gb: 21
+    over_grab: false
+
