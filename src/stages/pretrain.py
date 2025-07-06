@@ -166,7 +166,7 @@ def pretrain(cfg: DictConfig) -> None:
     original_columns = dataset.column_names
     tokenized_dataset = dataset.map(
         tokenize_function,
-        batched=True,
+        batched=False,
         fn_kwargs={"tokenizer": tokenizer, "cfg": cfg},
         remove_columns=original_columns,
     )
@@ -186,15 +186,12 @@ def pretrain(cfg: DictConfig) -> None:
 
     # 6. 初始化并运行训练器
     # 在初始化Trainer之前，释放占位符以提供干净的显存
-    if accelerator.is_main_process:
-        print("正在释放GPU占位符以准备训练...")
-        
+
     if cfg.training.gpu_grab.grab:
         del placeholders
-    torch.cuda.empty_cache()
-    
-    if accelerator.is_main_process:
-        print("占位符已释放。")
+        torch.cuda.empty_cache()
+        if accelerator.is_main_process:
+            print("已释放GPU占位符以准备训练...")
 
     trainer = Trainer(
         model=model,
