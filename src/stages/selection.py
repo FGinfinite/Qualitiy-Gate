@@ -8,24 +8,44 @@ import hydra
 import torch
 from datasets import concatenate_datasets, load_dataset
 from omegaconf import DictConfig
+from peft import PeftModel
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoTokenizer, OlmoeForCausalLM
+
+from ..modeling import replace_moe_layers_with_trashcan
 
 
 def get_model_and_tokenizer(
-    model_path: str,
-) -> Tuple[AutoModelForCausalLM, AutoTokenizer]:
+    cfg: DictConfig, device: torch.device
+) -> Tuple[OlmoeForCausalLM, AutoTokenizer]:
     """
-    Loads a pre-trained model and its tokenizer from a local checkpoint.
+    Loads a pre-trained model and its tokenizer, adapts it to the TrashCanMoE architecture,
+    and then applies the PEFT adapter for inference.
     """
     model_kwargs = {
         "low_cpu_mem_usage": True,
         "torch_dtype": torch.bfloat16,
-        "device_map": "auto",
     }
-    model = AutoModelForCausalLM.from_pretrained(model_path, **model_kwargs)
-    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    # 步骤 1: 从原始路径加载基础模型
+    base_model_name = cfg.selector_model.name
+    model = OlmoeForCausalLM.from_pretrained(base_model_name, **model_kwargs)
+
+    # 步骤 2: 适配模型架构以匹配训练时的结构
+    replace_moe_layers_with_trashcan(model, model.config, cfg)
+
+    # Manually update the model's config to reflect the new total number of experts
+    original_num_experts = model.config.num_experts
+    num_trash_experts = model.config.num_experts_per_tok
+    model.config.num_experts = original_num_experts + num_trash_experts
+
+    # 步骤 3: 加载 PEFT 适配器并为推理进行合并
+    model = PeftModel.from_pretrained(model, cfg.model_checkpoint_path)
+    model = model.merge_and_unload()
+    model.to(device)
+
+    # 步骤 4: 从基础模型的路径加载分词器
+    tokenizer = AutoTokenizer.from_pretrained(base_model_name)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     model.eval()
@@ -42,32 +62,38 @@ def calculate_quality_score(
     return torch.sum(quality_logits).item()
 
 
-@hydra.main(
-    config_path="../../configs", config_name="stage_2_selection", version_base=None
-)
-def select_data(cfg: DictConfig) -> None:
+def select(cfg: DictConfig) -> None:
     """
     Main function for the data selection stage, managed by Hydra.
     """
     log = logging.getLogger(__name__)
     log.info("--- Starting Stage 2: Data Selection ---")
 
+    # Determine the target device
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    log.info(f"Using device: {device}")
+
     # 1. Load Model and Tokenizer
-    log.info(f"Loading model from checkpoint: {cfg.model_checkpoint_path}")
-    model, tokenizer = get_model_and_tokenizer(cfg.model_checkpoint_path)
-    num_experts = model.config.num_experts
+    log.info(f"Loading and adapting model from checkpoint: {cfg.model_checkpoint_path}")
+    model, tokenizer = get_model_and_tokenizer(cfg, device)
     num_hidden_layers = model.config.num_hidden_layers
 
-    # 2. Define Expert Roles
-    num_trash_experts = int(num_experts * cfg.trash_expert_ratio)
-    quality_expert_indices = list(range(num_trash_experts, num_experts))
-    log.info(f"Total experts: {num_experts}")
+    # 2. Define Expert Roles based on the TrashCanMoE architecture
+    original_num_experts = model.config.num_experts
+    num_trash_experts = (
+        model.config.num_experts_per_tok
+    )  # Trash experts are the k new ones
+    total_experts = original_num_experts + num_trash_experts
+    quality_expert_indices = list(range(original_num_experts))
+
+    log.info(f"Total experts in router: {total_experts}")
     log.info(
-        f"Trash experts: {num_trash_experts} (Indices 0 to {num_trash_experts - 1})"
+        f"Original (quality) experts: {original_num_experts} (Indices 0 to {original_num_experts - 1})"
     )
     log.info(
-        f"Quality experts: {len(quality_expert_indices)} (Indices {num_trash_experts} to {num_experts - 1})"
+        f"Added trash experts: {num_trash_experts} (Indices {original_num_experts} to {total_experts - 1})"
     )
+    trash_expert_indices = list(range(original_num_experts, total_experts))
 
     # 3. Load and Prepare Dataset
     log.info(f"Loading datasets: {cfg.dataset.paths}")
@@ -124,9 +150,7 @@ def select_data(cfg: DictConfig) -> None:
             max_length=512,
         )
         inputs = {
-            k: v.to(model.device)
-            if k != "input_ids"
-            else v.to(model.device, dtype=torch.long)
+            k: v.to(device) if k != "input_ids" else v.to(device, dtype=torch.long)
             for k, v in inputs.items()
         }
 
@@ -143,7 +167,7 @@ def select_data(cfg: DictConfig) -> None:
 
         # Reshape to separate samples before averaging: (num_layers, bs, seq_len, num_experts)
         reshaped_logits_per_layer = all_router_logits.view(
-            num_hidden_layers, batch_size, sequence_length, num_experts
+            num_hidden_layers, batch_size, sequence_length, total_experts
         )
 
         # Average across layers, then across tokens for a robust sample score
@@ -159,8 +183,28 @@ def select_data(cfg: DictConfig) -> None:
             quality_score = calculate_quality_score(
                 batch_logits[j], quality_expert_indices
             )
-            if i == 0 and j < 3:
-                log.info(f"Sample {j} quality score: {quality_score}")
+            if i == 0 and j < 5:
+                log.info(
+                    f"--- Detailed Log for Sample {i * cfg.data_process.batch_size + j} ---"
+                )
+                log.info(f"  - Avg Logits Shape: {batch_logits[j].shape}")
+
+                quality_logits_values = batch_logits[j][quality_expert_indices]
+                log.info(
+                    f"  - Quality Expert Logits (Indices {quality_expert_indices[0]}-{quality_expert_indices[-1]}): {quality_logits_values.tolist()}"
+                )
+
+                trash_logits_values = batch_logits[j][trash_expert_indices]
+                log.info(
+                    f"  - Trash Expert Logits (Indices {trash_expert_indices[0]}-{trash_expert_indices[-1]}): {trash_logits_values.tolist()}"
+                )
+
+                log.info(
+                    f"  - Calculated Quality Score (Sum of Quality Logits): {quality_score}"
+                )
+                log.info(
+                    "-" * (20 + len(str(i * cfg.data_process.batch_size + j)))
+                )  # Separator
             scored_data.append(
                 {
                     "source_dataset": list(cfg.dataset.paths),
@@ -187,7 +231,7 @@ def select_data(cfg: DictConfig) -> None:
     # We get the absolute path to avoid any potential issues with relative paths.
     output_path = hydra.utils.to_absolute_path(cfg.output_path)
     log.info(f"Ensuring output directory exists for: {output_path}")
-    
+
     # The directory is automatically created by Hydra, but we ensure it for safety.
     output_dir = os.path.dirname(output_path)
     os.makedirs(output_dir, exist_ok=True)
@@ -198,7 +242,3 @@ def select_data(cfg: DictConfig) -> None:
 
     log.info(f"Filtered data saved to: {output_path}")
     log.info("--- Stage 2: Data Selection Completed ---")
-
-
-if __name__ == "__main__":
-    select_data()

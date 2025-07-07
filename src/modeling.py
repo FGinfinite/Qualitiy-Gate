@@ -1,12 +1,10 @@
 # src/modeling.py
-from typing import Optional, Tuple
+from typing import Tuple
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from omegaconf import DictConfig
-from transformers import OlmoeForCausalLM
-from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers.models.olmoe.modeling_olmoe import (
     OlmoeSparseMoeBlock,
 )

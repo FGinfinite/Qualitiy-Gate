@@ -1,10 +1,8 @@
 #!/bin/bash
+# Description: This script runs the second stage of the project: data selection.
+# Usage: ./scripts/run_stage_2.sh
 
-# This script runs the data selection stage (Stage 2).
-# It uses the Hydra configuration defined in `configs/stage_2_selection.yaml`.
+export CUDA_VISIBLE_DEVICES=7
+export CUDA_LAUNCH_BLOCKING=1
 
-# Ensure the script is run from the project root directory
-cd "$(dirname "$0")/.."
-
-# Run the selection script using Hydra
-uv run python src/stages/selection.py --config-name=stage_2_selection
+uv run src/main.py --config-name=stage_2_selection "$@"
