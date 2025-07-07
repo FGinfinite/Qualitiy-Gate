@@ -2,6 +2,7 @@
 from typing import Dict, Tuple
 
 import torch
+import torch.nn as nn
 from accelerate import Accelerator
 from datasets import Dataset, concatenate_datasets, load_dataset
 from omegaconf import DictConfig
@@ -14,7 +15,8 @@ from transformers import (
     TrainingArguments,
 )
 
-from src.modeling import TrashCanMoEForCausalLM, replace_moe_layers_with_trashcan
+from src.modeling import TrashCanMoE, replace_moe_layers_with_trashcan
+from src.trainer import CustomTrainer
 from utils.tools import grab_gpu
 
 # ---------------------------------------------------------------------------
@@ -25,6 +27,12 @@ from utils.tools import grab_gpu
 def get_peft_config(cfg: DictConfig) -> LoraConfig:
     """
     根据配置生成 PEFT LoRA 配置。
+
+    Args:
+        cfg (DictConfig): 训练配置。
+
+    Returns:
+        LoraConfig: 生成的 LoRA 配置。
     """
     if cfg.training.peft_mode != "lora":
         raise ValueError(
@@ -39,7 +47,8 @@ def get_peft_config(cfg: DictConfig) -> LoraConfig:
         r=lora_config.r,
         lora_alpha=lora_config.lora_alpha,
         lora_dropout=lora_config.lora_dropout,
-        target_modules=list(lora_config.target_modules),
+        target_modules=list(cfg.training.lora.target_modules),
+        modules_to_save=[],
     )
 
 
@@ -50,7 +59,7 @@ def get_peft_config(cfg: DictConfig) -> LoraConfig:
 
 def get_model_and_tokenizer(
     cfg: DictConfig,
-) -> Tuple[TrashCanMoEForCausalLM, AutoTokenizer]:
+) -> Tuple[OlmoeForCausalLM, AutoTokenizer]:
     """
     遵循“先加载标准模型，后修改”的原则，加载并准备模型和分词器。
     """
@@ -59,31 +68,19 @@ def get_model_and_tokenizer(
         "low_cpu_mem_usage": True,
         "torch_dtype": torch.bfloat16,
     }
-    base_model = OlmoeForCausalLM.from_pretrained(
+    model = OlmoeForCausalLM.from_pretrained(
         cfg.selector_model.name, **model_kwargs
     )
 
     # 2. 将模型中的 MoE 层替换为我们的 TrashCanMoE 层
-    replace_moe_layers_with_trashcan(base_model, base_model.config, cfg)
-
-    # 3. 将修改过的模型包装到 TrashCanMoEForCausalLM 中
-    # 这个包装器包含了我们自定义的、基于挂钩的 forward 方法
-    loss_params = {
-        "constraint_loss_weight": cfg.training.constraint_loss_weight,
-        "trash_can_loss_beta": cfg.training.trash_can_loss_beta,
-    }
-    final_model = TrashCanMoEForCausalLM(base_model.config, **loss_params)
-
-    # 手动将修改过的模型组件（model 和 lm_head）赋给我们的包装器
-    final_model.model = base_model.model
-    final_model.lm_head = base_model.lm_head
+    replace_moe_layers_with_trashcan(model, model.config, cfg)
 
     # 加载分词器
     tokenizer = AutoTokenizer.from_pretrained(cfg.selector_model.name)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    return final_model, tokenizer
+    return model, tokenizer
 
 
 def load_and_prepare_dataset(cfg: DictConfig) -> Dataset:
@@ -193,22 +190,22 @@ def pretrain(cfg: DictConfig) -> None:
         if accelerator.is_main_process:
             print("已释放GPU占位符以准备训练...")
 
-    trainer = Trainer(
+    trainer = CustomTrainer(
         model=model,
         args=training_args,
         train_dataset=tokenized_dataset,
         data_collator=data_collator,
+        constraint_loss_weight=cfg.training.constraint_loss_weight,
+        trash_can_loss_beta=cfg.training.trash_can_loss_beta,
     )
 
     print("正在使用 Hugging Face Trainer 开始训练...")
-    # 使用 try...finally 确保无论训练成功与否，钩子都能被正确移除
+    # 使用 try...finally 确保训练过程的稳健性
     try:
-        # 在训练前激活前向挂钩
-        model.activate_hooks()
         trainer.train()
     finally:
-        # 训练结束后停用挂钩
-        model.deactivate_hooks()
+        # 可以在此处添加清理代码（如果需要）
+        pass
     print("训练完成。")
 
     # 7. 保存最终模型

@@ -63,7 +63,7 @@ HF_ENDPOINT=https://hf-mirror.com huggingface-cli download cais/mmlu --repo-type
 
 如果您的环境无法直接访问 Hugging Face Hub，您可能还需要手动修改 `hails/mmlu_no_train` 的数据加载脚本，将其中的下载地址替换为可用的镜像地址。
 
-## 待办事项
+## 进行事项
 
 1.  **新增“垃圾桶专家”及其初始化策略**：目前阶段一仅微调了MoE的路由权重。未来的计划是实现动态增加“垃圾桶专家”的维度。当模型激活Top-K个专家时，将对应新增K个“垃圾桶专家”。这些新专家的权重将通过正态分布（均值为0，方差为0.02）进行初始化，类似于在词表中新增token的做法。
 

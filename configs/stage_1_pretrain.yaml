@@ -30,7 +30,7 @@ dataset:
   paths:
     - "teknium/OpenHermes-2.5"
     - "allenai/WildChat-1M"
-  subset_ratio: 0.01
+  subset_ratio: 0.00005
   seed: 42
   max_sequence_length: 512
 
@@ -54,6 +54,6 @@ training:
       - "gate"
   gpu_grab:
     grab: false
-    memory_need_gb: 21
+    memory_need_gb: 24
     over_grab: false
 
