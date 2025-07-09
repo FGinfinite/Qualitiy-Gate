@@ -22,7 +22,7 @@ hydra:
 
 # Model configuration
 selector_model:
-  name: "allenai/OLMoE-1B-7B-0125"
+  path: "./solidified_model_artifacts/olmoe-trashcan-1b"
 output_dir: ${hydra:run.dir}
 
 # Dataset configuration
@@ -43,8 +43,6 @@ training:
   scheduler: "linear"
   constraint_loss_weight: 0.5
   trash_can_loss_beta: 5.0
-  trash_can_init_mean: 0.0
-  trash_can_init_std: 0.02
   peft_mode: "lora"
   lora:
     r: 8
