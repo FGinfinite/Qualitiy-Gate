@@ -49,6 +49,143 @@
     bash ./scripts/run_stage_4.sh
     ```
 
+## 预训练模型转换工具
+
+本项目提供了将 OLMoE 预训练模型转换为 Select-MoE 格式的完整解决方案，转换后的模型可以通过标准的 HuggingFace API 直接加载使用。
+
+### 🚀 快速开始
+
+#### 1. 转换预训练模型
+
+使用转换脚本将 OLMoE 预训练模型转换为 Select-MoE：
+
+```bash
+# 基本转换（推荐使用 bfloat16）
+python src/scripts/convert_olmoe_to_select_moe.py --device cuda:0 --save-path ./my_select_moe
+
+# 自定义垃圾桶专家参数
+python src/scripts/convert_olmoe_to_select_moe.py \
+    --device cuda:0 \
+    --trash-can-init-std 0.01 \
+    --constraint-loss-weight 0.02
+```
+
+#### 2. 验证转换结果
+
+对比转换前后的模型权重，确保转换正确性：
+
+```bash
+# 使用内存效率模式和 bfloat16（推荐）
+python src/scripts/compare_converted_model.py \
+    --device cuda:0 \
+    --dtype bfloat16 \
+    --memory-efficient
+```
+
+#### 3. 加载和使用转换后的模型
+
+```python
+from src.models.select_moe import SelectMoeForCausalLM, register_select_moe
+
+# 注册 Select-MoE（必须在加载前执行）
+register_select_moe()
+
+# 直接加载转换后的模型
+model = SelectMoeForCausalLM.from_pretrained("./my_select_moe")
+
+# 正常使用，就像其他 HuggingFace 模型一样
+outputs = model(input_ids, output_router_logits=True)
+```
+
+### 📁 转换工具说明
+
+#### `src/scripts/convert_olmoe_to_select_moe.py` - 模型转换脚本
+
+将 OLMoE 预训练模型转换为 Select-MoE 格式并保存。
+
+**主要功能：**
+- 下载并加载 OLMoE 预训练模型
+- 转换为 Select-MoE 架构（添加垃圾桶专家）
+- 保存为标准 HuggingFace 格式
+- 验证转换正确性
+
+**主要参数：**
+```bash
+--model              # 源模型名称 (默认: allenai/OLMoE-1B-7B-0125)
+--save-path          # 保存路径
+--device             # 设备 (cpu, cuda:0, cuda:1, etc.)
+--trash-can-init-std # 垃圾桶专家初始化标准差 (默认: 0.02)
+--constraint-loss-weight # 约束损失权重 (默认: 0.01)
+```
+
+#### `src/scripts/compare_converted_model.py` - 权重对比验证脚本
+
+对比已转换的 Select-MoE 模型与原始 OLMoE 模型的权重。
+
+**主要功能：**
+- 分别加载原始和转换后的模型
+- 详细对比所有权重
+- 验证gate权重的前64维保持不变
+- 分析新增垃圾桶专家的初始化
+- 内存效率模式支持
+
+**推荐用法：**
+```bash
+# 内存效率模式 + bfloat16（解决显存不足问题）
+python src/scripts/compare_converted_model.py \
+    --device cuda:0 \
+    --dtype bfloat16 \
+    --memory-efficient
+```
+
+### 🎯 核心特性
+
+#### Select-MoE 相对于原始 OLMoE 的改进
+
+1. **动态垃圾桶专家**：
+   - 数量等于 top-k 激活数量
+   - 对低质量数据提供负面激励
+
+2. **权重保持**：
+   - 完美保持所有原始预训练权重
+   - gate 权重的前 64 维完全不变
+   - 只有新增的垃圾桶专家维度是新初始化的
+
+3. **自定义约束损失**：
+   - 基于 Beta 分布的约束损失
+   - 鼓励高质量数据使用原始专家
+   - 惩罚低质量数据，引导其使用垃圾桶专家
+
+4. **HuggingFace 兼容**：
+   - 标准的 `from_pretrained()` 加载
+   - 无需手动转换代码
+   - 支持所有 HuggingFace 生态工具
+
+#### 模型结构对比
+
+| 特性 | 原始 OLMoE | Select-MoE |
+|------|------------|------------|
+| 原始专家数 | 64 | 64 (保持不变) |
+| 垃圾桶专家数 | 0 | 8 (= top_k) |
+| Gate 输出维度 | [64, hidden_size] | [72, hidden_size] |
+| 预训练权重 | - | 完全保持 |
+| 数据质量选择 | 无 | 动态路由到垃圾桶 |
+
+### 🔧 训练设置
+
+```python
+# 训练时必须开启 router logits
+outputs = model(
+    input_ids=input_ids,
+    attention_mask=attention_mask,
+    labels=labels,
+    output_router_logits=True  # 重要：训练时必须为True
+)
+
+# 损失已包含所有组件
+total_loss = outputs.loss  # 包含语言建模损失 + 负载均衡损失 + 约束损失
+```
+
 ## 注意事项
 
 ### 评估阶段
@@ -63,16 +200,27 @@ HF_ENDPOINT=https://hf-mirror.com huggingface-cli download cais/mmlu --repo-type
 
 如果您的环境无法直接访问 Hugging Face Hub，您可能还需要手动修改 `hails/mmlu_no_train` 的数据加载脚本，将其中的下载地址替换为可用的镜像地址。
 
+### 内存管理建议
+
+1. **GPU 内存不足**：
+   - 使用 `--memory-efficient` 标志
+   - 选择 `--dtype bfloat16` 或 `float16`
+   - 考虑使用 CPU 模式
+
+2. **大模型处理**：
+   - 确保有足够的磁盘空间保存转换后的模型
+   - 建议至少 15GB GPU 内存用于 OLMoE-1B-7B 模型
+
 ## 进行事项
 
-1.  **新增“垃圾桶专家”及其初始化策略**：目前阶段一仅微调了MoE的路由权重。未来的计划是实现动态增加“垃圾桶专家”的维度。当模型激活Top-K个专家时，将对应新增K个“垃圾桶专家”。这些新专家的权重将通过正态分布（均值为0，方差为0.02）进行初始化，类似于在词表中新增token的做法。
+1.  **新增"垃圾桶专家"及其初始化策略**：目前阶段一仅微调了MoE的路由权重。未来的计划是实现动态增加"垃圾桶专家"的维度。当模型激活Top-K个专家时，将对应新增K个"垃圾桶专家"。这些新专家的权重将通过正态分布（均值为0，方差为0.02）进行初始化，类似于在词表中新增token的做法。
 
-2.  **“垃圾桶”专家的行为特点**：“垃圾桶”专家在模型前向传播时不进行实际的复杂计算，而是直接输出一个符合维度形状的全零向量。这样设计的目的是为了在模型输出中引入一种“负向激励”，从而训练路由权重学会识别并避免将有价值的数据分配给这些无效的“垃圾桶”专家。
+2.  **"垃圾桶"专家的行为特点**："垃圾桶"专家在模型前向传播时不进行实际的复杂计算，而是直接输出一个符合维度形状的全零向量。这样设计的目的是为了在模型输出中引入一种"负向激励"，从而训练路由权重学会识别并避免将有价值的数据分配给这些无效的"垃圾桶"专家。
 
 
 ## Custom Constraint Loss Design
 
-为了引导Router（路由器）学习区分高质量和低质量数据，我们引入了一种特殊的约束损失函数。该损失函数的核心思想是：对于一个给定的输入，我们期望Router的Top-K专家选择概率之和（`ratio`）接近于1，而“垃圾桶”专家的选择概率之和（`1 - ratio`）接近于0。
+为了引导Router（路由器）学习区分高质量和低质量数据，我们引入了一种特殊的约束损失函数。该损失函数的核心思想是：对于一个给定的输入，我们期望Router的Top-K专家选择概率之和（`ratio`）接近于1，而"垃圾桶"专家的选择概率之和（`1 - ratio`）接近于0。
 
 这种机制通过一个定制的损失函数来实现，该函数受到Beta分布的启发，旨在将 `ratio` 值推向1。
 
@@ -80,12 +228,12 @@ HF_ENDPOINT=https://hf-mirror.com huggingface-cli download cais/mmlu --repo-type
 
 约束损失的设计主要由以下两个超参数控制：
 
-*   `constraint_loss_weight` (`w_constraint`): 这个参数是约束损失在总损失中的权重。它决定了我们对“数据质量筛选”任务的重视程度。
+*   `constraint_loss_weight` (`w_constraint`): 这个参数是约束损失在总损失中的权重。它决定了我们对"数据质量筛选"任务的重视程度。
     *   **作用**: 调整 `w_constraint` 可以平衡模型的两个目标：一是标准的交叉熵损失（`L_ce`），关注于预测下一个词的准确性；二是我们定义的约束损失（`L_constraint`），关注于路由的正确性。
-    *   **直观理解**: `w_constraint` 越高，模型就越倾向于将数据清晰地分类到“好”或“坏”的类别中，即使这可能轻微影响其语言建模的性能。
+    *   **直观理解**: `w_constraint` 越高，模型就越倾向于将数据清晰地分类到"好"或"坏"的类别中，即使这可能轻微影响其语言建模的性能。
 
-*   `trash_can_loss_beta` (`β`): 这个参数控制约束损失函数对于“垃圾桶”专家激活的惩罚力度。
-    *   **作用**: `β` 值决定了损失函数在 `ratio` 接近0（即“垃圾桶”专家被激活）时的梯度大小。一个较大的 `β` 值意味着对选择“垃圾桶”专家的行为施加更强的惩罚。
+*   `trash_can_loss_beta` (`β`): 这个参数控制约束损失函数对于"垃圾桶"专家激活的惩罚力度。
+    *   **作用**: `β` 值决定了损失函数在 `ratio` 接近0（即"垃圾桶"专家被激活）时的梯度大小。一个较大的 `β` 值意味着对选择"垃圾桶"专家的行为施加更强的惩罚。
     *   **直观理解**: 如果将 `ratio` 想象成一个滑块，`β` 就是一个弹簧，当滑块试图滑向0时，`β` 越大的弹簧会用越大的力将其推回1。
 
 ### 计算公式
@@ -110,17 +258,17 @@ HF_ENDPOINT=https://hf-mirror.com huggingface-cli download cais/mmlu --repo-type
 
 `w_constraint` 和 `β` 协同工作，共同塑造了Router的行为：
 
-1.  **`β` 定义了“什么是错误”**: 它通过对 `1 - ratio` 的惩罚，明确了将数据路由到“垃圾桶”专家是模型需要避免的错误行为。
-2.  **`w_constraint` 决定了“犯错的代价”**: 它将这个“错误”的严重性量化，并将其整合到模型的总学习目标中。
+1.  **`β` 定义了"什么是错误"**: 它通过对 `1 - ratio` 的惩罚，明确了将数据路由到"垃圾桶"专家是模型需要避免的错误行为。
+2.  **`w_constraint` 决定了"犯错的代价"**: 它将这个"错误"的严重性量化，并将其整合到模型的总学习目标中。
 
 ### 直观类比
 
 *   想象一个分类任务，`β` 就像是定义了类别边界的清晰度。`β` 越大，边界越明确，模型越不能容忍模棱两可的分类。
-*   `w_constraint` 则是这个分类任务在整个项目中的“重要性”或“优先级”。`w_constraint` 越高，意味着“正确分类”比其他任务（如语言建模）更重要。
+*   `w_constraint` 则是这个分类任务在整个项目中的"重要性"或"优先级"。`w_constraint` 越高，意味着"正确分类"比其他任务（如语言建模）更重要。
 
-### “垃圾桶”专家权重初始化策略
+### "垃圾桶"专家权重初始化策略
 
-在模型的实现过程中，我们对新增的“垃圾桶”专家的路由权重初始化策略进行了一次重要的迭代。
+在模型的实现过程中，我们对新增的"垃圾桶"专家的路由权重初始化策略进行了一次重要的迭代。
 
 最初，我们借用了模型自身配置文件 (`config.json`) 中的 `initializer_range` 参数（在 `allenai/OLMoE-1B-7B-0924` 模型中其值为 `0.02`）作为新权重初始化的标准差。这是一个快速且合理的起点，因为它遵循了模型原始设计者（AllenAI）为新层（如分类头）设定的初始化标准。
 
@@ -129,4 +277,4 @@ HF_ENDPOINT=https://hf-mirror.com huggingface-cli download cais/mmlu --repo-type
 *   `trash_can_init_mean`: 初始化正态分布的均值。
 *   `trash_can_init_std`: 初始化正态分布的标准差。
 
-这一改变使得我们对“垃圾桶”专家这一核心机制的控制更加**显式**和**精确**，避免了对模型内部配置的隐式依赖，从而提升了我们代码的模块化程度和长期可维护性。
+这一改变使得我们对"垃圾桶"专家这一核心机制的控制更加**显式**和**精确**，避免了对模型内部配置的隐式依赖，从而提升了我们代码的模块化程度和长期可维护性。

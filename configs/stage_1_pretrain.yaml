@@ -22,7 +22,7 @@ hydra:
 
 # Model configuration
 selector_model:
-  path: "./solidified_model_artifacts/olmoe-trashcan-1b"
+  name: "allenai/OLMoE-1B-7B-0125"
 output_dir: ${hydra:run.dir}
 
 # Dataset configuration
