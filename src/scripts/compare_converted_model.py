@@ -116,7 +116,7 @@ def compare_state_dicts(original_dict, converted_dict, tolerance=1e-6):
 
 def compare_models(
     original_model_name="allenai/OLMoE-1B-7B-0125",
-    converted_model_path="./select_moe_converted_OLMoE-1B-7B-0125",
+    converted_model_path="./converted_models/select_moe_converted_OLMoE-1B-7B-0125",
     device="cpu",
     dtype="bfloat16",
     memory_efficient=True
@@ -461,7 +461,7 @@ def main():
     
     parser.add_argument("--original-model", type=str, default="allenai/OLMoE-1B-7B-0125",
                         help="Original model name or path")
-    parser.add_argument("--converted-model", type=str, default="./select_moe_converted_OLMoE-1B-7B-0125",
+    parser.add_argument("--converted-model", type=str, default="./converted_models/select_moe_converted_OLMoE-1B-7B-0125",
                         help="Path to converted Select-MoE model")
     parser.add_argument("--device", type=str, default="cpu",
                         help="Device to use (cpu, cuda, cuda:0, cuda:1, etc.)")

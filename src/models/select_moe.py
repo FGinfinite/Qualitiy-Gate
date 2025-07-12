@@ -6,27 +6,27 @@ Custom OLMoE model with trash can experts for transformers registration.
 Based on the TrashCanMoE implementation in src/modeling.py.
 """
 
-from typing import Optional, Union, List, Tuple
+from typing import List, Optional, Tuple, Union
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
 from transformers import (
-    PretrainedConfig,
-    PreTrainedModel,
     AutoConfig,
     AutoModel,
     AutoModelForCausalLM,
+    PreTrainedModel,
+)
+from transformers.modeling_outputs import (
+    MoeCausalLMOutputWithPast,
+    MoeModelOutputWithPast,
 )
 from transformers.models.olmoe.modeling_olmoe import (
     OlmoeConfig,
-    OlmoeModel,
-    OlmoeForCausalLM,
-    OlmoeSparseMoeBlock,
     OlmoeDecoderLayer,
+    OlmoeSparseMoeBlock,
     load_balancing_loss_func,
 )
-from transformers.modeling_outputs import MoeCausalLMOutputWithPast, MoeModelOutputWithPast
 from transformers.utils import logging
 
 logger = logging.get_logger(__name__)
@@ -34,9 +34,9 @@ logger = logging.get_logger(__name__)
 
 class SelectMoeConfig(OlmoeConfig):
     """Configuration for Select-MoE model with trash can experts."""
-    
+
     model_type = "select_moe"
-    
+
     def __init__(
         self,
         # Select-MoE specific parameters
@@ -45,16 +45,25 @@ class SelectMoeConfig(OlmoeConfig):
         constraint_loss_weight: float = 0.01,
         trash_can_loss_alpha: float = 1.0,
         trash_can_loss_beta: float = 2.0,
+        enable_load_balancing: bool = False,  # New parameter to control load balancing
         **kwargs,
     ):
         super().__init__(**kwargs)
-        
+
         # Select-MoE specific parameters
         self.trash_can_init_mean = trash_can_init_mean
         self.trash_can_init_std = trash_can_init_std
         self.constraint_loss_weight = constraint_loss_weight
         self.trash_can_loss_alpha = trash_can_loss_alpha
         self.trash_can_loss_beta = trash_can_loss_beta
+        self.enable_load_balancing = enable_load_balancing
+
+        # Ensure router logits are output by default for MoE training
+        if (
+            not hasattr(self, "output_router_logits")
+            or self.output_router_logits is None
+        ):
+            self.output_router_logits = True
 
 
 class TrashCanSparseMoeBlock(nn.Module):
@@ -62,120 +71,129 @@ class TrashCanSparseMoeBlock(nn.Module):
     A modified OlmoeSparseMoeBlock with trash can experts.
     These experts don't perform any computation and return zeros as negative incentive for the router.
     """
-    
-    def __init__(self, config: SelectMoeConfig, original_moe: OlmoeSparseMoeBlock = None):
+
+    def __init__(
+        self, config: SelectMoeConfig, original_moe: OlmoeSparseMoeBlock = None
+    ):
         super().__init__()
-        
+
         # Basic MoE settings
         self.top_k = config.num_experts_per_tok
         self.norm_topk_prob = config.norm_topk_prob
         self.original_num_experts = config.num_experts
-        
+
         # Trash can experts count equals to top_k
         self.trash_can_experts_count = self.top_k
-        
+
         # Total experts = original + trash can
-        self.total_num_experts = self.original_num_experts + self.trash_can_experts_count
-        
+        self.total_num_experts = (
+            self.original_num_experts + self.trash_can_experts_count
+        )
+
         # Copy experts from original MoE or create new ones
         if original_moe is not None:
             self.experts = original_moe.experts
         else:
             # Create new experts (for from_config initialization)
             from transformers.models.olmoe.modeling_olmoe import OlmoeMLP
-            self.experts = nn.ModuleList([OlmoeMLP(config) for _ in range(self.original_num_experts)])
-        
+
+            self.experts = nn.ModuleList(
+                [OlmoeMLP(config) for _ in range(self.original_num_experts)]
+            )
+
         # Create expanded gate
         self.gate = nn.Linear(config.hidden_size, self.total_num_experts, bias=False)
-        
+
         # Initialize gate weights
         if original_moe is not None:
             # Copy original gate weights
-            self.gate.weight.data[:self.original_num_experts, :] = (
+            self.gate.weight.data[: self.original_num_experts, :] = (
                 original_moe.gate.weight.data.to(self.gate.weight.dtype)
             )
         else:
             # Initialize original expert weights normally
             nn.init.normal_(
-                self.gate.weight.data[:self.original_num_experts, :],
+                self.gate.weight.data[: self.original_num_experts, :],
                 mean=0.0,
-                std=config.initializer_range
+                std=config.initializer_range,
             )
-        
+
         # Initialize trash can expert weights
         nn.init.normal_(
-            self.gate.weight.data[self.original_num_experts:, :],
+            self.gate.weight.data[self.original_num_experts :, :],
             mean=config.trash_can_init_mean,
-            std=config.trash_can_init_std
+            std=config.trash_can_init_std,
         )
-    
+
     def forward(self, hidden_states: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Forward pass of TrashCanSparseMoeBlock.
-        
+
         Routes tokens to original experts or trash cans, where they are effectively zeroed out.
         Always returns router_logits for loss computation.
         """
         batch_size, sequence_length, hidden_dim = hidden_states.shape
         hidden_states_reshaped = hidden_states.view(-1, hidden_dim)
-        
+
         # Get routing logits from expanded gate
         router_logits = self.gate(hidden_states_reshaped)
-        
+
         # Get top-k routing weights and selected experts
         routing_weights = F.softmax(router_logits, dim=1, dtype=torch.float)
-        routing_weights, selected_experts = torch.topk(routing_weights, self.top_k, dim=-1)
-        
+        routing_weights, selected_experts = torch.topk(
+            routing_weights, self.top_k, dim=-1
+        )
+
         if self.norm_topk_prob:
             routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
-        
+
         routing_weights = routing_weights.to(hidden_states.dtype)
-        
+
         # Initialize final hidden states as zeros
         # Tokens routed to trash cans will remain zero
         final_hidden_states = torch.zeros_like(hidden_states_reshaped)
-        
+
         # Create one-hot mask to identify which tokens are routed to which expert
         expert_mask = torch.nn.functional.one_hot(
             selected_experts, num_classes=self.total_num_experts
         ).permute(2, 1, 0)
-        
+
         # Process only original experts (trash can experts output zeros by default)
         for expert_idx in range(self.original_num_experts):
             expert_layer = self.experts[expert_idx]
             # Find which tokens are routed to current expert
             idx, top_x = torch.where(expert_mask[expert_idx])
-            
+
             if top_x.shape[0] == 0:
                 continue
-            
+
             # Select hidden states for current expert
             current_state = hidden_states_reshaped[None, top_x].reshape(-1, hidden_dim)
-            
+
             # Compute expert output and scale by routing weights
             current_hidden_states = (
                 expert_layer(current_state) * routing_weights[top_x, idx, None]
             )
-            
+
             # Add expert output to final hidden states
             final_hidden_states.index_add_(
                 0, top_x, current_hidden_states.to(hidden_states.dtype)
             )
-        
+
         final_hidden_states = final_hidden_states.reshape(
             batch_size, sequence_length, hidden_dim
         )
-        
+
         # Always return router_logits for loss computation
         return final_hidden_states, router_logits
 
 
 class SelectMoeDecoderLayer(OlmoeDecoderLayer):
     """Decoder layer with TrashCanSparseMoeBlock."""
-    
+
     def __init__(self, config: SelectMoeConfig, layer_idx: int):
         super().__init__(config, layer_idx)
-        
+
         # Replace the MLP with TrashCanSparseMoeBlock
         self.mlp = TrashCanSparseMoeBlock(config)
 
@@ -185,6 +203,7 @@ class SelectMoePreTrainedModel(PreTrainedModel):
     An abstract class to handle weights initialization and a simple interface for downloading and loading pretrained
     models.
     """
+
     config_class = SelectMoeConfig
     base_model_prefix = "model"
     supports_gradient_checkpointing = True
@@ -212,22 +231,31 @@ class SelectMoeModel(SelectMoePreTrainedModel):
     """
     Transformer decoder consisting of *config.num_hidden_layers* layers with TrashCanMoE.
     """
-    
+
     def __init__(self, config: SelectMoeConfig):
         super().__init__(config)
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
 
-        self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
-        self.layers = nn.ModuleList(
-            [SelectMoeDecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
+        self.embed_tokens = nn.Embedding(
+            config.vocab_size, config.hidden_size, self.padding_idx
         )
-        
+        self.layers = nn.ModuleList(
+            [
+                SelectMoeDecoderLayer(config, layer_idx)
+                for layer_idx in range(config.num_hidden_layers)
+            ]
+        )
+
         # Import and use the same components as OlmoeModel
-        from transformers.models.olmoe.modeling_olmoe import OlmoeRMSNorm, OlmoeRotaryEmbedding
+        from transformers.models.olmoe.modeling_olmoe import (
+            OlmoeRMSNorm,
+            OlmoeRotaryEmbedding,
+        )
+
         self.norm = OlmoeRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.rotary_emb = OlmoeRotaryEmbedding(config=config)
-        
+
         self.gradient_checkpointing = False
 
         # Initialize weights and apply final processing
@@ -254,18 +282,30 @@ class SelectMoeModel(SelectMoePreTrainedModel):
         cache_position: Optional[torch.LongTensor] = None,
     ) -> Union[Tuple, MoeModelOutputWithPast]:
         # Use the same implementation as OlmoeModel but with our custom layers
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
+        output_attentions = (
+            output_attentions
+            if output_attentions is not None
+            else self.config.output_attentions
+        )
         output_router_logits = (
-            output_router_logits if output_router_logits is not None else self.config.output_router_logits
+            output_router_logits
+            if output_router_logits is not None
+            else self.config.output_router_logits
         )
         output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+            output_hidden_states
+            if output_hidden_states is not None
+            else self.config.output_hidden_states
         )
         use_cache = use_cache if use_cache is not None else self.config.use_cache
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        return_dict = (
+            return_dict if return_dict is not None else self.config.use_return_dict
+        )
 
         if (input_ids is None) == (inputs_embeds is None):
-            raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
+            raise ValueError(
+                "You must specify exactly one of input_ids or inputs_embeds"
+            )
 
         if self.gradient_checkpointing and self.training and use_cache:
             logger.warning_once(
@@ -278,13 +318,19 @@ class SelectMoeModel(SelectMoePreTrainedModel):
 
         # Simple implementation for cache and attention mask handling
         if cache_position is None:
-            cache_position = torch.arange(inputs_embeds.shape[1], device=inputs_embeds.device)
+            cache_position = torch.arange(
+                inputs_embeds.shape[1], device=inputs_embeds.device
+            )
         if position_ids is None:
             position_ids = cache_position.unsqueeze(0)
 
         # Create causal attention mask
         causal_mask = self._update_causal_mask(
-            attention_mask, inputs_embeds, cache_position, past_key_values, output_attentions
+            attention_mask,
+            inputs_embeds,
+            cache_position,
+            past_key_values,
+            output_attentions,
         )
 
         # embed positions
@@ -333,8 +379,17 @@ class SelectMoeModel(SelectMoePreTrainedModel):
             all_hidden_states += (hidden_states,)
 
         if not return_dict:
-            return tuple(v for v in [hidden_states, next_decoder_cache, all_hidden_states, all_self_attns] if v is not None)
-        
+            return tuple(
+                v
+                for v in [
+                    hidden_states,
+                    next_decoder_cache,
+                    all_hidden_states,
+                    all_self_attns,
+                ]
+                if v is not None
+            )
+
         return MoeModelOutputWithPast(
             last_hidden_state=hidden_states,
             past_key_values=next_decoder_cache,
@@ -356,44 +411,66 @@ class SelectMoeModel(SelectMoePreTrainedModel):
         return None
 
 
-def custom_constraint_loss(router_logits: List[torch.Tensor], config: SelectMoeConfig) -> torch.Tensor:
-    """Compute custom constraint loss for trash can experts."""
+def custom_constraint_loss(
+    router_logits: List[torch.Tensor], config: SelectMoeConfig
+) -> torch.Tensor:
+    """
+    Compute custom constraint loss for trash can experts.
+
+    This loss encourages the model to balance between using real experts and trash can experts
+    based on data quality. Higher trash can usage should correlate with lower data quality.
+    """
     if len(router_logits) == 0:
-        return torch.tensor(0.0, device=next(iter(router_logits)).device if router_logits else 'cpu')
-    
+        return torch.tensor(
+            0.0, device=next(iter(router_logits)).device if router_logits else "cpu"
+        )
+
     total_loss = 0.0
     num_layers = 0
-    
+
     for layer_router_logits in router_logits:
         if layer_router_logits is None:
             continue
-            
-        # Get routing probabilities
+
+        # Get routing probabilities for all experts
         routing_probs = F.softmax(layer_router_logits, dim=-1)
-        
-        # Compute top-k expert selection probabilities (excluding trash can experts)
-        regular_expert_probs = routing_probs[:, :config.num_experts]
-        top_k_probs, _ = torch.topk(regular_expert_probs, k=config.num_experts_per_tok, dim=-1)
-        ratio = top_k_probs.sum(dim=-1)  # Shape: (batch_size * seq_len,)
-        
-        # Beta distribution inspired loss: -((alpha - 1) * log(ratio) + (beta - 1) * log(1 - ratio))
-        # With alpha = 1, this simplifies to -(beta - 1) * log(1 - ratio)
+
+        # Get top-k routing decisions (actual expert selection)
+        top_k_probs, selected_experts = torch.topk(
+            routing_probs, k=config.num_experts_per_tok, dim=-1
+        )
+
+        # Calculate trash can expert usage ratio
+        # Trash can experts are indices >= config.num_experts
+        trash_can_mask = selected_experts >= config.num_experts
+        trash_can_probs = top_k_probs * trash_can_mask.float()
+        trash_can_ratio = trash_can_probs.sum(dim=-1)  # Shape: (batch_size * seq_len,)
+
+
+        # Beta distribution inspired loss to encourage balanced usage
+        # When trash_can_ratio is too low (high quality data): loss increases
+        # When trash_can_ratio is too high (low quality data): loss decreases
         alpha = config.trash_can_loss_alpha
         beta = config.trash_can_loss_beta
-        
+
         # Clamp ratio to avoid log(0)
-        ratio_clamped = torch.clamp(ratio, min=1e-8, max=1.0 - 1e-8)
-        
+        ratio_clamped = torch.clamp(trash_can_ratio, min=1e-8, max=1.0 - 1e-8)
+
         if alpha == 1.0:
-            # Simplified form when alpha = 1
-            layer_loss = -(beta - 1) * torch.log(1 - ratio_clamped)
+            # Simplified form: encourages moderate trash can usage
+            layer_loss = -(beta - 1) * torch.log(ratio_clamped) - torch.log(
+                1 - ratio_clamped
+            )
         else:
             # Full beta distribution form
-            layer_loss = -((alpha - 1) * torch.log(ratio_clamped) + (beta - 1) * torch.log(1 - ratio_clamped))
-        
+            layer_loss = -(
+                (alpha - 1) * torch.log(ratio_clamped)
+                + (beta - 1) * torch.log(1 - ratio_clamped)
+            )
+
         total_loss += layer_loss.mean()
         num_layers += 1
-    
+
     return total_loss / max(num_layers, 1)
 
 
@@ -408,9 +485,11 @@ class SelectMoeForCausalLM(SelectMoePreTrainedModel):
 
         self.router_aux_loss_coef = config.router_aux_loss_coef
         # Note: total experts include trash can experts for load balancing
-        self.num_experts = config.num_experts + config.num_experts_per_tok  # trash_can_experts_count
+        self.num_experts = (
+            config.num_experts + config.num_experts_per_tok
+        )  # trash_can_experts_count
         self.num_experts_per_tok = config.num_experts_per_tok
-        
+
         # Initialize weights and apply final processing
         self.post_init()
 
@@ -449,15 +528,24 @@ class SelectMoeForCausalLM(SelectMoePreTrainedModel):
         logits_to_keep: Union[int, torch.Tensor] = 0,
         **loss_kwargs,
     ) -> Union[Tuple, MoeCausalLMOutputWithPast]:
-        
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
+        output_attentions = (
+            output_attentions
+            if output_attentions is not None
+            else self.config.output_attentions
+        )
         output_router_logits = (
-            output_router_logits if output_router_logits is not None else self.config.output_router_logits
+            output_router_logits
+            if output_router_logits is not None
+            else self.config.output_router_logits
         )
         output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+            output_hidden_states
+            if output_hidden_states is not None
+            else self.config.output_hidden_states
         )
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        return_dict = (
+            return_dict if return_dict is not None else self.config.use_return_dict
+        )
 
         # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
         outputs = self.model(
@@ -476,29 +564,39 @@ class SelectMoeForCausalLM(SelectMoePreTrainedModel):
 
         hidden_states = outputs[0]
         # Only compute necessary logits, and do not upcast them to float if we are not computing the loss
-        slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
+        slice_indices = (
+            slice(-logits_to_keep, None)
+            if isinstance(logits_to_keep, int)
+            else logits_to_keep
+        )
         logits = self.lm_head(hidden_states[:, slice_indices, :])
 
         loss = None
         if labels is not None:
             loss = self.loss_function(logits, labels, self.vocab_size, **loss_kwargs)
+            
+        print(f"Loss: {loss.item() if loss is not None else 'N/A'}")
 
         aux_loss = None
+        constraint_loss = None
         if output_router_logits:
-            aux_loss = load_balancing_loss_func(
-                outputs.router_logits if return_dict else outputs[-1],
-                self.num_experts,
-                self.num_experts_per_tok,
-                attention_mask,
-            )
-            
-            # Add custom constraint loss for trash can experts
+            # Load balancing loss (optional)
+            if self.config.enable_load_balancing:
+                aux_loss = load_balancing_loss_func(
+                    outputs.router_logits if return_dict else outputs[-1],
+                    self.num_experts,
+                    self.num_experts_per_tok,
+                    attention_mask,
+                )
+            else:
+                aux_loss = torch.tensor(0.0, device=hidden_states.device)
+
+            # Custom constraint loss for trash can experts (always computed)
             constraint_loss = custom_constraint_loss(
-                outputs.router_logits if return_dict else outputs[-1],
-                self.config
+                outputs.router_logits if return_dict else outputs[-1], self.config
             )
             aux_loss += self.config.constraint_loss_weight * constraint_loss
-            
+
             if labels is not None:
                 loss += self.router_aux_loss_coef * aux_loss.to(loss.device)
 
@@ -507,6 +605,9 @@ class SelectMoeForCausalLM(SelectMoePreTrainedModel):
             if output_router_logits:
                 output = (aux_loss,) + output
             return (loss,) + output if loss is not None else output
+
+        print(f"Router Aux Loss: {aux_loss.item() if aux_loss is not None else 'N/A'}")
+        print(f"Total Loss: {loss.item() if loss is not None else 'N/A'}")
 
         return MoeCausalLMOutputWithPast(
             loss=loss,
@@ -517,6 +618,55 @@ class SelectMoeForCausalLM(SelectMoePreTrainedModel):
             attentions=outputs.attentions,
             router_logits=outputs.router_logits,
         )
+
+    def prepare_inputs_for_generation(
+        self,
+        input_ids,
+        past_key_values=None,
+        attention_mask=None,
+        inputs_embeds=None,
+        cache_position=None,
+        position_ids=None,
+        use_cache=True,
+        **kwargs,
+    ):
+        """
+        Prepare inputs for generation. This method is required by PEFT.
+        """
+        # If we have cache: let's slice `input_ids` through `cache_position`, to keep only the unprocessed tokens
+        # Exception 1: when passing input_embeds, input_ids may be missing entries
+        # Exception 2: some generation methods do special slicing of input_ids, so we don't need to do it here
+        if past_key_values is not None:
+            if inputs_embeds is not None:  # Exception 1
+                input_ids = input_ids[:, -cache_position.shape[0] :]
+            elif (
+                input_ids.shape[1] != cache_position.shape[0]
+            ):  # Default case (the "else", a no op, is Exception 2)
+                input_ids = input_ids[:, cache_position]
+
+        if attention_mask is not None and position_ids is None:
+            # create position_ids on the fly for batch generation
+            position_ids = attention_mask.long().cumsum(-1) - 1
+            position_ids.masked_fill_(attention_mask == 0, 1)
+            if past_key_values:
+                position_ids = position_ids[:, -input_ids.shape[1] :]
+
+        # if `inputs_embeds` are passed, we only want to use them in the 1st generation step
+        if inputs_embeds is not None and cache_position[0] == 0:
+            model_inputs = {"inputs_embeds": inputs_embeds, "input_ids": None}
+        else:
+            model_inputs = {"input_ids": input_ids, "inputs_embeds": None}
+
+        model_inputs.update(
+            {
+                "position_ids": position_ids,
+                "cache_position": cache_position,
+                "past_key_values": past_key_values,
+                "use_cache": use_cache,
+                "attention_mask": attention_mask,
+            }
+        )
+        return model_inputs
 
 
 def replace_moe_layers_with_trashcan(model: nn.Module, config: SelectMoeConfig):

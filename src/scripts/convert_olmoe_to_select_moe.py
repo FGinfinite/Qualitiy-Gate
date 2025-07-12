@@ -146,7 +146,7 @@ def convert_and_save_model(
         print(f"\n5. Saving converted model...")
         
         if save_path is None:
-            save_path = f"./select_moe_converted_{model_name.split('/')[-1]}"
+            save_path = f"./converted_models/select_moe_converted_{model_name.split('/')[-1]}"
         
         # Create directory if it doesn't exist
         os.makedirs(save_path, exist_ok=True)

@@ -61,11 +61,12 @@
 
 ```bash
 # 基本转换（推荐使用 bfloat16）
-python src/scripts/convert_olmoe_to_select_moe.py --device cuda:0 --save-path ./my_select_moe
+python src/scripts/convert_olmoe_to_select_moe.py --device cuda:0 --save-path ./converted_models/my_select_moe
 
 # 自定义垃圾桶专家参数
 python src/scripts/convert_olmoe_to_select_moe.py \
     --device cuda:0 \
+    --save-path ./converted_models/my_select_moe \
     --trash-can-init-std 0.01 \
     --constraint-loss-weight 0.02
 ```
@@ -77,6 +78,7 @@ python src/scripts/convert_olmoe_to_select_moe.py \
 ```bash
 # 使用内存效率模式和 bfloat16（推荐）
 python src/scripts/compare_converted_model.py \
+    --converted-model ./converted_models/select_moe_converted_OLMoE-1B-7B-0125 \
     --device cuda:0 \
     --dtype bfloat16 \
     --memory-efficient
@@ -91,7 +93,7 @@ from src.models.select_moe import SelectMoeForCausalLM, register_select_moe
 register_select_moe()
 
 # 直接加载转换后的模型
-model = SelectMoeForCausalLM.from_pretrained("./my_select_moe")
+model = SelectMoeForCausalLM.from_pretrained("./converted_models/my_select_moe")
 
 # 正常使用，就像其他 HuggingFace 模型一样
 outputs = model(input_ids, output_router_logits=True)
@@ -133,6 +135,7 @@ outputs = model(input_ids, output_router_logits=True)
 ```bash
 # 内存效率模式 + bfloat16（解决显存不足问题）
 python src/scripts/compare_converted_model.py \
+    --converted-model ./converted_models/select_moe_converted_OLMoE-1B-7B-0125 \
     --device cuda:0 \
     --dtype bfloat16 \
     --memory-efficient

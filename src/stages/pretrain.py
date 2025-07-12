@@ -10,13 +10,15 @@ from peft import LoraConfig, TaskType, get_peft_model
 from transformers import (
     AutoTokenizer,
     DataCollatorForLanguageModeling,
-    OlmoeForCausalLM,
     Trainer,
     TrainingArguments,
 )
 
-from src.modeling import TrashCanMoE, replace_moe_layers_with_trashcan
-from src.trainer import CustomTrainer
+from src.models.select_moe import (
+    SelectMoeForCausalLM,
+    SelectMoeConfig,
+    register_select_moe
+)
 from utils.tools import grab_gpu
 
 # ---------------------------------------------------------------------------
@@ -59,24 +61,24 @@ def get_peft_config(cfg: DictConfig) -> LoraConfig:
 
 def get_model_and_tokenizer(
     cfg: DictConfig,
-) -> Tuple[OlmoeForCausalLM, AutoTokenizer]:
+) -> Tuple[SelectMoeForCausalLM, AutoTokenizer]:
     """
-    遵循“先加载标准模型，后修改”的原则，加载并准备模型和分词器。
+    加载预转换的 Select-MoE 模型和分词器。
     """
-    # 1. 加载一个标准的、未经修改的 OlmoeForCausalLM 模型
+    # 注册 Select-MoE 模型
+    register_select_moe()
+    
+    # 加载预转换的 Select-MoE 模型
     model_kwargs = {
         "low_cpu_mem_usage": True,
         "torch_dtype": torch.bfloat16,
     }
-    model = OlmoeForCausalLM.from_pretrained(
-        cfg.selector_model.name, **model_kwargs
+    model = SelectMoeForCausalLM.from_pretrained(
+        cfg.selector_model.path, **model_kwargs
     )
 
-    # 2. 将模型中的 MoE 层替换为我们的 TrashCanMoE 层
-    replace_moe_layers_with_trashcan(model, model.config, cfg)
-
-    # 加载分词器
-    tokenizer = AutoTokenizer.from_pretrained(cfg.selector_model.name)
+    # 加载分词器（使用原始模型名称）
+    tokenizer = AutoTokenizer.from_pretrained(cfg.selector_model.tokenizer_name)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
@@ -124,11 +126,10 @@ def tokenize_function(example: Dict, tokenizer: AutoTokenizer, cfg: DictConfig) 
 
 def pretrain(cfg: DictConfig) -> None:
     """
-    通过将标准 MoE 层替换为自定义的 'TrashCanMoE' 层，并使用 PEFT 进行微调，
-    对 MoE 模型执行高级预训练。
+    使用预转换的 Select-MoE 模型进行训练，并使用 PEFT 进行微调。
     """
 
-    print("--- 开始阶段 1：高级 MoE 预训练 ---")
+    print("--- 开始阶段 1：Select-MoE 预训练 ---")
 
     accelerator = Accelerator()
     if cfg.training.gpu_grab.grab:
@@ -141,14 +142,12 @@ def pretrain(cfg: DictConfig) -> None:
         )
         print("--- GPU显存抢占完成 ---")
 
-    # 2. 加载自定义模型和分词器
-    # get_model_and_tokenizer 现在处理了所有复杂的设置
-    print("正在加载和配置 MoE 模型...")
+    # 2. 加载 Select-MoE 模型和分词器
+    print("正在加载和配置 Select-MoE 模型...")
     model, tokenizer = get_model_and_tokenizer(cfg)
-    print("模型加载和修改完成。")
+    print("模型加载完成。")
 
     # 2. 配置 PEFT 进行微调
-    # 这取代了旧的 `freeze_non_router_weights` 函数。
     print(f"正在为 '{cfg.training.peft_mode}' 模式配置 PEFT...")
     peft_config = get_peft_config(cfg)
     model = get_peft_model(model, peft_config)
@@ -190,13 +189,11 @@ def pretrain(cfg: DictConfig) -> None:
         if accelerator.is_main_process:
             print("已释放GPU占位符以准备训练...")
 
-    trainer = CustomTrainer(
+    trainer = Trainer(
         model=model,
         args=training_args,
         train_dataset=tokenized_dataset,
         data_collator=data_collator,
-        constraint_loss_weight=cfg.training.constraint_loss_weight,
-        trash_can_loss_beta=cfg.training.trash_can_loss_beta,
     )
 
     print("正在使用 Hugging Face Trainer 开始训练...")

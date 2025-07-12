@@ -22,7 +22,8 @@ hydra:
 
 # Model configuration
 selector_model:
-  name: "allenai/OLMoE-1B-7B-0125"
+  path: "converted_models/select_moe_converted_OLMoE-1B-7B-0125"
+  tokenizer_name: "allenai/OLMoE-1B-7B-0125"
 output_dir: ${hydra:run.dir}
 
 # Dataset configuration
@@ -41,8 +42,6 @@ training:
   epochs: 4
   optimizer: "AdamW"
   scheduler: "linear"
-  constraint_loss_weight: 0.5
-  trash_can_loss_beta: 5.0
   peft_mode: "lora"
   lora:
     r: 8
