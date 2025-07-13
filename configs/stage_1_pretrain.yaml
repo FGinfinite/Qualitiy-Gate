@@ -29,8 +29,10 @@ output_dir: ${hydra:run.dir}
 # Dataset configuration
 dataset:
   paths:
-    - "teknium/OpenHermes-2.5"
-    - "allenai/WildChat-1M"
+    - "SirNeural/flan_v2"
+    - "pharaouk/CoT-Collection"
+    - "databricks/databricks-dolly-15k"
+    - "OpenAssistant/oasst1"
   subset_ratio: 0.00005
   seed: 42
   max_sequence_length: 512

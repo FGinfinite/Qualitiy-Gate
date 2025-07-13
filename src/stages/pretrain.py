@@ -101,8 +101,18 @@ def load_and_prepare_dataset(cfg: DictConfig) -> Dataset:
 
 
 def tokenize_function(example: Dict, tokenizer: AutoTokenizer, cfg: DictConfig) -> Dict:
-    """对数据集中的单个样本进行分词。"""
+    """
+    Enhanced tokenize function to handle multiple dataset formats.
+    Supports:
+    1. Conversation format (original)
+    2. SirNeural/flan_v2 format (inputs/targets)
+    3. pharaouk/CoT-Collection format (source/target/rationale)
+    4. databricks-dolly-15k format (instruction/response/context)
+    5. OpenAssistant/oasst1 format (role/text)
+    """
     text_parts = []
+    
+    # Original conversation format
     conversation_data = example.get("conversations") or example.get("conversation")
     if conversation_data:
         for turn in conversation_data:
@@ -110,7 +120,59 @@ def tokenize_function(example: Dict, tokenizer: AutoTokenizer, cfg: DictConfig) 
                 role = turn.get("from") or turn.get("role", "unknown")
                 content = turn.get("value") or turn.get("content", "")
                 text_parts.append(f"{role}: {content}")
+    
+    # SirNeural/flan_v2 format
+    elif "inputs" in example and "targets" in example:
+        text_parts.append(f"user: {example['inputs']}")
+        text_parts.append(f"assistant: {example['targets']}")
+    
+    # pharaouk/CoT-Collection format
+    elif "source" in example and "target" in example:
+        text_parts.append(f"user: {example['source']}")
+        if "rationale" in example and example["rationale"]:
+            text_parts.append(f"assistant: {example['rationale']} {example['target']}")
+        else:
+            text_parts.append(f"assistant: {example['target']}")
+    
+    # databricks-dolly-15k format
+    elif "instruction" in example and "response" in example:
+        if "context" in example and example["context"]:
+            text_parts.append(f"user: Context: {example['context']}\n\nInstruction: {example['instruction']}")
+        else:
+            text_parts.append(f"user: {example['instruction']}")
+        text_parts.append(f"assistant: {example['response']}")
+    
+    # OpenAssistant/oasst1 format (single message)
+    elif "role" in example and "text" in example:
+        role = example["role"]
+        # Map oasst1 roles to standard format
+        if role == "prompter":
+            role = "user"
+        elif role == "assistant":
+            role = "assistant"
+        text_parts.append(f"{role}: {example['text']}")
+    
+    # Fallback: try to extract any text content
+    else:
+        # Look for common text fields
+        text_fields = ["text", "content", "message", "prompt", "question", "answer"]
+        found_text = False
+        for field in text_fields:
+            if field in example and example[field]:
+                text_parts.append(f"text: {example[field]}")
+                found_text = True
+                break
+        
+        if not found_text:
+            # If no recognizable format, create a simple text representation
+            text_parts.append("unknown: " + str(example))
+    
     formatted_text = "\n".join(text_parts)
+    
+    # Ensure we have some content
+    if not formatted_text.strip():
+        formatted_text = "empty: no content found"
+    
     return tokenizer(
         formatted_text,
         truncation=True,
