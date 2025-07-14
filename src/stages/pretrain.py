@@ -1,10 +1,10 @@
 # src/stages/pretrain.py
-from typing import Dict, Tuple
+from typing import Tuple
 
 import torch
 import torch.nn as nn
 from accelerate import Accelerator
-from datasets import Dataset, concatenate_datasets, load_dataset
+from src.data import load_and_prepare_dataset, encode_data, get_data_statistics
 from omegaconf import DictConfig
 from peft import LoraConfig, TaskType, get_peft_model
 from transformers import (
@@ -16,7 +16,6 @@ from transformers import (
 
 from src.models.select_moe import (
     SelectMoeForCausalLM,
-    SelectMoeConfig,
     register_select_moe
 )
 from utils.tools import grab_gpu
@@ -85,100 +84,8 @@ def get_model_and_tokenizer(
     return model, tokenizer
 
 
-def load_and_prepare_dataset(cfg: DictConfig) -> Dataset:
-    """从 Hugging Face Hub 加载、准备和合并数据集。"""
-    all_datasets = [load_dataset(path, split="train") for path in cfg.dataset.paths]
-    dataset = concatenate_datasets(all_datasets)
-    print(f"已加载并合并数据集 {cfg.dataset.paths} 总共有 {len(dataset)} 个样本。")
-    dataset = dataset.shuffle(seed=cfg.dataset.seed)
-    subset_size = int(len(dataset) * cfg.dataset.subset_ratio)
-    dataset = dataset.select(range(subset_size))
-    print(
-        f"已选择 {len(dataset)} 个样本的子集 "
-        f"({cfg.dataset.subset_ratio * 100:.2f}% 的总量)。"
-    )
-    return dataset
 
 
-def tokenize_function(example: Dict, tokenizer: AutoTokenizer, cfg: DictConfig) -> Dict:
-    """
-    Enhanced tokenize function to handle multiple dataset formats.
-    Supports:
-    1. Conversation format (original)
-    2. SirNeural/flan_v2 format (inputs/targets)
-    3. pharaouk/CoT-Collection format (source/target/rationale)
-    4. databricks-dolly-15k format (instruction/response/context)
-    5. OpenAssistant/oasst1 format (role/text)
-    """
-    text_parts = []
-    
-    # Original conversation format
-    conversation_data = example.get("conversations") or example.get("conversation")
-    if conversation_data:
-        for turn in conversation_data:
-            if isinstance(turn, dict):
-                role = turn.get("from") or turn.get("role", "unknown")
-                content = turn.get("value") or turn.get("content", "")
-                text_parts.append(f"{role}: {content}")
-    
-    # SirNeural/flan_v2 format
-    elif "inputs" in example and "targets" in example:
-        text_parts.append(f"user: {example['inputs']}")
-        text_parts.append(f"assistant: {example['targets']}")
-    
-    # pharaouk/CoT-Collection format
-    elif "source" in example and "target" in example:
-        text_parts.append(f"user: {example['source']}")
-        if "rationale" in example and example["rationale"]:
-            text_parts.append(f"assistant: {example['rationale']} {example['target']}")
-        else:
-            text_parts.append(f"assistant: {example['target']}")
-    
-    # databricks-dolly-15k format
-    elif "instruction" in example and "response" in example:
-        if "context" in example and example["context"]:
-            text_parts.append(f"user: Context: {example['context']}\n\nInstruction: {example['instruction']}")
-        else:
-            text_parts.append(f"user: {example['instruction']}")
-        text_parts.append(f"assistant: {example['response']}")
-    
-    # OpenAssistant/oasst1 format (single message)
-    elif "role" in example and "text" in example:
-        role = example["role"]
-        # Map oasst1 roles to standard format
-        if role == "prompter":
-            role = "user"
-        elif role == "assistant":
-            role = "assistant"
-        text_parts.append(f"{role}: {example['text']}")
-    
-    # Fallback: try to extract any text content
-    else:
-        # Look for common text fields
-        text_fields = ["text", "content", "message", "prompt", "question", "answer"]
-        found_text = False
-        for field in text_fields:
-            if field in example and example[field]:
-                text_parts.append(f"text: {example[field]}")
-                found_text = True
-                break
-        
-        if not found_text:
-            # If no recognizable format, create a simple text representation
-            text_parts.append("unknown: " + str(example))
-    
-    formatted_text = "\n".join(text_parts)
-    
-    # Ensure we have some content
-    if not formatted_text.strip():
-        formatted_text = "empty: no content found"
-    
-    return tokenizer(
-        formatted_text,
-        truncation=True,
-        padding="max_length",
-        max_length=cfg.dataset.max_sequence_length,
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -221,16 +128,22 @@ def pretrain(cfg: DictConfig) -> None:
 
     # 4. 加载并准备数据集
     dataset = load_and_prepare_dataset(cfg)
-    original_columns = dataset.column_names
-    tokenized_dataset = dataset.map(
-        tokenize_function,
-        batched=False,
-        fn_kwargs={"tokenizer": tokenizer, "cfg": cfg},
-        remove_columns=original_columns,
+    
+    # 5. 编码数据集
+    tokenized_dataset = encode_data(
+        dataset,
+        tokenizer,
+        max_seq_length=cfg.dataset.max_sequence_length,
+        processing_num_workers=getattr(cfg.dataset, 'processing_num_workers', 10),
+        overwrite_cache=getattr(cfg.dataset, 'overwrite_cache', False)
     )
+    
+    # 6. 输出数据统计信息
+    get_data_statistics(tokenized_dataset)
+    
     data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
 
-    # 5. 配置训练参数
+    # 7. 配置训练参数
     training_args = TrainingArguments(
         output_dir=cfg.output_dir,
         num_train_epochs=cfg.training.epochs,
@@ -242,7 +155,7 @@ def pretrain(cfg: DictConfig) -> None:
         report_to="none",
     )
 
-    # 6. 初始化并运行训练器
+    # 8. 初始化并运行训练器
     # 在初始化Trainer之前，释放占位符以提供干净的显存
 
     if cfg.training.gpu_grab.grab:
@@ -267,7 +180,7 @@ def pretrain(cfg: DictConfig) -> None:
         pass
     print("训练完成。")
 
-    # 7. 保存最终模型
+    # 9. 保存最终模型
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:
         print(f"正在将最终的 PEFT 适配模型保存到 {cfg.output_dir}")
