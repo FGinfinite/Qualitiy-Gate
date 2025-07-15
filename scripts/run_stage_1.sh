@@ -2,7 +2,7 @@
 # Description: This script runs the first stage of the project: pre-training the selector model.
 # Usage: ./scripts/run_stage_1.sh
 
-export CUDA_VISIBLE_DEVICES=3,4
+export CUDA_VISIBLE_DEVICES=6
 
 # If CUDA_VISIBLE_DEVICES is not set, default to a single GPU.
 if [ -z "$CUDA_VISIBLE_DEVICES" ]; then
@@ -30,9 +30,9 @@ echo "Using port $MAIN_PORT for the main process."
 # allowing for hydra multirun capabilities.
 # Use FSDP for multi-GPU training when more than 1 GPU is available
 
-echo "Using FSDP for multi-GPU training..."
+echo "Using single GPU training..."
 .venv/bin/accelerate launch \
-  --config_file configs/accelerate_config_fsdp.yaml \
+  --config_file configs/accelerate_config_ddp.yaml \
   --num_processes=$NUM_GPUS \
   --main_process_port=$MAIN_PORT \
   src/main.py --config-name=stage_1_pretrain "$@"

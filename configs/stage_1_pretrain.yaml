@@ -34,7 +34,7 @@ dataset:
     - "dolly"
     - "flan_v2"
     - "oasst1"
-  subset_ratio: 0.0001
+  subset_ratio: 0.05
   seed: 42
   shuffle: true
   max_sequence_length: 512
