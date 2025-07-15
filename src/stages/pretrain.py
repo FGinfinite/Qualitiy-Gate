@@ -1,12 +1,10 @@
-# src/stages/pretrain.py
-from typing import Tuple
-
 import torch
-import torch.nn as nn
+import os
 from accelerate import Accelerator
 from src.data import load_and_prepare_dataset, encode_data, get_data_statistics
 from omegaconf import DictConfig
 from peft import LoraConfig, TaskType, get_peft_model
+from typing import Tuple
 from transformers import (
     AutoTokenizer,
     DataCollatorForSeq2Seq,
@@ -17,6 +15,11 @@ from transformers import (
 from src.models.select_moe import (
     SelectMoeForCausalLM,
     register_select_moe
+)
+from src.training.full_rank_finetuning import (
+    setup_full_rank_training,
+    save_full_rank_weights,
+    print_trainable_parameters
 )
 from utils.tools import grab_gpu
 
@@ -116,12 +119,19 @@ def pretrain(cfg: DictConfig) -> None:
     model, tokenizer = get_model_and_tokenizer(cfg)
     print("模型加载完成。")
 
-    # 2. 配置 PEFT 进行微调
-    print(f"正在为 '{cfg.training.peft_mode}' 模式配置 PEFT...")
-    peft_config = get_peft_config(cfg)
-    model = get_peft_model(model, peft_config)
-    print("PEFT 模型已创建。可训练参数：")
-    model.print_trainable_parameters()
+    # 2. 配置微调模式
+    print(f"正在为 '{cfg.training.peft_mode}' 模式配置微调...")
+    
+    if cfg.training.peft_mode == "lora":
+        peft_config = get_peft_config(cfg)
+        model = get_peft_model(model, peft_config)
+        print("PEFT 模型已创建。可训练参数：")
+        model.print_trainable_parameters()
+    elif cfg.training.peft_mode == "full_rank":
+        setup_full_rank_training(model, list(cfg.training.lora.target_modules))
+        print_trainable_parameters(model)
+    else:
+        raise ValueError(f"不支持的微调模式: {cfg.training.peft_mode}")
 
     # 确保 `use_cache` 已禁用以保证训练兼容性
     model.config.use_cache = False
@@ -148,6 +158,9 @@ def pretrain(cfg: DictConfig) -> None:
     )
 
     # 7. 配置训练参数
+    # LoRA模式：保存中间权重；全秩微调：不保存中间权重
+    save_strategy = "epoch" if cfg.training.peft_mode == "lora" else "no"
+    
     training_args = TrainingArguments(
         output_dir=cfg.output_dir,
         num_train_epochs=cfg.training.epochs,
@@ -155,7 +168,7 @@ def pretrain(cfg: DictConfig) -> None:
         learning_rate=cfg.training.learning_rate,
         logging_dir=f"{cfg.output_dir}/logs",
         logging_steps=10,
-        save_strategy="epoch",
+        save_strategy=save_strategy,
         report_to="none",
     )
 
@@ -187,8 +200,13 @@ def pretrain(cfg: DictConfig) -> None:
     # 9. 保存最终模型
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:
-        print(f"正在将最终的 PEFT 适配模型保存到 {cfg.output_dir}")
-        trainer.save_model(cfg.output_dir)
+        if cfg.training.peft_mode == "lora":
+            print(f"正在将最终的 PEFT 适配模型保存到 {cfg.output_dir}")
+            trainer.save_model(cfg.output_dir)
+        elif cfg.training.peft_mode == "full_rank":
+            print(f"正在将全秩微调权重保存到 {cfg.output_dir}")
+            full_rank_weights_path = os.path.join(cfg.output_dir, "full_rank_weights.pt")
+            save_full_rank_weights(model, list(cfg.training.lora.target_modules), full_rank_weights_path)
 
     print("\n--- 阶段 1：预训练完成 ---")
 

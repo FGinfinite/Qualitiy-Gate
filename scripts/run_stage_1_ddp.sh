@@ -2,7 +2,7 @@
 # Description: This script runs the first stage of the project: pre-training the selector model.
 # Usage: ./scripts/run_stage_1.sh
 
-export CUDA_VISIBLE_DEVICES=3,4
+export CUDA_VISIBLE_DEVICES=3
 
 # If CUDA_VISIBLE_DEVICES is not set, default to a single GPU.
 if [ -z "$CUDA_VISIBLE_DEVICES" ]; then
