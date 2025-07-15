@@ -120,22 +120,9 @@ def encode_with_messages_format(example: Dict, tokenizer: AutoTokenizer, max_seq
     if len(messages) == 0:
         raise ValueError('messages字段为空')
 
-    # 拼接消息
-    message_text = ""
-    for message in messages:
-        if message["role"] == "system":
-            message_text += "<|system|>\n" + message["content"].strip() + "\n"
-        elif message["role"] == "user":
-            message_text += "<|user|>\n" + message["content"].strip() + "\n"
-        elif message["role"] == "assistant":
-            message_text += "<|assistant|>\n" + \
-                message["content"].strip() + tokenizer.eos_token + "\n"
-        else:
-            raise ValueError(f"不支持的role: {message['role']}")
-
-    # 编码
+    example_text = concat_messages(messages, tokenizer)
     tokenized_example = tokenizer(
-        message_text, return_tensors='pt', max_length=max_seq_length, truncation=True)
+        example_text, return_tensors='pt', max_length=max_seq_length, truncation=True)
     input_ids = tokenized_example.input_ids
     labels = input_ids.clone()
 
@@ -145,52 +132,27 @@ def encode_with_messages_format(example: Dict, tokenizer: AutoTokenizer, max_seq
             if message_idx == 0:
                 message_start_idx = 0
             else:
-                # 计算前面消息的token长度
-                prev_messages_text = ""
-                for prev_msg in messages[:message_idx]:
-                    if prev_msg["role"] == "system":
-                        prev_messages_text += "<|system|>\n" + prev_msg["content"].strip() + "\n"
-                    elif prev_msg["role"] == "user":
-                        prev_messages_text += "<|user|>\n" + prev_msg["content"].strip() + "\n"
-                    elif prev_msg["role"] == "assistant":
-                        prev_messages_text += "<|assistant|>\n" + \
-                            prev_msg["content"].strip() + tokenizer.eos_token + "\n"
-                
                 message_start_idx = tokenizer(
-                    prev_messages_text, return_tensors='pt', max_length=max_seq_length, truncation=True
+                    concat_messages(messages[:message_idx], tokenizer), 
+                    return_tensors='pt', 
+                    max_length=max_seq_length, 
+                    truncation=True
                 ).input_ids.shape[1]
             
-            # 计算当前消息结束位置
             if message_idx < len(messages) - 1 and messages[message_idx+1]["role"] == "assistant":
-                # 包含下一个assistant的role标记
-                current_messages_text = ""
-                for curr_msg in messages[:message_idx+1]:
-                    if curr_msg["role"] == "system":
-                        current_messages_text += "<|system|>\n" + curr_msg["content"].strip() + "\n"
-                    elif curr_msg["role"] == "user":
-                        current_messages_text += "<|user|>\n" + curr_msg["content"].strip() + "\n"
-                    elif curr_msg["role"] == "assistant":
-                        current_messages_text += "<|assistant|>\n" + \
-                            curr_msg["content"].strip() + tokenizer.eos_token + "\n"
-                current_messages_text += "<|assistant|>\n"
+                # 这里也忽略assistant的role部分
+                messages_so_far = concat_messages(
+                    messages[:message_idx+1], tokenizer) + "<|assistant|>\n"
             else:
-                current_messages_text = ""
-                for curr_msg in messages[:message_idx+1]:
-                    if curr_msg["role"] == "system":
-                        current_messages_text += "<|system|>\n" + curr_msg["content"].strip() + "\n"
-                    elif curr_msg["role"] == "user":
-                        current_messages_text += "<|user|>\n" + curr_msg["content"].strip() + "\n"
-                    elif curr_msg["role"] == "assistant":
-                        current_messages_text += "<|assistant|>\n" + \
-                            curr_msg["content"].strip() + tokenizer.eos_token + "\n"
+                messages_so_far = concat_messages(
+                    messages[:message_idx+1], tokenizer)
             
             message_end_idx = tokenizer(
-                current_messages_text,
+                messages_so_far,
                 return_tensors='pt',
                 max_length=max_seq_length,
                 truncation=True
             ).input_ids.shape[1]
-            
             labels[:, message_start_idx:message_end_idx] = -100
 
             if message_end_idx >= max_seq_length:
@@ -202,6 +164,22 @@ def encode_with_messages_format(example: Dict, tokenizer: AutoTokenizer, max_seq
         'labels': labels.flatten(),
         'attention_mask': attention_mask.flatten(),
     }
+
+
+def concat_messages(messages, tokenizer):
+    """拼接消息，与LESS库保持一致"""
+    message_text = ""
+    for message in messages:
+        if message["role"] == "system":
+            message_text += "<|system|>\n" + message["content"].strip() + "\n"
+        elif message["role"] == "user":
+            message_text += "<|user|>\n" + message["content"].strip() + "\n"
+        elif message["role"] == "assistant":
+            message_text += "<|assistant|>\n" + \
+                message["content"].strip() + tokenizer.eos_token + "\n"
+        else:
+            raise ValueError(f"不支持的role: {message['role']}")
+    return message_text
 
 
 def encode_data(

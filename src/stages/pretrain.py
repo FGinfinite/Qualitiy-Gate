@@ -9,7 +9,7 @@ from omegaconf import DictConfig
 from peft import LoraConfig, TaskType, get_peft_model
 from transformers import (
     AutoTokenizer,
-    DataCollatorForLanguageModeling,
+    DataCollatorForSeq2Seq,
     Trainer,
     TrainingArguments,
 )
@@ -141,7 +141,11 @@ def pretrain(cfg: DictConfig) -> None:
     # 6. 输出数据统计信息
     get_data_statistics(tokenized_dataset)
     
-    data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
+    data_collator = DataCollatorForSeq2Seq(
+        tokenizer=tokenizer, 
+        model=model, 
+        padding="longest"
+    )
 
     # 7. 配置训练参数
     training_args = TrainingArguments(
