@@ -31,10 +31,10 @@ dataset:
     - "oasst1"
   seed: 42
   shuffle: false
-  max_sequence_length: 512
+  max_sequence_length: 1024
   # To speed up the selection process, we can score a subset of the combined dataset.
   # 1.0 means using the full dataset.
-  subset_ratio: 0.1 # 使用10%的数据进行快速测试
+  subset_ratio: 1 
 
 # The percentage of data to select based on quality score.
 # 0.05 means the top 5% of the data will be selected.
@@ -42,4 +42,4 @@ selection_percentage: 0.05
 
 # Data processing settings
 data_process:
-  batch_size: 8
+  batch_size: 64
