@@ -2,31 +2,39 @@
 
 stage: selection
 
+# 模型配置
 selector_model:
-  name: "allenai/OLMoE-1B-7B-0125"
+  path: "converted_models/select_moe_converted_OLMoE-1B-7B-0125"
+  tokenizer_name: "allenai/OLMoE-1B-7B-0125"
 
 # Stage 2: Data Selection Configuration
 
 # Hydra settings to create a timestamped output directory, similar to stage 1
 hydra:
   run:
-    dir: outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}/stage_2_selection
+    dir: outputs/stage_2_selection/${now:%Y-%m-%d}/${now:%H-%M-%S}
 
-# Path to the pretrained model from stage 1
-model_checkpoint_path: "outputs/stage_1_pretrain/2025-07-07/15-40-03/checkpoint-184"
+# Path to the full rank weights from stage 1
+model_checkpoint_path: "outputs/stage_1_pretrain/2025-07-16/01-57-27/full_rank_weights.pt"
 
 # The final output path for the selected data.
 # It uses the Hydra-generated run directory.
 output_path: "${hydra:run.dir}/selected_data.jsonl"
 
-# Datasets to be scored and filtered.
+# Dataset configuration - 使用与stage 1相同的4个数据集
 dataset:
-  paths:
-    - databricks/databricks-dolly-15k
+  data_dir: "dataset/train/processed"
+  dataset_names:
+    - "cot"
+    - "dolly"
+    - "flan_v2"
+    - "oasst1"
   seed: 42
+  shuffle: false
+  max_sequence_length: 512
   # To speed up the selection process, we can score a subset of the combined dataset.
   # 1.0 means using the full dataset.
-  subset_ratio: 0.1 # Use full dataset for dolly
+  subset_ratio: 0.1 # 使用10%的数据进行快速测试
 
 # The percentage of data to select based on quality score.
 # 0.05 means the top 5% of the data will be selected.
@@ -35,26 +43,3 @@ selection_percentage: 0.05
 # Data processing settings
 data_process:
   batch_size: 8
-
-# Training configuration
-training:
-  batch_size: 2
-  learning_rate: 1e-4
-  epochs: 4
-  optimizer: "AdamW"
-  scheduler: "linear"
-  constraint_loss_weight: 0.5
-  trash_can_loss_beta: 5.0
-  trash_can_init_mean: 0.0
-  trash_can_init_std: 0.02
-  peft_mode: "lora"
-  lora:
-    r: 8
-    lora_alpha: 16
-    lora_dropout: 0.1
-    target_modules:
-      - "gate"
-  gpu_grab:
-    grab: false
-    memory_need_gb: 24
-    over_grab: false

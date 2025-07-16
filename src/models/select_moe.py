@@ -575,7 +575,7 @@ class SelectMoeForCausalLM(SelectMoePreTrainedModel):
         if labels is not None:
             loss = self.loss_function(logits, labels, self.vocab_size, **loss_kwargs)
             
-        print(f"Loss: {loss.item() if loss is not None else 'N/A'}")
+        # print(f"Loss: {loss.item() if loss is not None else 'N/A'}")
 
         aux_loss = None
         constraint_loss = None
@@ -606,8 +606,8 @@ class SelectMoeForCausalLM(SelectMoePreTrainedModel):
                 output = (aux_loss,) + output
             return (loss,) + output if loss is not None else output
 
-        print(f"Router Aux Loss: {aux_loss.item() if aux_loss is not None else 'N/A'}")
-        print(f"Total Loss: {loss.item() if loss is not None else 'N/A'}")
+        # print(f"Router Aux Loss: {aux_loss.item() if aux_loss is not None else 'N/A'}")
+        # print(f"Total Loss: {loss.item() if loss is not None else 'N/A'}")
 
         return MoeCausalLMOutputWithPast(
             loss=loss,
