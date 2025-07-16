@@ -50,8 +50,8 @@ training:
   scheduler: "linear"
   peft_mode: "full_rank"  # Options: "lora", "full_rank"
   lora:
-    r: 69
-    lora_alpha: 16
+    r: 16
+    lora_alpha: 64
     lora_dropout: 0
     target_modules:
       - "mlp.gate"
