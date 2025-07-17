@@ -42,4 +42,4 @@ selection_percentage: 0.05
 
 # Data processing settings
 data_process:
-  batch_size: 64
+  batch_size: 16
