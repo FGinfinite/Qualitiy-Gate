@@ -30,7 +30,6 @@ echo "Using port $MAIN_PORT for the main process."
 # allowing for hydra multirun capabilities.
 # Use FSDP for multi-GPU training when more than 1 GPU is available
 
-echo "Using single GPU training..."
 .venv/bin/accelerate launch \
   --config_file configs/accelerate_config_ddp.yaml \
   --num_processes=$NUM_GPUS \

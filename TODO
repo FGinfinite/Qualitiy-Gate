@@ -80,6 +80,8 @@ def custom_constraint_loss(
 
     return total_loss / max(num_layers, 1)
 
-跑通四个流程：
-1. 在极小的子集上预热训练
-2. 
+
+
+LESS的训练设置：
+线性预热，余弦衰减，学习率2e-5，batch size=128，epoch=4，
+Lora：r=128, alpha=512, dropout=0.1, attention的所有参数，

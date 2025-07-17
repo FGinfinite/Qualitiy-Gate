@@ -1,6 +1,8 @@
 #!/bin/bash
-# Description: This script runs the third stage of the project: fine-tuning the target model.
+# Description: This script runs the third stage of the project: fine-tuning Llama-2-7B with LoRA.
 # Usage: ./scripts/run_stage_3.sh
+
+export CUDA_VISIBLE_DEVICES=0,1,3,4,5
 
 # If CUDA_VISIBLE_DEVICES is not set, default to a single GPU.
 if [ -z "$CUDA_VISIBLE_DEVICES" ]; then
@@ -16,22 +18,18 @@ else
   fi
 fi
 
-echo "Found $NUM_GPUS GPUs. Launching training..."
+echo "Found $NUM_GPUS GPUs. Launching Llama-2-7B LoRA fine-tuning..."
 
-# Generate a random port between 20000 and 29999
+# Generate a random port between 29500 and 29599
 MAIN_PORT=$((RANDOM % 100 + 29500))
 echo "Using port $MAIN_PORT"
 
-# Generate a unique timestamped directory for the run
-TIMESTAMP=$(date +"%Y-%m-%d/%H-%M-%S")
-OUTPUT_DIR="outputs/$TIMESTAMP/stage_3_finetune"
-echo "Output directory: $OUTPUT_DIR"
-
-# Launch the training process using Accelerate.
+# Launch the training process using Accelerate with FSDP configuration.
 # The --num_processes argument is now set dynamically based on CUDA_VISIBLE_DEVICES.
-# We override hydra.run.dir to ensure all processes use the same output directory.
-accelerate launch \
-  --config_file configs/accelerate_config_ddp.yaml \
+# Using FSDP configuration optimized for Llama-2-7B fine-tuning.
+
+.venv/bin/accelerate launch \
+  --config_file configs/accelerate_config_fsdp_finetune.yaml \
   --num_processes=$NUM_GPUS \
   --main_process_port=$MAIN_PORT \
-  src/main.py --config-name=stage_3_finetune hydra.run.dir=$OUTPUT_DIR output_dir=$OUTPUT_DIR
+  src/main.py --config-name=stage_3_finetune "$@"

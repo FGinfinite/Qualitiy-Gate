@@ -1,29 +1,58 @@
 # @package _global_
 
-stage: "finetune"
+stage: finetune
+# Stage 3: Fine-tuning Configuration
 
-# The output_dir will be overridden by the launch script, but a default is good practice.
-output_dir: "outputs/stage_3_finetune"
+# Hydra Configuration
+hydra:
+  run:
+    dir: outputs/stage_3_finetune/${now:%Y-%m-%d}/${now:%H-%M-%S}
+  sweep:
+    dir: outputs/stage_3_finetune
+    subdir: ${now:%Y-%m-%d}/${now:%H-%M-%S}-${hydra.job.override_dirname}
+  job:
+    config:
+      override_dirname:
+        kv_sep: "="
+        item_sep: ","
+        exclude_keys:
+          - hydra.run.dir
+          - hydra.sweep.dir
+          - hydra.sweep.subdir
 
+# Model configuration
 model:
-  name: "Qwen/Qwen3-0.6B"
+  name: "meta-llama/Llama-2-7b-hf"
 
+output_dir: ${hydra:run.dir}
+
+# Dataset configuration - 使用选择后的数据
 dataset:
-  path: "outputs/2025-06-15/15-21-10/stage_2_selection/selected_data.jsonl"
+  data_path: "outputs/stage_2_selection/2025-07-17/04-49-54/selected_data.jsonl"
+  max_sequence_length: 1024
+  processing_num_workers: 10
+  overwrite_cache: false
 
+# Training configuration
 training:
   seed: 42
-  max_length: 1024
-  num_train_epochs: 3
-  learning_rate: 2e-4
-  per_device_train_batch_size: 1
-  logging_dir: "${output_dir}/logs"
-  logging_steps: 10
-  save_strategy: "epoch"
-  report_to: "none"
-
-peft:
-  lora_r: 8
-  lora_alpha: 16
-  lora_dropout: 0.05
-  target_modules: ["q_proj", "k_proj", "v_proj"]
+  batch_size: 128  # 总批次大小，会根据设备数自动分配
+  learning_rate: 2e-5
+  epochs: 4
+  optimizer: "AdamW"
+  scheduler: "cosine"  # 余弦衰减
+  warmup_ratio: 0.1    # 线性预热比例
+  peft_mode: "lora"    # 使用LoRA微调
+  lora:
+    r: 128
+    lora_alpha: 512
+    lora_dropout: 0.1
+    target_modules:
+      - "q_proj"
+      - "k_proj"
+      - "v_proj"
+      - "o_proj"
+  gpu_grab:
+    grab: false
+    memory_need_gb: 24
+    over_grab: false
