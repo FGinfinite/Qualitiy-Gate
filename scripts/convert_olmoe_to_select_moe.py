@@ -14,8 +14,10 @@ import torch
 from transformers import AutoConfig, AutoModelForCausalLM
 from transformers.models.olmoe.modeling_olmoe import OlmoeForCausalLM
 
-# Add project root to path for imports
-sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
+# 获取当前脚本所在目录的父目录（即项目根目录）
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)  # 将项目根目录添加到sys.path的最前面
 
 from src.models.select_moe import (
     SelectMoeConfig,
@@ -241,11 +243,11 @@ def main():
                         help="Mean for trash can expert initialization")
     parser.add_argument("--trash-can-init-std", type=float, default=0.02,
                         help="Std for trash can expert initialization")
-    parser.add_argument("--constraint-loss-weight", type=float, default=0.01,
+    parser.add_argument("--constraint-loss-weight", type=float, default=1,
                         help="Weight for constraint loss")
     parser.add_argument("--trash-can-loss-alpha", type=float, default=1.0,
                         help="Alpha parameter for beta distribution loss")
-    parser.add_argument("--trash-can-loss-beta", type=float, default=2.0,
+    parser.add_argument("--trash-can-loss-beta", type=float, default=5.0,
                         help="Beta parameter for beta distribution loss")
     
     # Hub upload

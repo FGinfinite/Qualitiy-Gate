@@ -3,12 +3,12 @@ defaults:
 
 eval:
   model:
-    pretrained: Qwen/Qwen3-0.6B
-    peft: outputs/2025-06-17/20-56-04/stage_3_finetune
+    pretrained: meta-llama/Llama-2-7b-hf
+    peft: outputs/stage_3_finetune/2025-07-18/01-01-10/checkpoint-1804
   tasks:
     - mmlu
-  batch_size: 4
-  device: "cuda"
+  batch_size: auto
+  device: "cuda:1"
 
 output:
   results_path: ${hydra:run.dir}/evaluation_results.json
