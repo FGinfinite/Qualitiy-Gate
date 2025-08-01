@@ -29,7 +29,7 @@ output_dir: ${hydra:run.dir}
 # Dataset configuration - 使用选择后的数据
 dataset:
   data_path: "outputs/stage_2_selection/2025-07-17/04-49-54/selected_data.jsonl"
-  max_sequence_length: 1024
+  max_sequence_length: 512
   processing_num_workers: 10
   overwrite_cache: false
 
@@ -41,7 +41,7 @@ training:
   epochs: 4
   optimizer: "AdamW"
   scheduler: "cosine"  # 余弦衰减
-  warmup_ratio: 0.1    # 线性预热比例
+  warmup_ratio: 0.03    # 线性预热比例（LESS未指出）
   peft_mode: "lora"    # 使用LoRA微调
   lora:
     r: 128

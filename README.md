@@ -2,169 +2,22 @@
 
 ## 项目简介
 
-本项目是一个创新的数据选择实验，旨在探索一种利用混合专家模型（Mixture-of-Experts, MoE）进行高效数据筛选的方法。核心思想是：首先对一个小型MoE模型的Router（路由器）进行预热微调，使其具备数据质量的判别能力；然后，利用这个预热好的Router为大规模数据集打分，筛选出高质量的数据子集；最后，使用这些筛选出的高质量数据来微调一个更大规模的目标模型，并评估该数据选择策略的最终效果。
+本项目是一个创新的数据选择实验，旨在探索一种利用混合专家模型（Mixture-of-Experts, MoE）进行高效数据筛选的方法。核心思想是：
 
-## 技术栈
+1. **预热阶段**: 对小型 Select-MoE 模型的 Router（路由器）进行预热微调，使其具备数据质量判别能力
+2. **选择阶段**: 利用预热的 Router 为大规模数据集打分，筛选高质量数据子集  
+3. **微调阶段**: 使用筛选的高质量数据微调大规模目标模型
+4. **评估阶段**: 评估数据选择策略的最终效果
 
-本项目主要依赖以下技术和库：
+## ✨ 核心创新
 
--   **评估框架**: [`lm-eval`](https://github.com/EleutherAI/lm-evaluation-harness)
--   **启动与分布式训练**: [`accelerate`](https://github.com/huggingface/accelerate)
--   **配置管理**: [`hydra`](https://github.com/facebookresearch/hydra)
--   **核心模型与微调**: [`transformers`](https://github.com/huggingface/transformers), [`peft`](https://github.com/huggingface/peft)
+### Select-MoE 架构特性
+- **垃圾桶专家机制**: 动态添加"垃圾桶专家"，对低质量数据提供负向激励
+- **权重保持**: 完美保持原始 OLMoE 预训练权重，仅新增垃圾桶专家维度
+- **约束损失**: 基于 Beta 分布的自定义约束损失，引导 Router 学习数据质量区分
+- **HuggingFace 兼容**: 支持标准的 `from_pretrained()` 加载和生态工具
 
-## 工作流
-
-整个实验流程被划分为四个核心阶段，每个阶段都有对应的执行脚本。
-
-### 阶段一：选择模型预热 (Stage 1: Selector Pre-warming)
-
--   **目标**: 对一个小型的MoE模型进行全参数微调，特别是训练其Router权重，使其能够根据数据质量将数据路由到不同的专家。
--   **启动命令**:
-    ```bash
-    bash ./scripts/run_stage_1.sh
-    ```
-
-### 阶段二：数据选择 (Stage 2: Data Selection)
-
--   **目标**: 使用在阶段一中预热好的MoE模型，对大规模无标签数据进行推理。通过分析Router的激活权重，为每条数据计算一个质量分数，并筛选出分数最高的顶级数据。
--   **启动命令**:
-    ```bash
-    bash ./scripts/run_stage_2.sh
-    ```
-
-### 阶段三：目标模型微调 (Stage 3: Target Model Finetuning)
-
--   **目标**: 将阶段二筛选出的高质量数据子集用于微调一个更大、更强的目标模型。此阶段采用高效的LoRA（Low-Rank Adaptation）方法进行微调。
--   **启动命令**:
-    ```bash
-    bash ./scripts/run_stage_3.sh
-    ```
-
-### 阶段四：模型评估 (Stage 4: Evaluation)
-
--   **目标**: 使用业界标准的 `lm-eval` 框架，全面评估在筛选数据上微调后的目标模型的性能，并与基线模型进行对比，以验证数据选择策略的有效性。
--   **启动命令**:
-    ```bash
-    bash ./scripts/run_stage_4.sh
-    ```
-
-## 预训练模型转换工具
-
-本项目提供了将 OLMoE 预训练模型转换为 Select-MoE 格式的完整解决方案，转换后的模型可以通过标准的 HuggingFace API 直接加载使用。
-
-### 🚀 快速开始
-
-#### 1. 转换预训练模型
-
-使用转换脚本将 OLMoE 预训练模型转换为 Select-MoE：
-
-```bash
-# 基本转换（推荐使用 bfloat16）
-python src/scripts/convert_olmoe_to_select_moe.py --device cuda:0 --save-path ./converted_models/my_select_moe
-
-# 自定义垃圾桶专家参数
-python src/scripts/convert_olmoe_to_select_moe.py \
-    --device cuda:0 \
-    --save-path ./converted_models/my_select_moe \
-    --trash-can-init-std 0.01 \
-    --constraint-loss-weight 0.02
-```
-
-#### 2. 验证转换结果
-
-对比转换前后的模型权重，确保转换正确性：
-
-```bash
-# 使用内存效率模式和 bfloat16（推荐）
-python src/scripts/compare_converted_model.py \
-    --converted-model ./converted_models/select_moe_converted_OLMoE-1B-7B-0125 \
-    --device cuda:0 \
-    --dtype bfloat16 \
-    --memory-efficient
-```
-
-#### 3. 加载和使用转换后的模型
-
-```python
-from src.models.select_moe import SelectMoeForCausalLM, register_select_moe
-
-# 注册 Select-MoE（必须在加载前执行）
-register_select_moe()
-
-# 直接加载转换后的模型
-model = SelectMoeForCausalLM.from_pretrained("./converted_models/my_select_moe")
-
-# 正常使用，就像其他 HuggingFace 模型一样
-outputs = model(input_ids, output_router_logits=True)
-```
-
-### 📁 转换工具说明
-
-#### `src/scripts/convert_olmoe_to_select_moe.py` - 模型转换脚本
-
-将 OLMoE 预训练模型转换为 Select-MoE 格式并保存。
-
-**主要功能：**
-- 下载并加载 OLMoE 预训练模型
-- 转换为 Select-MoE 架构（添加垃圾桶专家）
-- 保存为标准 HuggingFace 格式
-- 验证转换正确性
-
-**主要参数：**
-```bash
---model              # 源模型名称 (默认: allenai/OLMoE-1B-7B-0125)
---save-path          # 保存路径
---device             # 设备 (cpu, cuda:0, cuda:1, etc.)
---trash-can-init-std # 垃圾桶专家初始化标准差 (默认: 0.02)
---constraint-loss-weight # 约束损失权重 (默认: 0.01)
-```
-
-#### `src/scripts/compare_converted_model.py` - 权重对比验证脚本
-
-对比已转换的 Select-MoE 模型与原始 OLMoE 模型的权重。
-
-**主要功能：**
-- 分别加载原始和转换后的模型
-- 详细对比所有权重
-- 验证gate权重的前64维保持不变
-- 分析新增垃圾桶专家的初始化
-- 内存效率模式支持
-
-**推荐用法：**
-```bash
-# 内存效率模式 + bfloat16（解决显存不足问题）
-python src/scripts/compare_converted_model.py \
-    --converted-model ./converted_models/select_moe_converted_OLMoE-1B-7B-0125 \
-    --device cuda:0 \
-    --dtype bfloat16 \
-    --memory-efficient
-```
-
-### 🎯 核心特性
-
-#### Select-MoE 相对于原始 OLMoE 的改进
-
-1. **动态垃圾桶专家**：
-   - 数量等于 top-k 激活数量
-   - 对低质量数据提供负面激励
-
-2. **权重保持**：
-   - 完美保持所有原始预训练权重
-   - gate 权重的前 64 维完全不变
-   - 只有新增的垃圾桶专家维度是新初始化的
-
-3. **自定义约束损失**：
-   - 基于 Beta 分布的约束损失
-   - 鼓励高质量数据使用原始专家
-   - 惩罚低质量数据，引导其使用垃圾桶专家
-
-4. **HuggingFace 兼容**：
-   - 标准的 `from_pretrained()` 加载
-   - 无需手动转换代码
-   - 支持所有 HuggingFace 生态工具
-
-#### 模型结构对比
+### 模型对比
 
 | 特性 | 原始 OLMoE | Select-MoE |
 |------|------------|------------|
@@ -174,10 +27,158 @@ python src/scripts/compare_converted_model.py \
 | 预训练权重 | - | 完全保持 |
 | 数据质量选择 | 无 | 动态路由到垃圾桶 |
 
-### 🔧 训练设置
+## 🛠️ 技术栈
+
+- **包管理**: [`uv`](https://docs.astral.sh/uv/) - 快速 Python 包管理器
+- **深度学习**: [`torch`](https://pytorch.org/) 2.6.0, [`transformers`](https://github.com/huggingface/transformers)
+- **模型微调**: [`peft`](https://github.com/huggingface/peft) - LoRA 等高效微调方法
+- **分布式训练**: [`accelerate`](https://github.com/huggingface/accelerate) - 多GPU 训练支持
+- **配置管理**: [`hydra`](https://github.com/facebookresearch/hydra) - 灵活的配置系统
+- **模型评估**: [`lm-eval`](https://github.com/EleutherAI/lm-evaluation-harness) - 标准评测框架
+
+## 🚀 快速开始
+
+### 环境准备
+
+```bash
+# 1. 安装 uv 包管理器
+wget -qO- https://astral.sh/uv/install.sh | sh
+
+# 2. 同步项目依赖
+uv sync
+
+# 3. (可选) 配置国内镜像源
+./tools/chsrc set uv
+
+# 4. 激活虚拟环境
+source .venv/bin/activate
+```
+
+### 数据准备
+
+```bash
+# 下载训练数据集
+wget https://hf-mirror.com/datasets/princeton-nlp/less_data/resolve/main/less-data.zip
+unzip less-data.zip
+
+# 下载评估数据集
+export HF_ENDPOINT=https://hf-mirror.com
+huggingface-cli download hails/mmlu_no_train --repo-type dataset 
+huggingface-cli download cais/mmlu --repo-type dataset
+
+# 下载预训练模型
+huggingface-cli download allenai/OLMoE-1B-7B-0125
+huggingface-cli download meta-llama/Llama-2-7b-hf
+```
+
+## 📋 完整执行流程
+
+本项目包含两个主要部分：**模型转换** 和 **四阶段训练流程**。
+
+### 步骤 0: 模型转换
+
+首先需要将 OLMoE 预训练模型转换为 Select-MoE 格式：
+
+```bash
+# 基本转换
+python scripts/convert_olmoe_to_select_moe.py \
+    --save-path ./converted_models/select_moe_converted_OLMoE-1B-7B-0125
+
+# (可选) 验证转换结果
+python scripts/compare_converted_model.py \
+    --converted-model ./converted_models/select_moe_converted_OLMoE-1B-7B-0125 \
+    --dtype bfloat16 \
+```
+
+### 步骤 1: 预热训练 Select-MoE 路由权重
+
+训练 Select-MoE 模型的 Router，使其学习数据质量判别：
+
+```bash
+# 单 GPU 训练
+CUDA_VISIBLE_DEVICES=0 bash scripts/run_stage_1.sh
+
+# 多 GPU 训练
+CUDA_VISIBLE_DEVICES=0,1,2,3 bash scripts/run_stage_1.sh
+
+# 自定义参数训练
+CUDA_VISIBLE_DEVICES=0 bash scripts/run_stage_1.sh \
+    training.learning_rate=5e-5 \
+    training.batch_size=8 \
+    dataset.subset_ratio=0.1
+```
+
+**输出**: 权重文件保存在 `outputs/stage_1_pretrain/YYYY-MM-DD/HH-MM-SS/full_rank_weights.pt`
+
+### 步骤 2: 数据选择
+
+使用预热的 Select-MoE 模型为训练数据打分并筛选：
+
+```bash
+# 使用阶段1的输出进行数据选择
+CUDA_VISIBLE_DEVICES=0 bash scripts/run_stage_2.sh \
+    model_checkpoint_path=outputs/stage_1_pretrain/2025-07-16/01-57-27/full_rank_weights.pt
+
+# 调整选择比例（选择前10%的数据）
+CUDA_VISIBLE_DEVICES=0 bash scripts/run_stage_2.sh \
+    model_checkpoint_path=outputs/stage_1_pretrain/2025-07-16/01-57-27/full_rank_weights.pt \
+    selection_percentage=0.1
+```
+
+**输出**: 筛选数据保存在 `outputs/stage_2_selection/YYYY-MM-DD/HH-MM-SS/selected_data.jsonl`
+
+### 步骤 3: 目标模型微调
+
+使用筛选的数据对 Llama-2-7B 进行 LoRA 微调：
+
+```bash
+# 基本微调
+CUDA_VISIBLE_DEVICES=0,1,2,3 bash scripts/run_stage_3.sh \
+    dataset.data_path=outputs/stage_2_selection/2025-07-17/04-49-54/selected_data.jsonl
+
+# 自定义 LoRA 参数
+CUDA_VISIBLE_DEVICES=0,1 bash scripts/run_stage_3.sh \
+    dataset.data_path=outputs/stage_2_selection/2025-07-17/04-49-54/selected_data.jsonl \
+    training.lora.r=64 \
+    training.lora.lora_alpha=256
+```
+
+**输出**: LoRA 适配器保存在 `outputs/stage_3_finetune/YYYY-MM-DD/HH-MM-SS/checkpoint-XXXX/`
+
+### 步骤 4: 模型评估
+
+使用 `lm-eval` 评估微调后模型的性能：
+
+```bash
+# MMLU 评估
+CUDA_VISIBLE_DEVICES=0,1,2,3 accelerate launch -m lm_eval --model hf \
+    --model_args pretrained=meta-llama/Llama-2-7b-hf,peft=outputs/stage_3_finetune/2025-07-18/01-01-10/checkpoint-1804 \
+    --tasks mmlu \
+    --batch_size auto \
+    --output_path outputs/stage_4_eval
+
+# 多任务评估
+CUDA_VISIBLE_DEVICES=0,1,2,3 accelerate launch -m lm_eval --model hf \
+    --model_args pretrained=meta-llama/Llama-2-7b-hf,peft=outputs/stage_3_finetune/2025-07-18/01-01-10/checkpoint-1804 \
+    --tasks mmlu,hellaswag,arc_easy,arc_challenge \
+    --batch_size auto \
+    --output_path outputs/stage_4_eval
+```
+
+## 🔧 高级用法
+
+### 程序化使用 Select-MoE 模型
 
 ```python
-# 训练时必须开启 router logits
+from src.models.select_moe import SelectMoeForCausalLM, register_select_moe
+
+# 注册 Select-MoE（必须在加载前执行）
+register_select_moe()
+
+# 加载转换后的模型
+model = SelectMoeForCausalLM.from_pretrained("./converted_models/select_moe_converted_OLMoE-1B-7B-0125")
+
+# 训练时开启 router logits
 outputs = model(
     input_ids=input_ids,
     attention_mask=attention_mask,
@@ -185,99 +186,111 @@ outputs = model(
     output_router_logits=True  # 重要：训练时必须为True
 )
 
-# 损失已包含所有组件
-total_loss = outputs.loss  # 包含语言建模损失 + 负载均衡损失 + 约束损失
+# 损失包含所有组件
+total_loss = outputs.loss  # 语言建模损失 + 负载均衡损失 + 约束损失
 ```
 
-## 注意事项
+### 参数覆写机制
 
-### 评估阶段
+项目使用 Hydra 配置管理，支持灵活的命令行参数覆写：
 
-为了确保 `lm-eval` 能够顺利运行，特别是针对 MMLU 数据集，强烈建议提前手动下载所需的数据文件。否则，评估脚本可能会因网络问题或文件校验失败而出错。
-
-请执行以下命令下载 MMLU 数据集：
 ```bash
-HF_ENDPOINT=https://hf-mirror.com huggingface-cli download hails/mmlu_no_train --repo-type dataset 
-HF_ENDPOINT=https://hf-mirror.com huggingface-cli download cais/mmlu --repo-type dataset
+# 基本语法
+bash scripts/script_name.sh key1=value1 key2.subkey=value2
+
+# 实际示例
+bash scripts/run_stage_1.sh training.learning_rate=1e-5 dataset.subset_ratio=0.1
+bash scripts/run_stage_2.sh selection_percentage=0.1 data_process.batch_size=32
+bash scripts/run_stage_3.sh training.lora.r=128 training.batch_size=64
 ```
 
-如果您的环境无法直接访问 Hugging Face Hub，您可能还需要手动修改 `hails/mmlu_no_train` 的数据加载脚本，将其中的下载地址替换为可用的镜像地址。
+## ⚙️ 配置说明
 
-### 内存管理建议
+### 主要配置文件
 
-1. **GPU 内存不足**：
-   - 使用 `--memory-efficient` 标志
-   - 选择 `--dtype bfloat16` 或 `float16`
-   - 考虑使用 CPU 模式
+- `configs/stage_1_pretrain.yaml` - 阶段1预热训练配置
+- `configs/stage_2_selection.yaml` - 阶段2数据选择配置  
+- `configs/stage_3_finetune.yaml` - 阶段3模型微调配置
+- `configs/stage_4_evaluate.yaml` - 阶段4模型评估配置
 
-2. **大模型处理**：
-   - 确保有足够的磁盘空间保存转换后的模型
-   - 建议至少 15GB GPU 内存用于 OLMoE-1B-7B 模型
+### 关键参数说明
 
-## 进行事项
+**阶段1 (预热训练)**:
+- `training.peft_mode`: 训练模式 (`full_rank` 或 `lora`)
+- `training.learning_rate`: 学习率 (默认: 1e-4)
+- `dataset.subset_ratio`: 训练数据比例 (默认: 0.05)
 
-1.  **新增"垃圾桶专家"及其初始化策略**：目前阶段一仅微调了MoE的路由权重。未来的计划是实现动态增加"垃圾桶专家"的维度。当模型激活Top-K个专家时，将对应新增K个"垃圾桶专家"。这些新专家的权重将通过正态分布（均值为0，方差为0.02）进行初始化，类似于在词表中新增token的做法。
+**阶段2 (数据选择)**:
+- `selection_percentage`: 数据选择比例 (默认: 0.05)
+- `model_checkpoint_path`: 阶段1输出的权重路径
 
-2.  **"垃圾桶"专家的行为特点**："垃圾桶"专家在模型前向传播时不进行实际的复杂计算，而是直接输出一个符合维度形状的全零向量。这样设计的目的是为了在模型输出中引入一种"负向激励"，从而训练路由权重学会识别并避免将有价值的数据分配给这些无效的"垃圾桶"专家。
+**阶段3 (模型微调)**:
+- `training.lora.r`: LoRA 秩 (默认: 128)
+- `training.learning_rate`: 学习率 (默认: 2e-5)
+- `dataset.data_path`: 阶段2输出的数据路径
 
+## 💡 重要提示
 
-## Custom Constraint Loss Design
+### 环境变量
+每个脚本执行前都需要设置 `CUDA_VISIBLE_DEVICES`：
+```bash
+export CUDA_VISIBLE_DEVICES=0,1,2,3  # 指定使用的GPU
+```
+
+### 内存需求
+- **阶段1**: Select-MoE 全参数训练，建议至少 16GB GPU 内存
+- **阶段2**: 数据选择推理，内存需求较小
+- **阶段3**: Llama-2-7B LoRA 训练，建议 24GB 以上 GPU 内存
+
+### 路径依赖
+注意各阶段之间的路径依赖关系，确保使用正确的输入路径：
+- 阶段2 需要阶段1 的 `full_rank_weights.pt`
+- 阶段3 需要阶段2 的 `selected_data.jsonl`  
+- 阶段4 需要阶段3 的 LoRA 检查点
+
+## 📖 详细文档
+
+更多详细的执行说明和参数配置，请参考 [`docs.md`](docs.md) 文件。
+
+## 🔬 技术原理
 
 为了引导Router（路由器）学习区分高质量和低质量数据，我们引入了一种特殊的约束损失函数。该损失函数的核心思想是：对于一个给定的输入，我们期望Router的Top-K专家选择概率之和（`ratio`）接近于1，而"垃圾桶"专家的选择概率之和（`1 - ratio`）接近于0。
 
 这种机制通过一个定制的损失函数来实现，该函数受到Beta分布的启发，旨在将 `ratio` 值推向1。
 
-### 核心参数
-
-约束损失的设计主要由以下两个超参数控制：
-
-*   `constraint_loss_weight` (`w_constraint`): 这个参数是约束损失在总损失中的权重。它决定了我们对"数据质量筛选"任务的重视程度。
-    *   **作用**: 调整 `w_constraint` 可以平衡模型的两个目标：一是标准的交叉熵损失（`L_ce`），关注于预测下一个词的准确性；二是我们定义的约束损失（`L_constraint`），关注于路由的正确性。
-    *   **直观理解**: `w_constraint` 越高，模型就越倾向于将数据清晰地分类到"好"或"坏"的类别中，即使这可能轻微影响其语言建模的性能。
-
-*   `trash_can_loss_beta` (`β`): 这个参数控制约束损失函数对于"垃圾桶"专家激活的惩罚力度。
-    *   **作用**: `β` 值决定了损失函数在 `ratio` 接近0（即"垃圾桶"专家被激活）时的梯度大小。一个较大的 `β` 值意味着对选择"垃圾桶"专家的行为施加更强的惩罚。
-    *   **直观理解**: 如果将 `ratio` 想象成一个滑块，`β` 就是一个弹簧，当滑块试图滑向0时，`β` 越大的弹簧会用越大的力将其推回1。
-
-### 计算公式
+### 约束损失设计
 
 约束损失 `L_constraint` 的计算方式如下：
 
-`L_constraint = -((α - 1) * log(ratio) + (β - 1) * log(1 - ratio))`
+```
+L_constraint = -((α - 1) * log(ratio) + (β - 1) * log(1 - ratio))
+```
 
 其中：
-*   `ratio` 是Top-K专家的选择概率之和。
-*   `α` (`trash_can_loss_alpha`) 和 `β` (`trash_can_loss_beta`) 是控制损失函数形态的参数。在我们的设计中，我们将 `α` 固定为1，从而简化公式并专注于 `β` 的影响。当 `α=1` 时，第一项 `(α - 1) * log(ratio)` 为0，公式简化为对 `log(1 - ratio)` 的惩罚。
-*   `log` 是自然对数。
+- `ratio` 是 Top-K 专家的选择概率之和
+- `α` (`trash_can_loss_alpha`) 和 `β` (`trash_can_loss_beta`) 是控制损失函数形态的参数
+- 在实现中，`α` 固定为1，专注于 `β` 的影响
 
-总损失 `L_total` 的计算公式为：
+总损失为：
+```
+L_total = L_ce + w_constraint * L_constraint
+```
 
-`L_total = L_ce + w_constraint * L_constraint`
+### 核心参数
 
-*   `L_ce` 是标准的交叉熵损失。
-*   `w_constraint` 是 `constraint_loss_weight` 参数。
+- **`constraint_loss_weight`**: 约束损失在总损失中的权重，控制数据质量筛选的重视程度
+- **`trash_can_loss_beta`**: 控制对"垃圾桶"专家激活的惩罚力度
 
-### 协同工作机制
+### "垃圾桶"专家机制
 
-`w_constraint` 和 `β` 协同工作，共同塑造了Router的行为：
+1. **动态数量**: 垃圾桶专家数量等于 top-k 激活数量
+2. **行为特点**: 输出全零向量，提供负向激励
+3. **初始化策略**: 通过正态分布初始化，参数可配置
 
-1.  **`β` 定义了"什么是错误"**: 它通过对 `1 - ratio` 的惩罚，明确了将数据路由到"垃圾桶"专家是模型需要避免的错误行为。
-2.  **`w_constraint` 决定了"犯错的代价"**: 它将这个"错误"的严重性量化，并将其整合到模型的总学习目标中。
+## 🚧 开发计划
 
-### 直观类比
+1. **垃圾桶专家优化**: 实现更智能的垃圾桶专家初始化和行为策略
+2. **多任务适配**: 扩展支持更多下游任务的数据选择
+3. **效率优化**: 优化训练和推理效率，支持更大规模模型
+4. **评估扩展**: 增加更多评估指标和基准测试
 
-*   想象一个分类任务，`β` 就像是定义了类别边界的清晰度。`β` 越大，边界越明确，模型越不能容忍模棱两可的分类。
-*   `w_constraint` 则是这个分类任务在整个项目中的"重要性"或"优先级"。`w_constraint` 越高，意味着"正确分类"比其他任务（如语言建模）更重要。
-
-### "垃圾桶"专家权重初始化策略
-
-在模型的实现过程中，我们对新增的"垃圾桶"专家的路由权重初始化策略进行了一次重要的迭代。
-
-最初，我们借用了模型自身配置文件 (`config.json`) 中的 `initializer_range` 参数（在 `allenai/OLMoE-1B-7B-0924` 模型中其值为 `0.02`）作为新权重初始化的标准差。这是一个快速且合理的起点，因为它遵循了模型原始设计者（AllenAI）为新层（如分类头）设定的初始化标准。
-
-然而，为了增强代码的**可读性**和**可控性**，我们根据反馈进行了重构。我们将这个初始化过程从依赖一个通用的、可能在多处共享的 `initializer_range` 参数，转变为由两个在我们的训练配置文件 `configs/stage_1_pretrain.yaml` 中明确定义的、专门的超参数来控制：
-
-*   `trash_can_init_mean`: 初始化正态分布的均值。
-*   `trash_can_init_std`: 初始化正态分布的标准差。
-
-这一改变使得我们对"垃圾桶"专家这一核心机制的控制更加**显式**和**精确**，避免了对模型内部配置的隐式依赖，从而提升了我们代码的模块化程度和长期可维护性。

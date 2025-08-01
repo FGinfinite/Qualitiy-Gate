@@ -1,9 +1,6 @@
 #!/bin/bash
 # Description: This script runs the third stage of the project: fine-tuning Llama-2-7B with LoRA.
 # Usage: ./scripts/run_stage_3.sh
-
-export CUDA_VISIBLE_DEVICES=0,1,3,4,5
-
 # If CUDA_VISIBLE_DEVICES is not set, default to a single GPU.
 if [ -z "$CUDA_VISIBLE_DEVICES" ]; then
   echo "Warning: CUDA_VISIBLE_DEVICES is not set. Defaulting to 1 GPU."
