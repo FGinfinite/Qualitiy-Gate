@@ -6,10 +6,10 @@ stage: pretrain
 # Hydra Configuration
 hydra:
   run:
-    dir: outputs/stage_1_pretrain/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    dir: outputs/stage_1_pretrain/${now:%Y-%m-%d}/${now:%H-%M-%S}-batch=${training.batch_size},lr=${training.learning_rate},beta=${training.trash_can_loss_beta}
   sweep:
     dir: outputs/stage_1_pretrain
-    subdir: ${now:%Y-%m-%d}/${now:%H-%M-%S}-${hydra.job.override_dirname}
+    subdir: ${now:%Y-%m-%d}/${now:%H-%M-%S}-batch=${training.batch_size},lr=${training.learning_rate},beta=${training.trash_can_loss_beta}-${hydra.job.override_dirname}
   job:
     config:
       override_dirname:
@@ -59,4 +59,7 @@ training:
     grab: false
     memory_need_gb: 24
     over_grab: false
+  # Custom loss parameters for trash can experts
+  trash_can_loss_alpha: 1.0
+  trash_can_loss_beta: 2.0
 

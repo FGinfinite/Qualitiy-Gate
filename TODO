@@ -85,3 +85,8 @@ def custom_constraint_loss(
 LESS的训练设置：
 线性预热，余弦衰减，学习率2e-5，batch size=128，epoch=4，
 Lora：r=128, alpha=512, dropout=0.1, attention的所有参数，
+
+约束的正确性
+使用超参数控制损失
+
+在一个batch内计算的约束损失是否会影响效果？

@@ -412,7 +412,7 @@ class SelectMoeModel(SelectMoePreTrainedModel):
 
 
 def custom_constraint_loss(
-    router_logits: List[torch.Tensor], config: SelectMoeConfig
+    router_logits: List[torch.Tensor], config: SelectMoeConfig, debug: bool = True
 ) -> torch.Tensor:
     """
     Compute custom constraint loss for trash can experts.
@@ -420,6 +420,11 @@ def custom_constraint_loss(
     This loss encourages the model to balance between using real experts and trash can experts
     based on data quality. Higher trash can usage should correlate with lower data quality.
     """
+    if debug:
+        print(f"\n=== Custom Constraint Loss Debug ===")
+        print(f"router_logits type: {type(router_logits)}")
+        print(f"Number of layers (len(router_logits)): {len(router_logits)}")
+
     if len(router_logits) == 0:
         return torch.tensor(
             0.0, device=next(iter(router_logits)).device if router_logits else "cpu"
@@ -428,30 +433,55 @@ def custom_constraint_loss(
     total_loss = 0.0
     num_layers = 0
 
-    for layer_router_logits in router_logits:
+    for layer_idx, layer_router_logits in enumerate(router_logits):
         if layer_router_logits is None:
             continue
 
+        if debug:
+            print(f"\n--- Layer {layer_idx} ---")
+            print(f"layer_router_logits shape: {layer_router_logits.shape}")
+            print(f"layer_router_logits device: {layer_router_logits.device}")
+
         # Get routing probabilities for all experts
         routing_probs = F.softmax(layer_router_logits, dim=-1)
+        if debug:
+            print(f"routing_probs shape: {routing_probs.shape}")
 
         # Get top-k routing decisions (actual expert selection)
         top_k_probs, selected_experts = torch.topk(
             routing_probs, k=config.num_experts_per_tok, dim=-1
         )
+        if debug:
+            print(f"top_k_probs shape: {top_k_probs.shape}")
+            print(f"selected_experts shape: {selected_experts.shape}")
+            print(f"config.num_experts: {config.num_experts}")
+            print(f"config.num_experts_per_tok: {config.num_experts_per_tok}")
 
         # Calculate trash can expert usage ratio
         # Trash can experts are indices >= config.num_experts
         trash_can_mask = selected_experts >= config.num_experts
-        trash_can_probs = top_k_probs * trash_can_mask.float()
-        trash_can_ratio = trash_can_probs.sum(dim=-1)  # Shape: (batch_size * seq_len,)
+        if debug:
+            print(f"trash_can_mask shape: {trash_can_mask.shape}")
+            print(f"trash_can_mask sum: {trash_can_mask.sum().item()}")
 
+        trash_can_probs = top_k_probs * trash_can_mask.float()
+        if debug:
+            print(f"trash_can_probs shape: {trash_can_probs.shape}")
+
+        trash_can_ratio = trash_can_probs.sum(dim=-1)  # Shape: (batch_size * seq_len,)
+        if debug:
+            print(f"trash_can_ratio shape: {trash_can_ratio.shape}")
+            print(
+                f"trash_can_ratio min/max/mean: {trash_can_ratio.min().item():.4f}/{trash_can_ratio.max().item():.4f}/{trash_can_ratio.mean().item():.4f}"
+            )
 
         # Beta distribution inspired loss to encourage balanced usage
         # When trash_can_ratio is too low (high quality data): loss increases
         # When trash_can_ratio is too high (low quality data): loss decreases
         alpha = config.trash_can_loss_alpha
         beta = config.trash_can_loss_beta
+        if debug:
+            print(f"alpha: {alpha}, beta: {beta}")
 
         # Clamp ratio to avoid log(0)
         ratio_clamped = torch.clamp(trash_can_ratio, min=1e-8, max=1.0 - 1e-8)
@@ -468,10 +498,21 @@ def custom_constraint_loss(
                 + (beta - 1) * torch.log(1 - ratio_clamped)
             )
 
+        if debug:
+            print(f"layer_loss shape: {layer_loss.shape}")
+            print(
+                f"layer_loss min/max/mean: {layer_loss.min().item():.4f}/{layer_loss.max().item():.4f}/{layer_loss.mean().item():.4f}"
+            )
+
         total_loss += layer_loss.mean()
         num_layers += 1
 
-    return total_loss / max(num_layers, 1)
+    final_loss = total_loss / max(num_layers, 1)
+    if debug:
+        print(f"\nFinal constraint loss: {final_loss.item():.6f}")
+        print("=== End Debug ===\n")
+
+    return final_loss
 
 
 class SelectMoeForCausalLM(SelectMoePreTrainedModel):
@@ -528,6 +569,11 @@ class SelectMoeForCausalLM(SelectMoePreTrainedModel):
         logits_to_keep: Union[int, torch.Tensor] = 0,
         **loss_kwargs,
     ) -> Union[Tuple, MoeCausalLMOutputWithPast]:
+        # if input_ids is not None:
+        #     print(f"[SelectMoeForCausalLM] seq_len: {input_ids.shape[1]}")
+        # elif inputs_embeds is not None:
+        #     print(f"[SelectMoeForCausalLM] seq_len: {inputs_embeds.shape[1]}")
+
         output_attentions = (
             output_attentions
             if output_attentions is not None
@@ -574,7 +620,7 @@ class SelectMoeForCausalLM(SelectMoePreTrainedModel):
         loss = None
         if labels is not None:
             loss = self.loss_function(logits, labels, self.vocab_size, **loss_kwargs)
-            
+
         # print(f"Loss: {loss.item() if loss is not None else 'N/A'}")
 
         aux_loss = None

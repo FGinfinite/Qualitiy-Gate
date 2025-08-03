@@ -78,6 +78,12 @@ def get_model_and_tokenizer(
     model = SelectMoeForCausalLM.from_pretrained(
         cfg.selector_model.path, **model_kwargs
     )
+    
+    # 从训练配置中覆写损失函数参数
+    if hasattr(cfg.training, 'trash_can_loss_alpha'):
+        model.config.trash_can_loss_alpha = cfg.training.trash_can_loss_alpha
+    if hasattr(cfg.training, 'trash_can_loss_beta'):
+        model.config.trash_can_loss_beta = cfg.training.trash_can_loss_beta
 
     # 加载分词器（使用原始模型名称）
     tokenizer = AutoTokenizer.from_pretrained(cfg.selector_model.tokenizer_name)

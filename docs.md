@@ -13,9 +13,9 @@ Select-MoE 项目包含两个主要部分：
 ## 环境准备
 
 本项目使用`uv`作为包管理工具，执行以下命令以完成同步：
-1. `uv`安装：`wget -qO- https://astral.sh/uv/install.sh | sh`
+1. `uv`安装：`./tools/install.sh`
 2. 环境同步：`uv sync`
-3. 修改源：`./tools/chsrc set uv`
+3. 修改源（可选）：`./tools/chsrc set uv`
 
 ---
 

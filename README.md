@@ -254,22 +254,28 @@ export CUDA_VISIBLE_DEVICES=0,1,2,3  # 指定使用的GPU
 
 ## 🔬 技术原理
 
-为了引导Router（路由器）学习区分高质量和低质量数据，我们引入了一种特殊的约束损失函数。该损失函数的核心思想是：对于一个给定的输入，我们期望Router的Top-K专家选择概率之和（`ratio`）接近于1，而"垃圾桶"专家的选择概率之和（`1 - ratio`）接近于0。
-
-这种机制通过一个定制的损失函数来实现，该函数受到Beta分布的启发，旨在将 `ratio` 值推向1。
+为了引导Router（路由器）学习区分高质量和低质量数据，我们引入了一种特殊的约束损失函数。该损失函数基于Beta分布设计，用于调节垃圾桶专家的激活比例。
 
 ### 约束损失设计
 
 约束损失 `L_constraint` 的计算方式如下：
 
 ```
-L_constraint = -((α - 1) * log(ratio) + (β - 1) * log(1 - ratio))
+trash_can_ratio = 1 - top_k_expert_ratio
+L_constraint = -((α - 1) * log(trash_can_ratio) + (β - 1) * log(1 - trash_can_ratio))
 ```
 
-其中：
-- `ratio` 是 Top-K 专家的选择概率之和
-- `α` (`trash_can_loss_alpha`) 和 `β` (`trash_can_loss_beta`) 是控制损失函数形态的参数
-- 在实现中，`α` 固定为1，专注于 `β` 的影响
+**损失函数特性**：
+- **计算粒度**: 对每个token在每个MoE层分别计算损失，然后聚合为整个batch的平均损失
+- **行为特征**: 当α=1.0, β=2.0时，损失函数鼓励适度的垃圾桶专家使用
+  - `trash_can_ratio` 过低时：损失增加（惩罚垃圾桶专家使用不足）
+  - `trash_can_ratio` 过高时：损失也增加（惩罚垃圾桶专家过度使用）
+  - 最优值在中等范围，具体取决于α和β参数
+
+**参数说明**：
+- `trash_can_ratio`: 垃圾桶专家激活概率之和（1 - top_k_expert_ratio）
+- `α` (`trash_can_loss_alpha`): 控制对低垃圾桶使用的惩罚强度
+- `β` (`trash_can_loss_beta`): 控制对高垃圾桶使用的惩罚强度
 
 总损失为：
 ```
@@ -279,7 +285,8 @@ L_total = L_ce + w_constraint * L_constraint
 ### 核心参数
 
 - **`constraint_loss_weight`**: 约束损失在总损失中的权重，控制数据质量筛选的重视程度
-- **`trash_can_loss_beta`**: 控制对"垃圾桶"专家激活的惩罚力度
+- **`trash_can_loss_alpha`**: 控制对低垃圾桶专家激活的惩罚强度（可在配置文件中调节）
+- **`trash_can_loss_beta`**: 控制对高垃圾桶专家激活的惩罚强度（可在配置文件中调节）
 
 ### "垃圾桶"专家机制
 
