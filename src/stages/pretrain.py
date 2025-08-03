@@ -1,10 +1,10 @@
-import torch
 import os
+from typing import Tuple
+
+import torch
 from accelerate import Accelerator
-from src.data import load_and_prepare_dataset, encode_data, get_data_statistics
 from omegaconf import DictConfig
 from peft import LoraConfig, TaskType, get_peft_model
-from typing import Tuple
 from transformers import (
     AutoTokenizer,
     DataCollatorForSeq2Seq,
@@ -12,14 +12,12 @@ from transformers import (
     TrainingArguments,
 )
 
-from src.models.select_moe import (
-    SelectMoeForCausalLM,
-    register_select_moe
-)
+from src.data import encode_data, get_data_statistics, load_and_prepare_dataset
+from src.models.select_moe import SelectMoeForCausalLM, register_select_moe
 from src.training.full_rank_finetuning import (
-    setup_full_rank_training,
+    print_trainable_parameters,
     save_full_rank_weights,
-    print_trainable_parameters
+    setup_full_rank_training,
 )
 from utils.tools import grab_gpu
 
@@ -69,7 +67,7 @@ def get_model_and_tokenizer(
     """
     # 注册 Select-MoE 模型
     register_select_moe()
-    
+
     # 加载预转换的 Select-MoE 模型
     model_kwargs = {
         "low_cpu_mem_usage": True,
@@ -78,12 +76,14 @@ def get_model_and_tokenizer(
     model = SelectMoeForCausalLM.from_pretrained(
         cfg.selector_model.path, **model_kwargs
     )
-    
+
     # 从训练配置中覆写损失函数参数
-    if hasattr(cfg.training, 'trash_can_loss_alpha'):
+    if hasattr(cfg.training, "trash_can_loss_alpha"):
         model.config.trash_can_loss_alpha = cfg.training.trash_can_loss_alpha
-    if hasattr(cfg.training, 'trash_can_loss_beta'):
+    if hasattr(cfg.training, "trash_can_loss_beta"):
         model.config.trash_can_loss_beta = cfg.training.trash_can_loss_beta
+    if hasattr(cfg.training, "constraint_loss_weight"):
+        model.config.constraint_loss_weight = cfg.training.constraint_loss_weight
 
     # 加载分词器（使用原始模型名称）
     tokenizer = AutoTokenizer.from_pretrained(cfg.selector_model.tokenizer_name)
@@ -91,10 +91,6 @@ def get_model_and_tokenizer(
         tokenizer.pad_token = tokenizer.eos_token
 
     return model, tokenizer
-
-
-
-
 
 
 # ---------------------------------------------------------------------------
@@ -127,7 +123,7 @@ def pretrain(cfg: DictConfig) -> None:
 
     # 2. 配置微调模式
     print(f"正在为 '{cfg.training.peft_mode}' 模式配置微调...")
-    
+
     if cfg.training.peft_mode == "lora":
         peft_config = get_peft_config(cfg)
         model = get_peft_model(model, peft_config)
@@ -144,29 +140,27 @@ def pretrain(cfg: DictConfig) -> None:
 
     # 4. 加载并准备数据集
     dataset = load_and_prepare_dataset(cfg)
-    
+
     # 5. 编码数据集
     tokenized_dataset = encode_data(
         dataset,
         tokenizer,
         max_seq_length=cfg.dataset.max_sequence_length,
-        processing_num_workers=getattr(cfg.dataset, 'processing_num_workers', 10),
-        overwrite_cache=getattr(cfg.dataset, 'overwrite_cache', False)
+        processing_num_workers=getattr(cfg.dataset, "processing_num_workers", 10),
+        overwrite_cache=getattr(cfg.dataset, "overwrite_cache", False),
     )
-    
+
     # 6. 输出数据统计信息
     get_data_statistics(tokenized_dataset)
-    
+
     data_collator = DataCollatorForSeq2Seq(
-        tokenizer=tokenizer, 
-        model=model, 
-        padding="longest"
+        tokenizer=tokenizer, model=model, padding="longest"
     )
 
     # 7. 配置训练参数
     # LoRA模式：保存中间权重；全秩微调：不保存中间权重
     save_strategy = "epoch" if cfg.training.peft_mode == "lora" else "no"
-    
+
     training_args = TrainingArguments(
         output_dir=cfg.output_dir,
         num_train_epochs=cfg.training.epochs,
@@ -211,8 +205,12 @@ def pretrain(cfg: DictConfig) -> None:
             trainer.save_model(cfg.output_dir)
         elif cfg.training.peft_mode == "full_rank":
             print(f"正在将全秩微调权重保存到 {cfg.output_dir}")
-            full_rank_weights_path = os.path.join(cfg.output_dir, "full_rank_weights.pt")
-            save_full_rank_weights(model, list(cfg.training.lora.target_modules), full_rank_weights_path)
+            full_rank_weights_path = os.path.join(
+                cfg.output_dir, "full_rank_weights.pt"
+            )
+            save_full_rank_weights(
+                model, list(cfg.training.lora.target_modules), full_rank_weights_path
+            )
 
     print("\n--- 阶段 1：预训练完成 ---")
 

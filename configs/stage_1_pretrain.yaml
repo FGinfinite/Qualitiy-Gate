@@ -61,5 +61,6 @@ training:
     over_grab: false
   # Custom loss parameters for trash can experts
   trash_can_loss_alpha: 1.0
-  trash_can_loss_beta: 2.0
+  trash_can_loss_beta: 5.0
+  constraint_loss_weight: 1.0
 

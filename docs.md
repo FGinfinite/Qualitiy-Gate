@@ -32,7 +32,7 @@ Select-MoE 项目包含两个主要部分：
 - `--save-path`: 转换后模型保存路径
 - `--device`: 运行设备 (如 `cuda:0`, `cpu`)
 - `--trash-can-init-std`: 垃圾桶专家初始化标准差 (默认: 0.02)
-- `--constraint-loss-weight`: 约束损失权重 (默认: 0.01)
+- `--constraint-loss-weight`: 约束损失权重 (默认: 1)
 - `--seed`: 随机种子 (默认: 42)
 
 **执行示例**:
@@ -75,7 +75,7 @@ python scripts/compare_converted_model.py \
 
 # 详细对比模式
 python scripts/compare_converted_model.py \
-    --converted-model ./converted_models/my_select_moe \
+    --converted-model ./converted_models/select_moe_converted_OLMoE-1B-7B-0125 \
     --device cuda:0 \
     --tolerance 1e-8
 ```
@@ -263,14 +263,16 @@ bash scripts/run_stage_2.sh selection_percentage=0.1 data_process.batch_size=32
 ```bash
 wget https://hf-mirror.com/datasets/princeton-nlp/less_data/resolve/main/less-data.zip
 unzip less-data.zip
+mv data dataset
 ```
 
 
 ### 6. 评估准备
 为确保 `lm-eval` 正常运行，建议提前下载MMLU数据集：
 ```bash
-HF_ENDPOINT=https://hf-mirror.com huggingface-cli download hails/mmlu_no_train --repo-type dataset 
-HF_ENDPOINT=https://hf-mirror.com huggingface-cli download cais/mmlu --repo-type dataset
+export HF_ENDPOINT=https://hf-mirror.com
+huggingface-cli download hails/mmlu_no_train --repo-type dataset 
+huggingface-cli download cais/mmlu --repo-type dataset
 ```
 
 ### 7. 模型准备
