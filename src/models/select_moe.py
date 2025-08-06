@@ -2,8 +2,8 @@
 # Licensed under the Apache License, Version 2.0
 
 """
-使用垃圾桶专家的自定义OLMoE模型，用于transformers注册。
-基于src/modeling.py中的TrashCanMoE实现。
+使用两层路由架构的自定义Select-MoE模型，用于transformers注册。
+基于质量门控和MoE专家的组合实现。
 """
 
 from typing import List, Optional, Tuple, Union
@@ -24,7 +24,6 @@ from transformers.modeling_outputs import (
 from transformers.models.olmoe.modeling_olmoe import (
     OlmoeConfig,
     OlmoeDecoderLayer,
-    OlmoeSparseMoeBlock,
     load_balancing_loss_func,
 )
 from transformers.utils import logging
@@ -142,126 +141,6 @@ class TrashExpert(nn.Module):
             return torch.zeros_like(hidden_states)
 
 
-class TrashCanSparseMoeBlock(nn.Module):
-    """
-    带有垃圾桶专家的修改版OlmoeSparseMoeBlock。
-    这些专家不执行任何计算，返回零作为对路由器的负激励。
-    """
-
-    def __init__(
-        self, config: SelectMoeConfig, original_moe: OlmoeSparseMoeBlock = None
-    ):
-        super().__init__()
-
-        # 基础MoE设置
-        self.top_k = config.num_experts_per_tok
-        self.norm_topk_prob = config.norm_topk_prob
-        self.original_num_experts = config.num_experts
-
-        # 垃圾桶专家数量等于top_k
-        self.trash_can_experts_count = self.top_k
-
-        # 总专家数 = 原始 + 垃圾桶
-        self.total_num_experts = (
-            self.original_num_experts + self.trash_can_experts_count
-        )
-
-        # 从原始MoE复制专家或创建新专家
-        if original_moe is not None:
-            self.experts = original_moe.experts
-        else:
-            # 创建新专家（用于from_config初始化）
-            from transformers.models.olmoe.modeling_olmoe import OlmoeMLP
-
-            self.experts = nn.ModuleList(
-                [OlmoeMLP(config) for _ in range(self.original_num_experts)]
-            )
-
-        # 创建扩展的门控
-        self.gate = nn.Linear(config.hidden_size, self.total_num_experts, bias=False)
-
-        # 初始化门控权重
-        if original_moe is not None:
-            # 复制原始门控权重
-            self.gate.weight.data[: self.original_num_experts, :] = (
-                original_moe.gate.weight.data.to(self.gate.weight.dtype)
-            )
-        else:
-            # 正常初始化原始专家权重
-            nn.init.normal_(
-                self.gate.weight.data[: self.original_num_experts, :],
-                mean=0.0,
-                std=config.initializer_range,
-            )
-
-        # 初始化垃圾桶专家权重
-        nn.init.normal_(
-            self.gate.weight.data[self.original_num_experts :, :],
-            mean=config.trash_can_init_mean,
-            std=config.trash_can_init_std,
-        )
-
-    def forward(self, hidden_states: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        TrashCanSparseMoeBlock的前向传播。
-
-        将tokens路由到原始专家或垃圾桶，垃圾桶中的tokens被有效地清零。
-        始终返回router_logits用于损失计算。
-        """
-        batch_size, sequence_length, hidden_dim = hidden_states.shape
-        hidden_states_reshaped = hidden_states.view(-1, hidden_dim)
-
-        # 从扩展的门控获取路由logits
-        router_logits = self.gate(hidden_states_reshaped)
-
-        # 获取top-k路由权重和选中的专家
-        routing_weights = F.softmax(router_logits, dim=1, dtype=torch.float)
-        routing_weights, selected_experts = torch.topk(
-            routing_weights, self.top_k, dim=-1
-        )
-
-        if self.norm_topk_prob:
-            routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
-
-        routing_weights = routing_weights.to(hidden_states.dtype)
-
-        # 将最终隐藏状态初始化为零
-        # 路由到垃圾桶的tokens将保持为零
-        final_hidden_states = torch.zeros_like(hidden_states_reshaped)
-
-        # 创建独热掩码来识别哪些tokens被路由到哪个专家
-        expert_mask = torch.nn.functional.one_hot(
-            selected_experts, num_classes=self.total_num_experts
-        ).permute(2, 1, 0)
-
-        # 仅处理原始专家（垃圾桶专家默认输出零）
-        for expert_idx in range(self.original_num_experts):
-            expert_layer = self.experts[expert_idx]
-            # 找到哪些tokens被路由到当前专家
-            idx, top_x = torch.where(expert_mask[expert_idx])
-
-            if top_x.shape[0] == 0:
-                continue
-
-            # 为当前专家选择隐藏状态
-            current_state = hidden_states_reshaped[None, top_x].reshape(-1, hidden_dim)
-
-            # 计算专家输出并按路由权重缩放
-            current_hidden_states = (
-                expert_layer(current_state) * routing_weights[top_x, idx, None]
-            )
-
-            # 将专家输出添加到最终隐藏状态
-            final_hidden_states.index_add_(
-                0, top_x, current_hidden_states.to(hidden_states.dtype)
-            )
-
-        final_hidden_states = final_hidden_states.reshape(
-            batch_size, sequence_length, hidden_dim
-        )
-
-        # 始终返回router_logits用于损失计算
-        return final_hidden_states, router_logits
 
 
 class SelectMoeDecoderLayer(OlmoeDecoderLayer):
@@ -395,7 +274,7 @@ class SelectMoePreTrainedModel(PreTrainedModel):
 
 class SelectMoeModel(SelectMoePreTrainedModel):
     """
-    由*config.num_hidden_layers*层组成的Transformer解码器，使用TrashCanMoE。
+    由*config.num_hidden_layers*层组成的Transformer解码器，使用两层路由架构。
     """
 
     def __init__(self, config: SelectMoeConfig):
@@ -652,10 +531,8 @@ class SelectMoeForCausalLM(SelectMoePreTrainedModel):
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
 
         self.router_aux_loss_coef = config.router_aux_loss_coef
-        # 注意：总专家数包括用于负载均衡的垃圾桶专家
-        self.num_experts = (
-            config.num_experts + config.num_experts_per_tok
-        )  # trash_can_experts_count
+        # MoE专家总数（用于负载均衡）
+        self.num_experts = config.num_experts
         self.num_experts_per_tok = config.num_experts_per_tok
 
         # 初始化权重并应用最终处理
@@ -754,12 +631,22 @@ class SelectMoeForCausalLM(SelectMoePreTrainedModel):
         if output_router_logits:
             # Load balancing loss (optional)
             if self.config.enable_load_balancing:
-                aux_loss = load_balancing_loss_func(
-                    outputs.router_logits if return_dict else outputs[-1],
-                    self.num_experts,
-                    self.num_experts_per_tok,
-                    attention_mask,
-                )
+                # 提取MoE router logits进行负载均衡
+                moe_router_logits = []
+                router_logits_data = outputs.router_logits if return_dict else outputs[-1]
+                for layer_logits in router_logits_data:
+                    if layer_logits is not None and 'moe_logits' in layer_logits:
+                        moe_router_logits.append(layer_logits['moe_logits'])
+                
+                if moe_router_logits:
+                    aux_loss = load_balancing_loss_func(
+                        moe_router_logits,
+                        self.num_experts,
+                        self.num_experts_per_tok,
+                        attention_mask,
+                    )
+                else:
+                    aux_loss = torch.tensor(0.0, device=hidden_states.device)
             else:
                 aux_loss = torch.tensor(0.0, device=hidden_states.device)
 
@@ -842,19 +729,6 @@ class SelectMoeForCausalLM(SelectMoePreTrainedModel):
         return model_inputs
 
 
-def replace_moe_layers_with_trashcan(model: nn.Module, config: SelectMoeConfig):
-    """
-    递归遍历模型并将所有OlmoeSparseMoeBlock实例替换为TrashCanSparseMoeBlock。
-    此函数保留预训练权重。
-    """
-    for name, module in model.named_children():
-        if isinstance(module, OlmoeSparseMoeBlock):
-            # 创建新的TrashCanSparseMoeBlock来替换原始MoE块
-            new_moe = TrashCanSparseMoeBlock(config, module)
-            setattr(model, name, new_moe)
-        elif len(list(module.children())) > 0:
-            # 递归进入子模块
-            replace_moe_layers_with_trashcan(module, config)
 
 
 def register_select_moe():
@@ -867,8 +741,6 @@ def register_select_moe():
 __all__ = [
     "SelectMoeConfig",
     "SelectMoeModel",
-    "SelectMoeForCausalLM",
-    "TrashCanSparseMoeBlock",
-    "replace_moe_layers_with_trashcan",
+    "SelectMoeForCausalLM", 
     "register_select_moe",
 ]

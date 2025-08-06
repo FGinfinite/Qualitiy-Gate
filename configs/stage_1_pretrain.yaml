@@ -22,7 +22,7 @@ hydra:
 
 # Model configuration
 selector_model:
-  path: "converted_models/select_moe_converted_OLMoE-1B-7B-0125_test"
+  path: "converted_models/select_moe_converted_OLMoE-1B-7B-0125"
   tokenizer_name: "allenai/OLMoE-1B-7B-0125"
 output_dir: ${hydra:run.dir}
 
@@ -44,7 +44,7 @@ dataset:
 # Training configuration
 training:
   batch_size: 4
-  learning_rate: 1e-4
+  learning_rate: 1e-3
   epochs: 4
   optimizer: "AdamW"
   scheduler: "linear"
@@ -60,7 +60,7 @@ training:
     memory_need_gb: 24
     over_grab: false
   # New two-tier routing architecture parameters
-  quality_loss_weight: 0.1
+  quality_loss_weight: 0.5
   quality_gate_init_mean: 0.0
   quality_gate_init_std: 0.02
   trash_expert_mode: "zero"  # Options: "zero", "noise", "custom"

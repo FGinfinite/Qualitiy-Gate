@@ -367,7 +367,7 @@ def main():
     parser.add_argument(
         "--quality-loss-weight",
         type=float,
-        default=0.01,
+        default=0.5,
         help="Weight for quality classification loss",
     )
     parser.add_argument(

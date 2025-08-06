@@ -7,8 +7,6 @@ from .select_moe import (
     SelectMoeConfig,
     SelectMoeModel,
     SelectMoeForCausalLM,
-    TrashCanSparseMoeBlock,
-    replace_moe_layers_with_trashcan,
     register_select_moe,
 )
 
@@ -20,17 +18,15 @@ def register_custom_models():
     print("Available model types:")
     print("  - select_moe: SelectMoeConfig, SelectMoeModel, SelectMoeForCausalLM")
     print("Features:")
-    print("  - Inherits pretrained OLMoE parameters")
-    print("  - Dynamically adds trash can experts (count = top_k)")
-    print("  - Custom constraint loss for data quality selection")
+    print("  - Two-tier routing architecture with quality gate")
+    print("  - MoE experts + trash expert for low-quality data")
+    print("  - Quality classification loss for data selection")
 
 
 __all__ = [
     "SelectMoeConfig",
     "SelectMoeModel",
     "SelectMoeForCausalLM",
-    "TrashCanSparseMoeBlock",
-    "replace_moe_layers_with_trashcan",
     "register_custom_models",
     "register_select_moe",
 ]
