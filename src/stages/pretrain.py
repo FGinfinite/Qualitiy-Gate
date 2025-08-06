@@ -21,6 +21,14 @@ from src.training.full_rank_finetuning import (
 )
 from utils.tools import grab_gpu
 
+
+# 路由权重相关的模式定义
+ROUTING_PATTERNS = [
+    'quality_gate',     # Quality gate parameters
+    '.gate.weight',     # MoE gate weights
+    'router',           # Any router-related parameters
+]
+
 # ---------------------------------------------------------------------------
 # 模型修改和 PEFT 配置的辅助函数
 # ---------------------------------------------------------------------------
@@ -78,12 +86,16 @@ def get_model_and_tokenizer(
     )
 
     # 从训练配置中覆写损失函数参数
-    if hasattr(cfg.training, "trash_can_loss_alpha"):
-        model.config.trash_can_loss_alpha = cfg.training.trash_can_loss_alpha
-    if hasattr(cfg.training, "trash_can_loss_beta"):
-        model.config.trash_can_loss_beta = cfg.training.trash_can_loss_beta
-    if hasattr(cfg.training, "constraint_loss_weight"):
-        model.config.constraint_loss_weight = cfg.training.constraint_loss_weight
+    if hasattr(cfg.training, "quality_loss_weight"):
+        model.config.quality_loss_weight = cfg.training.quality_loss_weight
+    if hasattr(cfg.training, "quality_gate_init_mean"):
+        model.config.quality_gate_init_mean = cfg.training.quality_gate_init_mean
+    if hasattr(cfg.training, "quality_gate_init_std"):
+        model.config.quality_gate_init_std = cfg.training.quality_gate_init_std
+    if hasattr(cfg.training, "trash_expert_mode"):
+        model.config.trash_expert_mode = cfg.training.trash_expert_mode
+    if hasattr(cfg.training, "enable_load_balancing"):
+        model.config.enable_load_balancing = cfg.training.enable_load_balancing
 
     # 加载分词器（使用原始模型名称）
     tokenizer = AutoTokenizer.from_pretrained(cfg.selector_model.tokenizer_name)
@@ -130,10 +142,11 @@ def pretrain(cfg: DictConfig) -> None:
         print("PEFT 模型已创建。可训练参数：")
         model.print_trainable_parameters()
     elif cfg.training.peft_mode == "full_rank":
-        setup_full_rank_training(model, list(cfg.training.lora.target_modules))
+        # 全秩微调模式：只微调路由参数（quality gates + MoE gates），但是全秩训练
+        setup_full_rank_training(model, ROUTING_PATTERNS, mode="parameter")
         print_trainable_parameters(model)
     else:
-        raise ValueError(f"不支持的微调模式: {cfg.training.peft_mode}")
+        raise ValueError(f"不支持的微调模式: {cfg.training.peft_mode}。支持的模式: ['lora', 'full_rank']")
 
     # 确保 `use_cache` 已禁用以保证训练兼容性
     model.config.use_cache = False
@@ -158,7 +171,7 @@ def pretrain(cfg: DictConfig) -> None:
     )
 
     # 7. 配置训练参数
-    # LoRA模式：保存中间权重；全秩微调：不保存中间权重
+    # LoRA模式：保存中间权重；全秩微调和routing_only：不保存中间权重
     save_strategy = "epoch" if cfg.training.peft_mode == "lora" else "no"
 
     training_args = TrainingArguments(
@@ -204,12 +217,12 @@ def pretrain(cfg: DictConfig) -> None:
             print(f"正在将最终的 PEFT 适配模型保存到 {cfg.output_dir}")
             trainer.save_model(cfg.output_dir)
         elif cfg.training.peft_mode == "full_rank":
-            print(f"正在将全秩微调权重保存到 {cfg.output_dir}")
+            print(f"正在将路由全秩微调权重保存到 {cfg.output_dir}")
             full_rank_weights_path = os.path.join(
                 cfg.output_dir, "full_rank_weights.pt"
             )
             save_full_rank_weights(
-                model, list(cfg.training.lora.target_modules), full_rank_weights_path
+                model, ROUTING_PATTERNS, full_rank_weights_path, mode="parameter"
             )
 
     print("\n--- 阶段 1：预训练完成 ---")

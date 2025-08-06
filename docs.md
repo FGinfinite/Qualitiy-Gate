@@ -4,9 +4,71 @@
 
 ## 概述
 
-Select-MoE 项目包含两个主要部分：
+Select-MoE 是一个创新的数据选择框架，采用**双层路由架构**的混合专家模型来学习数据质量判别。项目包含两个主要部分：
+
 1. **模型转换阶段**：将 OLMoE 预训练模型转换为 Select-MoE 格式
 2. **四阶段训练流程**：预热训练 → 数据选择 → 目标模型微调 → 性能评估
+
+### 核心技术特点
+
+- **双层路由系统**：质量门控 + 标准MoE + 垃圾专家的并行处理架构
+- **质量分类损失**：使用sigmoid(good_ratio)损失函数学习数据质量区分
+- **可配置垃圾专家**：支持零输出、噪声输出和自定义处理模式
+- **路由器输出优化**：字典格式返回quality_logits和moe_logits用于数据选择
+
+---
+
+## 模型架构详解
+
+### Select-MoE 双层路由系统
+
+Select-MoE 采用创新的**双层路由架构**，将数据质量判别与专家路由有机结合：
+
+```
+输入 → 质量门控 → [标准MoE, 垃圾专家] → 加权融合 → 输出
+      (第一层)    (第二层并行处理)
+```
+
+#### 1. 质量门控 (Quality Gate)
+- **功能**: 第一层路由网络，执行数据质量二分类
+- **输出**: 质量概率分布 `[good_ratio, bad_ratio]`
+- **损失函数**: `sigmoid(good_ratio)` - 鼓励模型学习区分数据质量
+- **初始化**: 可配置均值和标准差参数
+
+#### 2. 标准 MoE 路由
+- **功能**: 第二层路由网络，处理正常质量数据
+- **架构**: 基于 OLMoE 的标准混合专家模型
+- **负载均衡**: 可选的专家负载均衡损失
+
+#### 3. 垃圾专家 (Trash Expert)
+- **功能**: 处理低质量数据，提供负激励
+- **模式**:
+  - `zero`: 输出零向量
+  - `noise`: 输出与输入同分布的噪声
+  - `custom`: 自定义处理模式
+
+#### 4. 输出融合机制
+```python
+final_output = good_ratio * moe_output + bad_ratio * trash_output
+```
+
+### 路由器输出格式
+
+每个 Transformer 层的路由器输出采用字典格式：
+```python
+router_logits = {
+    'quality_logits': torch.Tensor,  # 形状: [batch, seq_len, 2]
+    'moe_logits': torch.Tensor       # 形状: [batch*seq_len, num_experts]
+}
+```
+
+### 损失函数组成
+
+总损失 = 语言模型损失 + 路由器辅助损失
+
+其中路由器辅助损失包括：
+- **质量分类损失**: `quality_loss_weight * sigmoid(good_ratio).mean()`
+- **负载均衡损失** (可选): 标准 MoE 负载均衡损失
 
 ---
 
@@ -90,7 +152,12 @@ python scripts/compare_converted_model.py \
 
 **配置文件**: `configs/stage_1_pretrain.yaml`
 
-**功能**: 对小型 Select-MoE 模型进行全参数微调，训练 Router 权重学习数据质量判别。
+**功能**: 对 Select-MoE 模型进行训练，学习双层路由系统的数据质量判别能力。
+
+**核心架构组件**:
+- **质量门控 (Quality Gate)**: 第一层路由网络，执行数据质量二分类
+- **标准 MoE**: 第二层路由网络，处理正常质量数据  
+- **垃圾专家 (Trash Expert)**: 处理低质量数据，支持多种输出模式
 
 **关键配置参数**:
 - `selector_model.path`: Select-MoE 模型路径
@@ -100,6 +167,12 @@ python scripts/compare_converted_model.py \
 - `training.learning_rate`: 学习率 (默认: 1e-4)
 - `training.epochs`: 训练轮数 (默认: 4)
 - `training.peft_mode`: 训练模式 (`full_rank` 或 `lora`)
+
+**新增双层路由参数**:
+- `training.quality_loss_weight`: 质量分类损失权重 (默认: 0.01)
+- `training.quality_gate_init_mean/std`: 质量门控初始化参数
+- `training.trash_expert_mode`: 垃圾专家行为模式 ("zero", "noise", "custom")
+- `training.enable_load_balancing`: 是否启用 MoE 负载均衡损失
 
 **执行示例**:
 ```bash
@@ -128,7 +201,13 @@ CUDA_VISIBLE_DEVICES=0 bash scripts/run_stage_1.sh \
 
 **配置文件**: `configs/stage_2_selection.yaml`
 
-**功能**: 使用预热的 Select-MoE 模型为训练数据打分，筛选高质量数据子集。
+**功能**: 使用训练好的 Select-MoE 双层路由系统对训练数据进行质量评分和筛选。
+
+**数据选择机制**:
+1. **质量评分**: 使用质量门控的 `good_ratio` 作为数据质量分数
+2. **专家路由**: 利用 MoE 的路由权重作为辅助特征
+3. **综合打分**: 结合质量分类和专家路由信息进行数据排序
+4. **阈值筛选**: 根据设定比例选择高质量数据子集
 
 **关键配置参数**:
 - `model_checkpoint_path`: 阶段一输出的权重文件路径
@@ -281,4 +360,65 @@ huggingface-cli download cais/mmlu --repo-type dataset
 export HF_ENDPOINT=https://hf-mirror.com
 huggingface-cli download allenai/OLMoE-1B-7B-0125
 huggingface-cli download meta-llama/Llama-2-7b-hf
+```
+
+---
+
+## 程序化使用示例
+
+### 加载和使用 Select-MoE 模型
+
+```python
+from src.models.select_moe import SelectMoeForCausalLM, register_select_moe
+
+# 注册 Select-MoE 模型类（必须在加载前调用）
+register_select_moe()
+
+# 加载转换后的模型
+model = SelectMoeForCausalLM.from_pretrained(
+    "./converted_models/select_moe_converted_OLMoE-1B-7B-0125"
+)
+
+# 训练模式下启用路由器输出
+outputs = model(
+    input_ids=input_ids, 
+    attention_mask=attention_mask, 
+    labels=labels, 
+    output_router_logits=True
+)
+
+# 访问双层路由输出
+for layer_idx, layer_output in enumerate(outputs.router_logits):
+    quality_logits = layer_output["quality_logits"]  # 形状: [batch, seq_len, 2]
+    moe_logits = layer_output["moe_logits"]          # 形状: [batch*seq_len, num_experts]
+    
+    # 获取质量概率
+    quality_probs = torch.softmax(quality_logits, dim=-1)
+    good_ratio = quality_probs[..., 0]  # 好数据概率
+    bad_ratio = quality_probs[..., 1]   # 坏数据概率
+
+# 总损失包含语言建模损失 + 负载均衡损失 + 质量分类损失
+total_loss = outputs.loss
+aux_loss = outputs.aux_loss  # 路由器辅助损失
+```
+
+### 模型配置参数
+
+```python
+from src.models.select_moe import SelectMoeConfig
+
+config = SelectMoeConfig(
+    # 质量门控参数
+    quality_gate_init_mean=0.0,
+    quality_gate_init_std=0.02,
+    quality_loss_weight=0.01,
+    
+    # 垃圾专家参数
+    trash_expert_mode="zero",  # "zero", "noise", "custom"
+    
+    # MoE 负载均衡
+    enable_load_balancing=False,
+    
+    # 其他 OLMoE 标准参数...
+)
 ```

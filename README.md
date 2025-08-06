@@ -12,20 +12,23 @@
 ## ✨ 核心创新
 
 ### Select-MoE 架构特性
-- **垃圾桶专家机制**: 动态添加"垃圾桶专家"，对低质量数据提供负向激励
-- **权重保持**: 完美保持原始 OLMoE 预训练权重，仅新增垃圾桶专家维度
-- **约束损失**: 基于 Beta 分布的自定义约束损失，引导 Router 学习数据质量区分
+- **两层路由架构**: 实现质量门 + MoE + 垃圾专家的并行处理结构
+- **质量门机制**: 一级路由进行二元分类，判断数据质量（好 vs 坏）
+- **标准MoE集成**: 使用标准OlmoeSparseMoeBlock进行专家路由，保持原始权重不变
+- **可配置垃圾专家**: 支持多种输出模式（零值、噪声、自定义）处理低质量数据
+- **质量分类损失**: 使用sigmoid(good_ratio)损失函数替代Beta分布约束
 - **HuggingFace 兼容**: 支持标准的 `from_pretrained()` 加载和生态工具
 
 ### 模型对比
 
 | 特性 | 原始 OLMoE | Select-MoE |
 |------|------------|------------|
-| 原始专家数 | 64 | 64 (保持不变) |
-| 垃圾桶专家数 | 0 | 8 (= top_k) |
-| Gate 输出维度 | [64, hidden_size] | [72, hidden_size] |
-| 预训练权重 | - | 完全保持 |
-| 数据质量选择 | 无 | 动态路由到垃圾桶 |
+| MoE专家数 | 64 | 64 (保持不变) |
+| 质量门 | 无 | 2输出 (好/坏分类) |
+| 垃圾专家 | 无 | 1个 (可配置输出模式) |
+| 路由结构 | 单层MoE | 两层 (质量门 + MoE) |
+| 预训练权重 | - | MoE权重完全保持 |
+| 数据质量选择 | 无 | 基于质量门输出 |
 
 ## 🛠️ 技术栈
 
@@ -186,8 +189,13 @@ outputs = model(
     output_router_logits=True  # 重要：训练时必须为True
 )
 
-# 损失包含所有组件
-total_loss = outputs.loss  # 语言建模损失 + 负载均衡损失 + 约束损失
+# 新架构返回字典格式的路由输出
+for layer_output in outputs.router_logits:
+    quality_logits = layer_output["quality_logits"]  # 形状: [batch, seq_len, 2]
+    moe_logits = layer_output["moe_logits"]          # 形状: [batch*seq_len, num_experts]
+
+# 损失包含语言建模 + 负载均衡 + 质量分类损失
+total_loss = outputs.loss
 ```
 
 ### 参数覆写机制
@@ -219,6 +227,10 @@ bash scripts/run_stage_3.sh training.lora.r=128 training.batch_size=64
 - `training.peft_mode`: 训练模式 (`full_rank` 或 `lora`)
 - `training.learning_rate`: 学习率 (默认: 1e-4)
 - `dataset.subset_ratio`: 训练数据比例 (默认: 0.05)
+- `training.quality_loss_weight`: 质量分类损失权重 (默认: 0.01)
+- `training.quality_gate_init_mean/std`: 质量门初始化参数
+- `training.trash_expert_mode`: 垃圾专家模式 ("zero", "noise", "custom")
+- `training.enable_load_balancing`: 启用MoE负载均衡损失
 
 **阶段2 (数据选择)**:
 - `selection_percentage`: 数据选择比例 (默认: 0.05)
@@ -254,45 +266,51 @@ export CUDA_VISIBLE_DEVICES=0,1,2,3  # 指定使用的GPU
 
 ## 🔬 技术原理
 
-为了引导Router（路由器）学习区分高质量和低质量数据，我们引入了一种特殊的约束损失函数。该损失函数基于Beta分布设计，用于调节垃圾桶专家的激活比例。
+### 两层路由架构设计
 
-### 约束损失设计
+Select-MoE采用创新的两层路由架构，实现更精确的数据质量判别：
 
-约束损失 `L_constraint` 的计算方式如下：
+**第一层：质量门 (Quality Gate)**
+- 进行二元分类：好数据 vs 坏数据
+- 输出good_ratio和bad_ratio，控制后续处理权重
+- 使用小型全连接网络，计算效率高
 
+**第二层：并行处理**
 ```
-trash_can_ratio = 1 - top_k_expert_ratio
-L_constraint = -((α - 1) * log(trash_can_ratio) + (β - 1) * log(1 - trash_can_ratio))
+y = good_ratio * y_normal + bad_ratio * y_trash
 ```
+- **正常路径**: 通过标准MoE处理，保持原始OLMoE能力
+- **垃圾路径**: 通过垃圾专家处理，可配置输出模式
+- **加权组合**: 基于质量门输出动态组合两路结果
 
-**损失函数特性**：
-- **计算粒度**: 对每个token在每个MoE层分别计算损失，然后聚合为整个batch的平均损失
-- **行为特征**: 当α=1.0, β=2.0时，损失函数鼓励适度的垃圾桶专家使用
-  - `trash_can_ratio` 过低时：损失增加（惩罚垃圾桶专家使用不足）
-  - `trash_can_ratio` 过高时：损失也增加（惩罚垃圾桶专家过度使用）
-  - 最优值在中等范围，具体取决于α和β参数
+### 质量分类损失
 
-**参数说明**：
-- `trash_can_ratio`: 垃圾桶专家激活概率之和（1 - top_k_expert_ratio）
-- `α` (`trash_can_loss_alpha`): 控制对低垃圾桶使用的惩罚强度
-- `β` (`trash_can_loss_beta`): 控制对高垃圾桶使用的惩罚强度
-
-总损失为：
+新架构使用简洁的质量分类损失：
 ```
-L_total = L_ce + w_constraint * L_constraint
+L_quality = sigmoid(good_ratio).mean()
 ```
 
-### 核心参数
+**损失特性**：
+- **计算粒度**: 对每个token在每个层分别计算
+- **优化目标**: 鼓励模型学习区分数据质量
+- **数值稳定**: 使用sigmoid激活，避免数值问题
 
-- **`constraint_loss_weight`**: 约束损失在总损失中的权重，控制数据质量筛选的重视程度
-- **`trash_can_loss_alpha`**: 控制对低垃圾桶专家激活的惩罚强度（可在配置文件中调节）
-- **`trash_can_loss_beta`**: 控制对高垃圾桶专家激活的惩罚强度（可在配置文件中调节）
+**总损失构成**：
+```
+L_total = L_language_modeling + w_load_balancing * L_load_balancing + w_quality * L_quality
+```
 
-### "垃圾桶"专家机制
+### 垃圾专家机制
 
-1. **动态数量**: 垃圾桶专家数量等于 top-k 激活数量
-2. **行为特点**: 输出全零向量，提供负向激励
-3. **初始化策略**: 通过正态分布初始化，参数可配置
+**输出模式**：
+- **zero模式**: 输出零向量，提供最小干扰
+- **noise模式**: 输出与输入同分布的噪声
+- **custom模式**: 支持自定义行为扩展
+
+**设计优势**：
+1. **模块化**: 垃圾专家独立于MoE，易于调试和优化
+2. **可配置**: 根据任务需求选择合适的输出模式
+3. **高效**: 避免了复杂的专家扩展和权重管理
 
 ## 🚧 开发计划
 

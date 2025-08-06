@@ -13,6 +13,7 @@ dependencies = [
     "lm-eval",
     "torchvision>=0.21.0",
     "datasets",
+    "scipy>=1.16.0",
 ]
 
 [tool.uv.sources]

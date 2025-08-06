@@ -2,11 +2,13 @@
 import json
 import logging
 import os
-from typing import Tuple
+from typing import Tuple, List
 
 import hydra
+import numpy as np
 import torch
 from omegaconf import DictConfig
+from scipy.stats import wasserstein_distance
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers import AutoTokenizer
@@ -17,7 +19,7 @@ from src.training.full_rank_finetuning import load_full_rank_weights
 
 
 def get_model_and_tokenizer(
-    cfg: DictConfig, device: torch.device
+    cfg: DictConfig
 ) -> Tuple[SelectMoeForCausalLM, AutoTokenizer]:
     """
     加载预训练的Select-MoE模型并应用全秩微调权重
@@ -28,6 +30,7 @@ def get_model_and_tokenizer(
     model_kwargs = {
         "low_cpu_mem_usage": True,
         "torch_dtype": torch.bfloat16,
+        "device_map": "auto",  # 自动设备映射，有助于内存优化
     }
 
     # 加载预转换的Select-MoE模型
@@ -38,7 +41,7 @@ def get_model_and_tokenizer(
     # 加载全秩微调权重
     load_full_rank_weights(model, cfg.model_checkpoint_path)
 
-    model.to(device)
+    # device_map="auto" 已自动处理设备分配
     model.eval()
 
     # 加载分词器
@@ -49,91 +52,432 @@ def get_model_and_tokenizer(
     return model, tokenizer
 
 
-def calculate_quality_score(
-    layer_token_logits: torch.Tensor,
+def calculate_quality_score_from_gates(
+    quality_logits_list: list,
     attention_mask: torch.Tensor,
-    original_num_experts: int,
     debug: bool = False,
 ) -> float:
     """
-    计算单个数据点的质量分数，基于激活好专家的平均比例
+    使用新架构中的质量门输出计算质量分数
 
     Args:
-        layer_token_logits: 形状为 (num_layers, seq_len, num_experts) 的logits张量
-        attention_mask: 形状为 (seq_len,) 的注意力掩码，1表示实际token，0表示填充token
-        original_num_experts: 原始（好）专家的数量
+        quality_logits_list: 各层质量门输出的logits列表
+        attention_mask: 形状为 (seq_len,) 的注意力掩码
         debug: 是否打印调试信息
 
     Returns:
-        质量分数：好专家概率的平均值
+        质量分数：good_ratio的平均值
     """
-    # 获取实际token的掩码
-    valid_mask = attention_mask.bool()  # (seq_len,)
+    valid_mask = attention_mask.bool()
     actual_length = valid_mask.sum().item()
-
+    
     if debug:
-        print(f"    [函数内部] 输入logits形状: {layer_token_logits.shape}")
-        print(f"    [函数内部] attention_mask形状: {attention_mask.shape}")
+        print(f"    [函数内部] 质量门logits数量: {len(quality_logits_list)}")
         print(f"    [函数内部] 实际token数量: {actual_length}")
-        print(f"    [函数内部] 原始专家数量: {original_num_experts}")
-
+    
     if actual_length == 0:
-        if debug:
-            print("    [函数内部] 没有实际token，返回0.0")
         return 0.0
-
-    # 只处理实际token位置的logits
-    valid_logits = layer_token_logits[
-        :, valid_mask, :
-    ]  # (num_layers, actual_length, num_experts)
-
+    
+    layer_quality_scores = []
+    for layer_idx, quality_logits in enumerate(quality_logits_list):
+        # quality_logits: (seq_len, 2) -> [good_prob, bad_prob]
+        valid_quality_logits = quality_logits[valid_mask]  # (actual_length, 2)
+        
+        # 对每个token应用softmax得到概率
+        quality_probs = torch.softmax(valid_quality_logits, dim=-1)  # (actual_length, 2)
+        good_probs = quality_probs[:, 0]  # (actual_length,)
+        
+        # 在该层内对所有token求平均
+        layer_avg_good_prob = good_probs.mean().item()
+        layer_quality_scores.append(layer_avg_good_prob)
+        
+        if debug and layer_idx < 3:
+            print(f"    [函数内部] 第{layer_idx+1}层好数据概率: {layer_avg_good_prob:.6f}")
+    
+    # 对所有层求平均
+    final_quality_score = sum(layer_quality_scores) / len(layer_quality_scores)
+    
     if debug:
-        print(f"    [函数内部] 提取有效logits后形状: {valid_logits.shape}")
-        print(
-            f"    [函数内部] 第1层第1个token的logits范围: [{valid_logits[0, 0, :].min().item():.4f}, {valid_logits[0, 0, :].max().item():.4f}]"
+        print(f"    [函数内部] 最终质量分数: {final_quality_score:.6f}")
+    
+    return final_quality_score
+
+
+def compute_wasserstein_distance_matrix_gpu(logits_tensors: List[torch.Tensor], 
+                                          device: torch.device,
+                                          batch_size: int = 1000) -> np.ndarray:
+    """
+    GPU加速计算所有样本对之间的Wasserstein距离矩阵
+    
+    Args:
+        logits_tensors: 列表，每个元素为 [L, E] 形状的张量
+        device: GPU设备
+        batch_size: 批处理大小，控制GPU内存使用
+                       
+    Returns:
+        距离矩阵: [N, N] 形状的numpy数组
+    """
+    n_samples = len(logits_tensors)
+    print(f"使用GPU加速计算 {n_samples} 个样本的Wasserstein距离矩阵...")
+    
+    # 将所有logits转移到GPU并转换为概率分布
+    prob_tensors = []
+    for logits in logits_tensors:
+        # 转移到GPU并计算概率分布
+        probs = torch.softmax(logits.float().to(device), dim=-1)  # [L, E]
+        prob_tensors.append(probs)
+    
+    # 堆叠成一个大张量 [N, L, E]
+    all_probs = torch.stack(prob_tensors)  # [N, L, E]
+    n_samples = all_probs.shape[0]
+    # n_layers, n_experts = all_probs.shape[1], all_probs.shape[2]  # 未使用，注释掉
+    
+    print(f"概率张量形状: {all_probs.shape}")
+    
+    # 初始化距离矩阵
+    distance_matrix = torch.zeros(n_samples, n_samples, device=device)
+    
+    # 分批处理以节省GPU内存
+    for start_i in tqdm(range(0, n_samples, batch_size), desc="GPU距离矩阵计算"):
+        end_i = min(start_i + batch_size, n_samples)
+        batch_probs_i = all_probs[start_i:end_i]  # [batch_i, L, E]
+        
+        for start_j in range(start_i, n_samples, batch_size):
+            end_j = min(start_j + batch_size, n_samples)
+            batch_probs_j = all_probs[start_j:end_j]  # [batch_j, L, E]
+            
+            # 计算这个批次的距离
+            batch_distances = compute_batch_wasserstein_distance_gpu(
+                batch_probs_i, batch_probs_j
+            )
+            
+            # 填充距离矩阵
+            distance_matrix[start_i:end_i, start_j:end_j] = batch_distances
+            
+            # 对称填充（如果不是对角块）
+            if start_i != start_j:
+                distance_matrix[start_j:end_j, start_i:end_i] = batch_distances.T
+    
+    print(f"GPU距离矩阵计算完成，形状: {distance_matrix.shape}")
+    return distance_matrix.cpu().numpy()
+
+
+def compute_batch_wasserstein_distance_gpu(batch_probs_i: torch.Tensor, 
+                                         batch_probs_j: torch.Tensor) -> torch.Tensor:
+    """
+    GPU上计算批次间的Wasserstein距离
+    
+    Args:
+        batch_probs_i: [batch_i, L, E] 第一组样本的概率分布
+        batch_probs_j: [batch_j, L, E] 第二组样本的概率分布
+        
+    Returns:
+        距离矩阵: [batch_i, batch_j]
+    """
+    # batch_i, n_layers, n_experts = batch_probs_i.shape  # 未使用，注释掉
+    
+    # 扩展维度用于广播计算
+    probs_i_expanded = batch_probs_i.unsqueeze(1)  # [batch_i, 1, L, E]
+    probs_j_expanded = batch_probs_j.unsqueeze(0)  # [1, batch_j, L, E]
+    
+    # 计算每层的累积分布函数 (CDF)
+    cdf_i = torch.cumsum(probs_i_expanded, dim=-1)  # [batch_i, 1, L, E]
+    cdf_j = torch.cumsum(probs_j_expanded, dim=-1)  # [1, batch_j, L, E]
+    
+    # 计算Wasserstein距离 = L1距离的CDF差值
+    # 对于离散分布，Wasserstein距离 = sum(|CDF_i - CDF_j|)
+    cdf_diff = torch.abs(cdf_i - cdf_j)  # [batch_i, batch_j, L, E]
+    
+    # 对expert维度求和（每层的Wasserstein距离）
+    layer_distances = torch.sum(cdf_diff, dim=-1)  # [batch_i, batch_j, L]
+    
+    # 对layer维度求和（总Wasserstein距离）
+    total_distances = torch.sum(layer_distances, dim=-1)  # [batch_i, batch_j]
+    
+    return total_distances
+
+
+def compute_wasserstein_distance_matrix_cpu(logits_tensors: List[torch.Tensor]) -> np.ndarray:
+    """
+    CPU版本：计算所有样本对之间的Wasserstein距离矩阵（原始实现）
+    
+    Args:
+        logits_tensors: 列表，每个元素为 [L, E] 形状的张量
+                       L = num_layers, E = num_experts
+                       
+    Returns:
+        距离矩阵: [N, N] 形状的numpy数组，N为样本数量
+                 matrix[i,j] = Wasserstein距离(sample_i, sample_j)
+    """
+    n_samples = len(logits_tensors)
+    distance_matrix = np.zeros((n_samples, n_samples))
+    
+    print(f"使用CPU计算 {n_samples} 个样本的Wasserstein距离矩阵...")
+    
+    # 将张量转换为概率分布（对每层的expert维度应用softmax）
+    prob_tensors = []
+    for logits in logits_tensors:
+        # logits: [L, E] -> probs: [L, E] (每行和为1)
+        probs = torch.softmax(logits.float(), dim=-1).numpy()
+        prob_tensors.append(probs)
+    
+    # 计算距离矩阵
+    for i in tqdm(range(n_samples), desc="计算距离矩阵"):
+        for j in range(i + 1, n_samples):
+            # 计算第i和第j个样本之间的总Wasserstein距离
+            total_distance = 0.0
+            probs_i = prob_tensors[i]  # [L, E]
+            probs_j = prob_tensors[j]  # [L, E]
+            
+            # 逐层计算Wasserstein距离并求和
+            for layer_idx in range(probs_i.shape[0]):  # L个层
+                layer_prob_i = probs_i[layer_idx, :]  # [E,]
+                layer_prob_j = probs_j[layer_idx, :]  # [E,]
+                
+                # 计算该层的Wasserstein距离
+                layer_distance = wasserstein_distance(
+                    range(len(layer_prob_i)), range(len(layer_prob_j)),
+                    layer_prob_i, layer_prob_j
+                )
+                total_distance += layer_distance
+            
+            # 对称填充距离矩阵
+            distance_matrix[i, j] = total_distance
+            distance_matrix[j, i] = total_distance
+    
+    print(f"CPU距离矩阵计算完成，形状: {distance_matrix.shape}")
+    return distance_matrix
+
+
+def compute_wasserstein_distance_matrix(logits_tensors: List[torch.Tensor], 
+                                      use_gpu: bool = True,
+                                      device: torch.device = None,
+                                      batch_size: int = 1000) -> np.ndarray:
+    """
+    计算所有样本对之间的Wasserstein距离矩阵（统一接口）
+    
+    Args:
+        logits_tensors: 列表，每个元素为 [L, E] 形状的张量
+        use_gpu: 是否使用GPU加速
+        device: GPU设备（仅在use_gpu=True时使用）
+        batch_size: GPU批处理大小
+                       
+    Returns:
+        距离矩阵: [N, N] 形状的numpy数组
+    """
+    if use_gpu and device is not None and device.type == 'cuda':
+        return compute_wasserstein_distance_matrix_gpu(logits_tensors, device, batch_size)
+    else:
+        if use_gpu:
+            print("警告: GPU加速未可用，回退到CPU计算")
+        return compute_wasserstein_distance_matrix_cpu(logits_tensors)
+
+
+def farthest_point_sampling(distance_matrix: np.ndarray, n_samples: int, seed: int = 42) -> List[int]:
+    """
+    使用最远点采样(FPS)算法选择多样化样本
+    
+    Args:
+        distance_matrix: [N, N] 距离矩阵
+        n_samples: 要选择的样本数量
+        seed: 随机种子
+        
+    Returns:
+        选中样本的索引列表
+    """
+    np.random.seed(seed)
+    n_total = distance_matrix.shape[0]
+    
+    if n_samples >= n_total:
+        return list(range(n_total))
+    
+    # 1. 随机选择初始点
+    selected_indices = [np.random.randint(0, n_total)]
+    print(f"FPS初始点: {selected_indices[0]}")
+    
+    # 2. 贪心选择剩余点
+    for step in range(1, n_samples):
+        max_min_distance = -1.0
+        best_candidate = -1
+        
+        # 对每个未选择的点，计算到已选点集的最小距离
+        for candidate in range(n_total):
+            if candidate in selected_indices:
+                continue
+                
+            # 计算candidate到已选点集的最小距离
+            min_distance_to_selected = min(
+                distance_matrix[candidate, selected_idx] 
+                for selected_idx in selected_indices
+            )
+            
+            # 选择最小距离最大的点
+            if min_distance_to_selected > max_min_distance:
+                max_min_distance = min_distance_to_selected
+                best_candidate = candidate
+        
+        selected_indices.append(best_candidate)
+        if step % 100 == 0 or step < 10:
+            print(f"FPS第{step}步: 选择点{best_candidate}, 最小距离={max_min_distance:.4f}")
+    
+    print(f"FPS完成，选择了{len(selected_indices)}个样本")
+    return selected_indices
+
+
+def diversity_based_selection(scored_data: List[dict], all_logits_by_dataset: dict, 
+                            selection_percentage: float, importance_selection_percentage: float = None,
+                            enable_diversity: bool = True,
+                            use_gpu_acceleration: bool = True, device: torch.device = None,
+                            distance_batch_size: int = 1000) -> List[dict]:
+    """
+    基于多样性的数据选择（支持两阶段选择策略）
+    
+    Args:
+        scored_data: 评分后的数据列表
+        all_logits_by_dataset: 按数据集分组的logits张量
+        selection_percentage: 最终选择比例
+        importance_selection_percentage: 第一阶段质量筛选比例（可选）
+        enable_diversity: 是否启用多样性选择（False时回退到质量分数选择）
+        use_gpu_acceleration: 是否使用GPU加速距离矩阵计算
+        device: GPU设备
+        distance_batch_size: GPU批处理大小
+        
+    Returns:
+        选择后的数据列表
+    """
+    total_samples = len(scored_data)
+    n_select = int(total_samples * selection_percentage)
+    
+    # 检查是否需要两阶段选择策略
+    use_two_stage = (importance_selection_percentage is not None and 
+                     importance_selection_percentage > selection_percentage)
+    
+    if not enable_diversity:
+        # 回退到原始的质量分数选择
+        scored_data.sort(key=lambda x: x["scores"], reverse=True)
+        return scored_data[:n_select]
+    
+    if use_two_stage:
+        # 两阶段选择策略
+        print("启用两阶段选择策略:")
+        print(f"  - 第一阶段: 基于质量分数选择前 {importance_selection_percentage*100:.1f}% 数据")
+        print(f"  - 第二阶段: 基于多样性从高质量数据中选择 {selection_percentage*100:.1f}% 数据")
+        
+        # 第一阶段：基于质量分数预筛选
+        n_importance = int(total_samples * importance_selection_percentage)
+        scored_data.sort(key=lambda x: x["scores"], reverse=True)
+        high_quality_data = scored_data[:n_importance]
+        
+        print(f"  - 第一阶段完成: 从 {total_samples} 个样本中选择了 {len(high_quality_data)} 个高质量样本")
+        print(f"  - 质量分数范围: {high_quality_data[0]['scores']:.6f} ~ {high_quality_data[-1]['scores']:.6f}")
+        
+        # 调整logits数据对应关系
+        filtered_logits_by_dataset = {name: [] for name in all_logits_by_dataset.keys()}
+        dataset_logits_index = {name: 0 for name in all_logits_by_dataset.keys()}
+        
+        # 重新映射高质量数据的logits
+        for original_idx, data_item in enumerate(scored_data):
+            if original_idx < n_importance:  # 在高质量数据范围内
+                dataset_name = data_item["dataset"]
+                current_idx = dataset_logits_index[dataset_name]
+                
+                if current_idx < len(all_logits_by_dataset[dataset_name]):
+                    logits_tensor = all_logits_by_dataset[dataset_name][current_idx]
+                    filtered_logits_by_dataset[dataset_name].append(logits_tensor)
+                
+                dataset_logits_index[dataset_name] += 1
+        
+        # 第二阶段：从高质量数据中进行多样性选择
+        print(f"  - 第二阶段: 从 {len(high_quality_data)} 个高质量样本中进行多样性选择...")
+        
+        # 计算第二阶段的实际选择比例
+        stage2_selection_ratio = n_select / len(high_quality_data)
+        print(f"  - 第二阶段选择比例: {stage2_selection_ratio*100:.1f}% ({n_select}/{len(high_quality_data)})")
+        
+        selected_data = _perform_diversity_selection(
+            high_quality_data, filtered_logits_by_dataset, stage2_selection_ratio,
+            use_gpu_acceleration, device, distance_batch_size
         )
-
-    # 对每一层每个token的logits应用softmax，得到概率分布
-    token_probs = torch.softmax(
-        valid_logits, dim=-1
-    )  # (num_layers, actual_length, num_experts)
-
-    if debug:
-        print(f"    [函数内部] Softmax后概率形状: {token_probs.shape}")
-        print(
-            f"    [函数内部] 第1层第1个token的概率范围: [{token_probs[0, 0, :].min().item():.6f}, {token_probs[0, 0, :].max().item():.6f}]"
+        
+        print(f"两阶段选择完成: 最终选择了 {len(selected_data)} 个样本")
+        return selected_data
+    
+    else:
+        # 单阶段多样性选择（原始逻辑）
+        print(f"启用单阶段多样性选择: 从 {total_samples} 个样本中选择 {n_select} 个")
+        
+        selected_data = _perform_diversity_selection(
+            scored_data, all_logits_by_dataset, selection_percentage,
+            use_gpu_acceleration, device, distance_batch_size
         )
-        print(
-            f"    [函数内部] 第1层第1个token的概率总和: {token_probs[0, 0, :].sum().item():.6f}"
-        )
+        
+        return selected_data
 
-    # 计算每一层每个token中好专家的概率总和
-    quality_probs_per_token = token_probs[:, :, :original_num_experts].sum(
-        dim=-1
-    )  # (num_layers, actual_length)
 
-    if debug:
-        print(
-            f"    [函数内部] 好专家概率per token形状: {quality_probs_per_token.shape}"
-        )
-        print(
-            f"    [函数内部] 第1层前3个token的好专家概率: {quality_probs_per_token[0, : min(3, actual_length)].tolist()}"
-        )
-
-    # 先在层内对所有实际token求平均，得到每层的好专家概率
-    quality_probs_per_layer = quality_probs_per_token.mean(dim=1)  # (num_layers,)
-
-    if debug:
-        print(f"    [函数内部] 每层平均好专家概率形状: {quality_probs_per_layer.shape}")
-        print(f"    [函数内部] 每层平均好专家概率: {quality_probs_per_layer.tolist()}")
-
-    # 再对所有层求平均，得到最终质量分数
-    avg_quality_prob = quality_probs_per_layer.mean()
-
-    if debug:
-        print(f"    [函数内部] 最终平均质量分数: {avg_quality_prob.item():.6f}")
-
-    return avg_quality_prob.item()
+def _perform_diversity_selection(scored_data: List[dict], all_logits_by_dataset: dict,
+                               selection_percentage: float,
+                               use_gpu_acceleration: bool, device: torch.device,
+                               distance_batch_size: int) -> List[dict]:
+    """
+    执行多样性选择的核心逻辑
+    
+    Args:
+        scored_data: 待选择的数据列表
+        all_logits_by_dataset: logits张量数据
+        selection_percentage: 选择比例
+        use_gpu_acceleration: 是否使用GPU加速
+        device: GPU设备
+        distance_batch_size: GPU批处理大小
+        
+    Returns:
+        选择后的数据列表
+    """
+    total_samples = len(scored_data)
+    n_select = int(total_samples * selection_percentage)
+    
+    # 1. 收集所有logits张量 - 维度: [样本数, L, E]
+    all_logits = []
+    sample_to_data_mapping = []
+    
+    # 按scored_data的顺序重新组织logits
+    dataset_logits_index = {name: 0 for name in all_logits_by_dataset.keys()}
+    
+    for data_item in scored_data:
+        dataset_name = data_item["dataset"]
+        current_idx = dataset_logits_index[dataset_name]
+        
+        if current_idx < len(all_logits_by_dataset[dataset_name]):
+            logits_tensor = all_logits_by_dataset[dataset_name][current_idx]
+            all_logits.append(logits_tensor)
+            sample_to_data_mapping.append(data_item)
+            dataset_logits_index[dataset_name] += 1
+        else:
+            print(f"警告: 数据集 {dataset_name} 的logits不足")
+    
+    if len(all_logits) != len(scored_data):
+        print(f"警告: logits数量({len(all_logits)}) 与数据数量({len(scored_data)})不匹配")
+        # 回退到质量分数选择
+        scored_data.sort(key=lambda x: x["scores"], reverse=True)
+        return scored_data[:n_select]
+    
+    print(f"收集到 {len(all_logits)} 个logits张量")
+    print(f"张量形状示例: {all_logits[0].shape} (应为 [L, E])")
+    
+    # 2. 计算Wasserstein距离矩阵
+    distance_matrix = compute_wasserstein_distance_matrix(
+        all_logits, 
+        use_gpu=use_gpu_acceleration, 
+        device=device, 
+        batch_size=distance_batch_size
+    )
+    
+    # 3. 使用FPS选择多样化样本
+    selected_indices = farthest_point_sampling(distance_matrix, n_select)
+    
+    # 4. 根据选择的索引返回对应的数据
+    selected_data = [sample_to_data_mapping[idx] for idx in selected_indices]
+    
+    return selected_data
 
 
 def select(cfg: DictConfig) -> None:
@@ -144,8 +488,20 @@ def select(cfg: DictConfig) -> None:
     log.info("--- 开始阶段2：数据选择 ---")
 
     # 确定目标设备
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    log.info(f"使用设备: {device}")
+    # 自动选择设备，正确响应CUDA_VISIBLE_DEVICES
+    if torch.cuda.is_available():
+        # 检查实际可用的GPU设备数量
+        num_gpus = torch.cuda.device_count()
+        if num_gpus > 0:
+            # 使用第一个可用的GPU（在CUDA_VISIBLE_DEVICES环境下会是指定的设备）
+            device = torch.device("cuda")
+            log.info(f"使用设备: {device} (实际GPU: {torch.cuda.current_device()}, 共{num_gpus}个可用设备)")
+        else:
+            device = torch.device("cpu")
+            log.info("没有可用的GPU设备，使用CPU")
+    else:
+        device = torch.device("cpu")
+        log.info("CUDA不可用，使用CPU")
 
     # 如果使用GPU，清理缓存
     if device.type == "cuda":
@@ -153,42 +509,32 @@ def select(cfg: DictConfig) -> None:
 
     # 1. 加载模型和分词器
     log.info(f"从检查点加载模型: {cfg.model_checkpoint_path}")
-    model, tokenizer = get_model_and_tokenizer(cfg, device)
+    model, tokenizer = get_model_and_tokenizer(cfg)
     num_hidden_layers = model.config.num_hidden_layers
+    log.info(f"成功加载模型: {cfg.model_checkpoint_path}")
 
-    # 2. 定义专家角色
-    # 检查模型配置以确定专家数量
-    total_experts = model.config.num_experts
-    num_experts_per_tok = model.config.num_experts_per_tok  # top-k值
-
-    # 对于Select-MoE模型，我们需要确定原始专家数量
-    # 通过检查模型的实际结构来确定
-    sample_layer = model.model.layers[0].mlp
-    if hasattr(sample_layer, "original_num_experts"):
-        original_num_experts = sample_layer.original_num_experts
-    else:
-        # 如果没有这个属性，使用默认值
-        original_num_experts = 64  # OLMoE-1B-7B-0125的原始专家数
-
-    # 实际的总专家数可能与配置不同，我们需要从实际的router logits中获取
-    # 先进行一次前向传播来获取实际的专家数量
+    # 2. 验证新架构
+    # 进行一次前向传播验证模型结构
     with torch.no_grad():
-        dummy_input = torch.ones(1, 10, dtype=torch.long, device=device)
+        # 获取模型实际所在的设备
+        model_device = next(model.parameters()).device
+        dummy_input = torch.ones(1, 10, dtype=torch.long, device=model_device)
         dummy_outputs = model(dummy_input, output_router_logits=True)
-        actual_total_experts = dummy_outputs.router_logits[0].shape[-1]
-
-    log.info(f"配置中的总专家数: {total_experts}")
-    log.info(f"实际的总专家数: {actual_total_experts}")
-    log.info(
-        f"原始（好）专家数: {original_num_experts} (索引 0 到 {original_num_experts - 1})"
-    )
-    log.info(
-        f"垃圾桶专家数: {actual_total_experts - original_num_experts} (索引 {original_num_experts} 到 {actual_total_experts - 1})"
-    )
-    log.info(f"每个token选择的专家数: {num_experts_per_tok}")
-
-    # 使用实际的专家数量
-    total_experts = actual_total_experts
+        
+        # 验证输出格式
+        if not isinstance(dummy_outputs.router_logits[0], dict):
+            raise ValueError("模型不是新的两层路由架构，请使用正确的模型")
+        
+        if "quality_logits" not in dummy_outputs.router_logits[0]:
+            raise ValueError("模型缺少质量门输出，请使用正确的两层路由架构")
+        
+        if "moe_logits" not in dummy_outputs.router_logits[0]:
+            raise ValueError("模型缺少MoE路由输出，请使用正确的两层路由架构")
+    
+    log.info("✓ 验证模型为新的两层路由架构")
+    log.info(f"✓ 模型层数: {num_hidden_layers}")
+    log.info(f"✓ 质量门输出维度: {dummy_outputs.router_logits[0]['quality_logits'].shape[-1]}")
+    log.info(f"✓ MoE专家数量: {dummy_outputs.router_logits[0]['moe_logits'].shape[-1]}")
 
     # 3. 加载和准备数据集
     log.info(f"加载数据集: {cfg.dataset.dataset_names}")
@@ -259,65 +605,83 @@ def select(cfg: DictConfig) -> None:
             return_tensors="pt",
             max_length=cfg.dataset.max_sequence_length,
         )
-        inputs = {k: v.to(device) for k, v in inputs.items()}
+        # 将输入数据移动到模型所在的设备
+        model_device = next(model.parameters()).device
+        inputs = {k: v.to(model_device) for k, v in inputs.items()}
 
         with torch.no_grad():
             outputs = model(**inputs, output_router_logits=True)
 
-        # 处理router logits
+        # 处理router logits - 新架构返回字典格式
         batch_size = len(texts)
         sequence_length = inputs["input_ids"].shape[1]
 
-        # 堆叠所有层的router logits: (num_layers, bs * seq_len, num_experts)
-        all_router_logits = torch.stack(outputs.router_logits)
+        # 从字典格式中提取MoE路由logits
+        moe_router_logits = [layer_dict["moe_logits"] for layer_dict in outputs.router_logits]
+        all_router_logits = torch.stack(moe_router_logits)
 
         if i == 0:
             log.info(f"Router logits形状: {all_router_logits.shape}")
-            log.info(
-                f"期望形状: ({num_hidden_layers}, {batch_size * sequence_length}, {total_experts})"
-            )
             log.info(f"批次大小: {batch_size}, 序列长度: {sequence_length}")
 
-        # 重塑为: (num_layers, bs, seq_len, num_experts)
-        reshaped_logits = all_router_logits.view(
-            num_hidden_layers, batch_size, sequence_length, total_experts
-        )
+        # 为了简化，我们不再处理重塑的MoE logits，直接使用质量门输出
 
-        # 计算质量分数（使用每层每个token的softmax概率，排除填充token）
+        # 计算质量分数 - 使用新架构的质量门输出
         for j in range(batch_size):
             dataset_name = dataset_names[j]
-
-            # 获取当前样本的每层每个token的logits: (num_layers, seq_len, num_experts)
-            sample_layer_token_logits = reshaped_logits[:, j, :, :]
-
-            # 获取当前样本的注意力掩码
             sample_attention_mask = inputs["attention_mask"][j]
-
-            # 计算质量分数（考虑填充token）
             debug_mode = i == 0 and j < 3  # 只对前3个样本启用调试
-            quality_score = calculate_quality_score(
-                sample_layer_token_logits,
+
+            # 使用质量门输出计算质量分数
+            quality_logits_list = [layer_dict["quality_logits"][j] for layer_dict in outputs.router_logits]
+            quality_score = calculate_quality_score_from_gates(
+                quality_logits_list,
                 sample_attention_mask,
-                original_num_experts,
                 debug=debug_mode,
             )
 
-            # 记录原始logits（只对实际token位置求平均）
+            # 记录MoE路由logits用于多样性采样
+            # MoE logits形状: [num_layers, batch*seq_len, num_experts]
+            # 我们需要提取每个样本的 [num_layers, num_experts] 特征矩阵
             valid_mask = sample_attention_mask.bool()
             actual_length = valid_mask.sum().item()
+            
             if actual_length > 0:
-                # 只对实际token位置的logits求平均
-                sample_logits = sample_layer_token_logits[:, valid_mask, :].mean(
-                    dim=1
-                )  # (num_layers, num_experts)
+                moe_logits_list = []
+                seq_len = inputs["input_ids"].shape[1]  # 序列长度
+                
+                for _, layer_dict in enumerate(outputs.router_logits):
+                    # layer_dict["moe_logits"] 形状: [batch*seq_len, num_experts] 
+                    layer_moe_logits = layer_dict["moe_logits"]  # [batch*seq_len, num_experts]
+                    
+                    # 提取第j个样本的logits
+                    start_idx = j * seq_len
+                    end_idx = (j + 1) * seq_len
+                    sample_layer_logits = layer_moe_logits[start_idx:end_idx]  # [seq_len, num_experts]
+                    
+                    # 转换为概率分布
+                    sample_layer_probs = torch.softmax(sample_layer_logits, dim=-1)  # [seq_len, num_experts]
+                    
+                    # 根据attention mask提取有效token的概率，然后求平均
+                    valid_probs = sample_layer_probs[valid_mask]  # [actual_length, num_experts]
+                    if valid_probs.shape[0] > 0:
+                        layer_avg_probs = valid_probs.mean(dim=0)  # [num_experts]
+                    else:
+                        # 如果没有有效token，使用均匀分布
+                        num_experts = sample_layer_probs.shape[-1]
+                        layer_avg_probs = torch.ones(num_experts) / num_experts
+                    
+                    moe_logits_list.append(layer_avg_probs)
+                
+                # 构建样本的MoE路由特征矩阵 [num_layers, num_experts]
+                sample_moe_matrix = torch.stack(moe_logits_list)  # [num_layers, num_experts]
             else:
-                # 如果没有实际token，使用全零
-                sample_logits = torch.zeros(
-                    sample_layer_token_logits.shape[0],
-                    sample_layer_token_logits.shape[2],
-                )
+                # 如果没有有效token，使用均匀分布
+                num_layers = len(outputs.router_logits)
+                num_experts = outputs.router_logits[0]["moe_logits"].shape[-1]
+                sample_moe_matrix = torch.ones(num_layers, num_experts) / num_experts
 
-            all_logits_by_dataset[dataset_name].append(sample_logits.cpu())
+            all_logits_by_dataset[dataset_name].append(sample_moe_matrix.cpu())
             dataset_sample_counts[dataset_name] += 1
 
             if i == 0 and j < 3:
@@ -330,95 +694,17 @@ def select(cfg: DictConfig) -> None:
                     f"  - 实际长度: {actual_length} / 总长度: {sample_attention_mask.shape[0]}"
                 )
                 log.info(
-                    f"  - 原始层级Token Logits形状: {sample_layer_token_logits.shape}"
+                    f"  - 质量门输出形状: {quality_logits_list[0].shape}"
                 )
+                log.info(f"  - MoE路由矩阵形状: {sample_moe_matrix.shape}")
 
-                # 显示attention mask的详细信息
+                # 显示质量门和MoE路由的详细信息
                 log.info(
-                    f"  - Attention Mask前10个值: {sample_attention_mask[:10].tolist()}"
+                    f"  - Quality Gate前3层的输出形状: {[ql.shape for ql in quality_logits_list[:3]]}"
                 )
                 log.info(
-                    f"  - Attention Mask后10个值: {sample_attention_mask[-10:].tolist()}"
+                    f"  - MoE Logits前3层的输出形状: {[outputs.router_logits[i]['moe_logits'][j].shape for i in range(min(3, len(outputs.router_logits)))]}"
                 )
-
-                if actual_length > 0:
-                    # 步骤1: 提取有效token的logits
-                    valid_logits = sample_layer_token_logits[:, valid_mask, :]
-                    log.info(
-                        f"  - 步骤1: 提取有效token后的logits形状: {valid_logits.shape}"
-                    )
-                    log.info(
-                        f"    (num_layers={valid_logits.shape[0]}, actual_tokens={valid_logits.shape[1]}, num_experts={valid_logits.shape[2]})"
-                    )
-
-                    # 显示第一层前5个token的原始logits示例
-                    first_layer_first_tokens = valid_logits[
-                        0, : min(5, actual_length), :
-                    ]
-                    log.info(
-                        f"  - 第1层前{min(5, actual_length)}个token的原始logits形状: {first_layer_first_tokens.shape}"
-                    )
-                    log.info(
-                        f"  - 第1层第1个token的前10个专家logits: {first_layer_first_tokens[0, :10].tolist()}"
-                    )
-                    log.info(
-                        f"  - 第1层第1个token的后10个专家logits: {first_layer_first_tokens[0, -10:].tolist()}"
-                    )
-
-                    # 步骤2: 应用softmax得到概率
-                    token_probs = torch.softmax(valid_logits, dim=-1)
-                    log.info(f"  - 步骤2: Softmax后的概率形状: {token_probs.shape}")
-
-                    # 显示第一层第一个token的概率分布
-                    first_token_probs = token_probs[0, 0, :]
-                    log.info("  - 第1层第1个token的概率分布:")
-                    log.info(f"    - 前10个专家概率: {first_token_probs[:10].tolist()}")
-                    log.info(
-                        f"    - 后10个专家概率: {first_token_probs[-10:].tolist()}"
-                    )
-                    log.info(f"    - 概率总和: {first_token_probs.sum().item():.6f}")
-
-                    # 步骤3: 计算好专家概率
-                    quality_probs_per_token = token_probs[
-                        :, :, :original_num_experts
-                    ].sum(dim=-1)
-                    log.info(
-                        f"  - 步骤3: 每层每个token的好专家概率形状: {quality_probs_per_token.shape}"
-                    )
-                    log.info(
-                        f"    (num_layers={quality_probs_per_token.shape[0]}, actual_tokens={quality_probs_per_token.shape[1]})"
-                    )
-
-                    # 显示前几层前几个token的好专家概率
-                    log.info("  - 前3层前5个token的好专家概率:")
-                    for layer_idx in range(min(3, quality_probs_per_token.shape[0])):
-                        layer_token_probs = quality_probs_per_token[
-                            layer_idx, : min(5, actual_length)
-                        ]
-                        log.info(
-                            f"    - 第{layer_idx + 1}层: {layer_token_probs.tolist()}"
-                        )
-
-                    # 步骤4: 层内平均（对所有实际token）
-                    quality_probs_per_layer = quality_probs_per_token.mean(dim=1)
-                    log.info(
-                        f"  - 步骤4: 每层的平均好专家概率形状: {quality_probs_per_layer.shape}"
-                    )
-                    log.info(
-                        f"  - 每层的平均好专家概率: {quality_probs_per_layer.tolist()}"
-                    )
-
-                    # 步骤5: 层间平均
-                    final_score = quality_probs_per_layer.mean().item()
-                    log.info(
-                        f"  - 步骤5: 最终质量分数 = {quality_probs_per_layer.sum().item():.6f} / {len(quality_probs_per_layer)} = {final_score:.6f}"
-                    )
-
-                    # 验证计算
-                    log.info(f"  - 验证: 函数返回的质量分数: {quality_score:.6f}")
-                    log.info(
-                        f"  - 验证: 计算是否一致: {'✅' if abs(final_score - quality_score) < 1e-6 else '❌'}"
-                    )
 
                 log.info(f"  - 最终质量分数: {quality_score:.6f}")
                 log.info("=" * 80)
@@ -432,11 +718,28 @@ def select(cfg: DictConfig) -> None:
                 }
             )
 
-    # 5. 筛选和保存数据
-    log.info("筛选和保存数据...")
-    scored_data.sort(key=lambda x: x["scores"], reverse=True)
-    num_to_select = int(len(scored_data) * cfg.selection_percentage)
-    selected_data = scored_data[:num_to_select]
+    # 5. 筛选和保存数据 - 使用新的多样性选择算法
+    log.info("开始多样性数据选择...")
+    
+    # 检查是否启用多样性选择
+    enable_diversity = getattr(cfg, 'enable_diversity_selection', True)
+    log.info(f"多样性选择模式: {'启用' if enable_diversity else '禁用(使用质量分数)'}")
+    
+    # 使用新的多样性选择算法
+    use_gpu_acceleration = getattr(cfg.distance_computation, 'use_gpu_acceleration', True)
+    distance_batch_size = getattr(cfg.distance_computation, 'distance_batch_size', 1000)
+    importance_selection_percentage = getattr(cfg, 'importance_selection_percentage', None)
+    
+    selected_data = diversity_based_selection(
+        scored_data=scored_data,
+        all_logits_by_dataset=all_logits_by_dataset,
+        selection_percentage=cfg.selection_percentage,
+        importance_selection_percentage=importance_selection_percentage,
+        enable_diversity=enable_diversity,
+        use_gpu_acceleration=use_gpu_acceleration,
+        device=device,
+        distance_batch_size=distance_batch_size
+    )
 
     log.info(
         f"选择了前 {len(selected_data)} 个样本 ({cfg.selection_percentage * 100:.2f}%)"

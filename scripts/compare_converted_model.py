@@ -44,74 +44,98 @@ def compare_state_dicts(original_dict, converted_dict, tolerance=1e-6):
         "missing_in_original": [],
         "shape_mismatch": [],
         "value_mismatch": [],
-        "gate_analysis": []  # For gate weights
+        "gate_analysis": [],  # For gate weights
+        "quality_gates": [],  # For quality gate analysis
+        "mapped_keys": []     # For mlp->normal_moe mapping
     }
     
-    all_keys = set(original_dict.keys()) | set(converted_dict.keys())
+    # Create mapping between original and converted keys
+    # In new architecture: original mlp -> converted normal_moe
+    key_mapping = {}
+    for orig_key in original_dict.keys():
+        if ".mlp." in orig_key:
+            converted_key = orig_key.replace(".mlp.", ".normal_moe.")
+            key_mapping[orig_key] = converted_key
+        else:
+            key_mapping[orig_key] = orig_key
     
-    for key in sorted(all_keys):
-        if key not in converted_dict:
-            results["missing_in_converted"].append(key)
+    # Check mapped keys (original mlp weights should match normal_moe)
+    for orig_key, conv_key in key_mapping.items():
+        if conv_key not in converted_dict:
+            results["missing_in_converted"].append(orig_key)
             continue
-        elif key not in original_dict:
-            results["missing_in_original"].append(key)
-            continue
+            
+        original_tensor = original_dict[orig_key]
+        converted_tensor = converted_dict[conv_key]
         
-        original_tensor = original_dict[key]
-        converted_tensor = converted_dict[key]
-        
-        # Special handling for gate weights
-        if "gate.weight" in key and len(original_tensor.shape) == 2 and len(converted_tensor.shape) == 2:
-            # Gate weights should be expanded from [64, hidden_size] to [72, hidden_size]
-            if converted_tensor.shape[0] == original_tensor.shape[0] + 8 and converted_tensor.shape[1] == original_tensor.shape[1]:
-                # Check if first 64 experts match
-                first_64_experts = converted_tensor[:original_tensor.shape[0], :]
-                matches = torch.allclose(original_tensor, first_64_experts, atol=tolerance)
-                max_diff = torch.max(torch.abs(original_tensor - first_64_experts)).item() if original_tensor.shape == first_64_experts.shape else float('inf')
-                
-                # Analyze trash can experts (last 8)
-                trash_can_experts = converted_tensor[original_tensor.shape[0]:, :]
+        # Special handling for MoE gate weights 
+        if ".mlp.gate.weight" in orig_key:
+            # Original mlp gate should match normal_moe gate exactly
+            if converted_tensor.shape == original_tensor.shape:
+                matches = torch.allclose(original_tensor, converted_tensor, atol=tolerance)
+                max_diff = torch.max(torch.abs(original_tensor - converted_tensor)).item()
                 
                 results["gate_analysis"].append({
-                    "key": key,
+                    "key": f"{orig_key} -> {conv_key}",
                     "original_shape": original_tensor.shape,
                     "converted_shape": converted_tensor.shape,
-                    "first_64_match": matches,
-                    "max_diff_first_64": max_diff,
-                    "trash_can_shape": trash_can_experts.shape,
-                    "trash_can_mean": trash_can_experts.mean().item(),
-                    "trash_can_std": trash_can_experts.std().item(),
-                    "trash_can_min": trash_can_experts.min().item(),
-                    "trash_can_max": trash_can_experts.max().item(),
+                    "weights_match": matches,
+                    "max_diff": max_diff,
+                    "architecture": "New (mlp->normal_moe, no expansion)",
                 })
+                
+                if matches:
+                    results["mapped_keys"].append(f"{orig_key} -> {conv_key}")
+                else:
+                    results["value_mismatch"].append({
+                        "key": f"{orig_key} -> {conv_key}",
+                        "max_diff": max_diff,
+                        "shape": original_tensor.shape
+                    })
                 continue
             else:
                 results["shape_mismatch"].append({
-                    "key": key,
+                    "key": f"{orig_key} -> {conv_key}",
                     "original_shape": original_tensor.shape,
                     "converted_shape": converted_tensor.shape
                 })
                 continue
         
-        # Check shapes for non-gate weights
+        # Check shapes for other weights
         if original_tensor.shape != converted_tensor.shape:
             results["shape_mismatch"].append({
-                "key": key,
+                "key": f"{orig_key} -> {conv_key}",
                 "original_shape": original_tensor.shape,
                 "converted_shape": converted_tensor.shape
             })
             continue
         
-        # Check values for non-gate weights
+        # Check values for other weights
         if torch.allclose(original_tensor, converted_tensor, atol=tolerance):
-            results["identical_keys"].append(key)
+            results["identical_keys"].append(f"{orig_key} -> {conv_key}")
         else:
             max_diff = torch.max(torch.abs(original_tensor - converted_tensor)).item()
             results["value_mismatch"].append({
-                "key": key,
+                "key": f"{orig_key} -> {conv_key}",
                 "max_diff": max_diff,
                 "shape": original_tensor.shape
             })
+    
+    # Check for extra keys in converted model (should be quality gates and trash experts)
+    converted_only_keys = set(converted_dict.keys()) - set(key_mapping.values())
+    for key in sorted(converted_only_keys):
+        if "quality_gate" in key:
+            tensor = converted_dict[key]
+            results["quality_gates"].append({
+                "key": key,
+                "shape": tensor.shape,
+                "mean": tensor.mean().item(),
+                "std": tensor.std().item(),
+                "min": tensor.min().item(),
+                "max": tensor.max().item(),
+            })
+        else:
+            results["missing_in_original"].append(key)
     
     return results
 
@@ -238,22 +262,34 @@ def compare_models(
             print(f"✓ Converted model loaded successfully!")
             print(f"  - Model type: {type(converted_model).__name__}")
             print(f"  - Number of experts: {converted_config.num_experts}")
-            print(f"  - Trash can experts: {converted_config.num_experts_per_tok}")
-            print(f"  - Total experts per layer: {converted_config.num_experts + converted_config.num_experts_per_tok}")
+            print(f"  - Two-tier routing: Quality Gate + MoE + Trash Expert")
+            print(f"  - Quality gate mode: {getattr(converted_config, 'trash_expert_mode', 'zero')}")
             print(f"  - Data type: {torch_dtype}")
             print(f"  - Total parameters: {sum(p.numel() for p in converted_model.parameters()):,}")
             
-            # Show converted gate weights info
-            print(f"\nConverted gate weights:")
+            # Show converted model structure info
+            print(f"\nConverted model structure:")
+            quality_gate_count = 0
+            normal_gate_count = 0
+            trash_expert_count = 0
             for name, param in converted_model.named_parameters():
-                if "gate.weight" in name:
-                    print(f"  - {name}: {param.shape} ({param.dtype})")
-                    gate_count += 1
-                    if gate_count <= 2:  # Show first 2 layers only
-                        pass
-                    elif gate_count == 3:
-                        print(f"  - ... (total {converted_config.num_hidden_layers} layers)")
-                        break
+                if "quality_gate" in name:
+                    quality_gate_count += 1
+                    if quality_gate_count <= 2:
+                        print(f"  - {name}: {param.shape} ({param.dtype})")
+                elif "normal_moe.gate.weight" in name:
+                    normal_gate_count += 1
+                    if normal_gate_count <= 2:
+                        print(f"  - {name}: {param.shape} ({param.dtype})")
+                elif "trash_expert" in name:
+                    trash_expert_count += 1
+                    if trash_expert_count <= 2:
+                        print(f"  - {name}: {param.shape} ({param.dtype})")
+            
+            if quality_gate_count > 2:
+                print(f"  - ... and {quality_gate_count - 2} more quality gates")
+            if normal_gate_count > 2:
+                print(f"  - ... and {normal_gate_count - 2} more MoE gates")
             
             converted_state_dict = converted_model.state_dict()
             
@@ -278,20 +314,30 @@ def compare_models(
         
         results = compare_state_dicts(original_state_dict, converted_state_dict, tolerance)
         
-        print(f"✓ Identical weights: {len(results['identical_keys'])}")
-        if len(results["identical_keys"]) <= 10:
+        print(f"✓ Identical weights: {len(results['identical_keys'])} + {len(results['mapped_keys'])} mapped")
+        print(f"  Direct matches: {len(results['identical_keys'])}")
+        print(f"  Mapped matches (mlp->normal_moe): {len(results['mapped_keys'])}")
+        
+        if len(results["identical_keys"]) <= 5:
             for key in results["identical_keys"]:
                 print(f"    {key}")
         else:
-            for key in results["identical_keys"][:5]:
+            for key in results["identical_keys"][:3]:
                 print(f"    {key}")
-            print(f"    ... and {len(results['identical_keys']) - 5} more")
+            print(f"    ... and {len(results['identical_keys']) - 3} more")
+            
+        if len(results["mapped_keys"]) <= 5:
+            for key in results["mapped_keys"]:
+                print(f"    {key}")
+        else:
+            for key in results["mapped_keys"][:3]:
+                print(f"    {key}")
+            print(f"    ... and {len(results['mapped_keys']) - 3} more")
         
         if results["shape_mismatch"]:
-            print(f"\n⚠️  Unexpected shape mismatches: {len(results['shape_mismatch'])}")
+            print(f"\n⚠️  Shape mismatches: {len(results['shape_mismatch'])}")
             for item in results["shape_mismatch"]:
-                if "gate.weight" not in item["key"]:  # Only show non-gate mismatches
-                    print(f"    {item['key']}: {item['original_shape']} -> {item['converted_shape']}")
+                print(f"    {item['key']}: {item['original_shape']} -> {item['converted_shape']}")
         
         if results["value_mismatch"]:
             print(f"\n❌ Value mismatches: {len(results['value_mismatch'])}")
@@ -306,9 +352,19 @@ def compare_models(
                 print(f"    {key}")
         
         if results["missing_in_original"]:
-            print(f"\n⚠️  Extra in converted model: {len(results['missing_in_original'])}")
+            print(f"\n⚠️  Extra in converted model (non-quality gates): {len(results['missing_in_original'])}")
             for key in results["missing_in_original"][:5]:
                 print(f"    {key}")
+        
+        # Quality gate analysis
+        if results["quality_gates"]:
+            print(f"\n✓ Quality gates added: {len(results['quality_gates'])}")
+            for item in results["quality_gates"][:2]:
+                print(f"  {item['key']}: shape={item['shape']}")
+                print(f"    mean={item['mean']:.6f}, std={item['std']:.6f}")
+                print(f"    range=[{item['min']:.6f}, {item['max']:.6f}]")
+            if len(results["quality_gates"]) > 2:
+                print(f"  ... and {len(results['quality_gates']) - 2} more quality gates")
         
         # 4. Gate weight analysis
         print(f"\n" + "="*60)
@@ -323,43 +379,25 @@ def compare_models(
                 key = item["key"]
                 original_shape = item["original_shape"]
                 converted_shape = item["converted_shape"]
-                first_64_match = item["first_64_match"]
-                max_diff = item["max_diff_first_64"]
+                weights_match = item["weights_match"]
+                max_diff = item["max_diff"]
+                architecture = item["architecture"]
                 
-                if i < 2 or not first_64_match:  # Show first 2 or any mismatches
+                if i < 2 or not weights_match:  # Show first 2 or any mismatches
                     print(f"\n  {key}:")
                     print(f"    Original shape: {original_shape}")
                     print(f"    Converted shape: {converted_shape}")
-                    print(f"    First 64 experts match: {'✓' if first_64_match else '❌'}")
-                    print(f"    Max difference in first 64 experts: {max_diff:.2e}")
-                    
-                    # Trash can expert analysis
-                    trash_shape = item["trash_can_shape"]
-                    trash_mean = item["trash_can_mean"]
-                    trash_std = item["trash_can_std"]
-                    trash_min = item["trash_can_min"]
-                    trash_max = item["trash_can_max"]
-                    
-                    print(f"    Trash can experts shape: {trash_shape}")
-                    print(f"    Trash can weights mean: {trash_mean:.6f}")
-                    print(f"    Trash can weights std: {trash_std:.6f}")
-                    print(f"    Trash can weights range: [{trash_min:.6f}, {trash_max:.6f}]")
-                    
-                    # Check if initialization is reasonable
-                    expected_std = 0.02
-                    std_ratio = trash_std / expected_std
-                    print(f"    Std ratio (actual/expected): {std_ratio:.3f}")
-                    
-                    if abs(trash_mean) > 0.01:
-                        print(f"    ⚠️  Mean is not close to 0")
-                    if not (0.8 <= std_ratio <= 1.2):
-                        print(f"    ⚠️  Std deviation is not close to expected value")
+                    print(f"    Architecture: {architecture}")
+                    print(f"    Weights match: {'✓' if weights_match else '❌'}")
+                    print(f"    Max difference: {max_diff:.2e}")
                 
-                if not first_64_match:
+                if not weights_match:
                     all_match = False
             
             if len(results["gate_analysis"]) > 2 and all_match:
                 print(f"\n  ... and {len(results['gate_analysis']) - 2} more gate layers (all matching)")
+        else:
+            print("No gate weights found - this might indicate an issue with the comparison.")
         
         # 5. Functionality test
         print(f"\n" + "="*60)
@@ -387,14 +425,27 @@ def compare_models(
         with torch.no_grad():
             converted_outputs = converted_model(input_ids, output_router_logits=True)
             print(f"✓ Converted model output shape: {converted_outputs.logits.shape}")
-            print(f"  Router logits shape: {converted_outputs.router_logits[0].shape}")
             
-            # Check router logits dimensions
-            expected_experts = converted_config.num_experts + converted_config.num_experts_per_tok
-            actual_experts = converted_outputs.router_logits[0].shape[-1]
-            print(f"  Expected experts: {expected_experts}")
-            print(f"  Actual experts in router logits: {actual_experts}")
-            print(f"  Router logits match expected: {'✓' if actual_experts == expected_experts else '❌'}")
+            # New architecture: dictionary format
+            print("  Router logits format: Dictionary (new architecture)")
+            quality_shape = converted_outputs.router_logits[0]["quality_logits"].shape
+            moe_shape = converted_outputs.router_logits[0]["moe_logits"].shape
+            print(f"    Quality logits shape: {quality_shape}")
+            print(f"    MoE logits shape: {moe_shape}")
+            
+            # Check expected dimensions
+            expected_quality_experts = 2  # good vs bad classification
+            expected_moe_experts = converted_config.num_experts
+            actual_quality_experts = quality_shape[-1]
+            actual_moe_experts = moe_shape[-1]
+            
+            print(f"  Expected quality experts: {expected_quality_experts}")
+            print(f"  Actual quality experts: {actual_quality_experts}")
+            print(f"  Quality logits match expected: {'✓' if actual_quality_experts == expected_quality_experts else '❌'}")
+            
+            print(f"  Expected MoE experts: {expected_moe_experts}")
+            print(f"  Actual MoE experts: {actual_moe_experts}")
+            print(f"  MoE logits match expected: {'✓' if actual_moe_experts == expected_moe_experts else '❌'}")
         
         # Clean up memory
         if memory_efficient and device != "cpu":
@@ -422,31 +473,37 @@ def compare_models(
         print(f"Missing weights: {len(results['missing_in_converted']) + len(results['missing_in_original'])}")
         
         # Success criteria
+        total_identical = len(results["identical_keys"]) + len(results["mapped_keys"])
+        quality_gates_count = len(results["quality_gates"])
+        
         success = (
             len(results["value_mismatch"]) == 0 and  # No unexpected value mismatches
             len(results["missing_in_converted"]) == 0 and  # No missing weights
-            len(results["missing_in_original"]) == 0 and  # No extra weights (except expected)
-            len([item for item in results["shape_mismatch"] if "gate.weight" not in item["key"]]) == 0 and  # No unexpected shape mismatches
-            all(item["first_64_match"] for item in results["gate_analysis"])  # All gate weights preserved correctly
+            len(results["shape_mismatch"]) == 0 and  # No unexpected shape mismatches
+            all(item["weights_match"] for item in results["gate_analysis"]) and  # All gate weights preserved correctly
+            total_identical > 0 and  # Should have matching weights
+            quality_gates_count == original_config.num_hidden_layers  # Should have quality gates for each layer
         )
         
         if success:
             print(f"\n🎉 SUCCESS: Model comparison passed all tests!")
-            print(f"   ✓ All non-gate weights are identical")
-            print(f"   ✓ Gate weights preserve first 64 experts perfectly")
-            print(f"   ✓ Trash can experts properly initialized")
+            print(f"   ✓ All weights preserved: {total_identical} identical/mapped")
+            print(f"   ✓ MLP weights correctly mapped to normal_moe: {len(results['mapped_keys'])}")
+            print(f"   ✓ Quality gates properly added: {quality_gates_count}")
             print(f"   ✓ Model functionality verified")
             print(f"   ✓ Converted model is ready for use!")
         else:
             print(f"\n❌ FAILURE: Some tests failed")
             if results["value_mismatch"]:
-                print(f"   - {len(results['value_mismatch'])} unexpected value mismatches")
+                print(f"   - {len(results['value_mismatch'])} value mismatches")
             if results["shape_mismatch"]:
-                print(f"   - {len([item for item in results['shape_mismatch'] if 'gate.weight' not in item['key']])} unexpected shape mismatches")
-            if any(not item["first_64_match"] for item in results["gate_analysis"]):
+                print(f"   - {len(results['shape_mismatch'])} shape mismatches")
+            if any(not item["weights_match"] for item in results["gate_analysis"]):
                 print(f"   - Gate weight preservation failed")
-            if results["missing_in_converted"] or results["missing_in_original"]:
-                print(f"   - Missing or extra weights detected")
+            if results["missing_in_converted"]:
+                print(f"   - Missing weights in converted model")
+            if quality_gates_count != original_config.num_hidden_layers:
+                print(f"   - Expected {original_config.num_hidden_layers} quality gates, found {quality_gates_count}")
         
         return success
         

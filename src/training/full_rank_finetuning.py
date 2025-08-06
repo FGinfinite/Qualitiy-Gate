@@ -42,33 +42,51 @@ def get_target_modules_names(model: torch.nn.Module, target_patterns: List[str])
     return target_modules
 
 
-def setup_full_rank_training(model: torch.nn.Module, target_patterns: List[str]) -> Dict[str, torch.nn.Parameter]:
+def setup_full_rank_training(model: torch.nn.Module, target_patterns: List[str], mode: str = "module") -> Dict[str, torch.nn.Parameter]:
     """
     设置全秩微调，冻结除目标模块外的所有参数。
     
     Args:
         model: PyTorch模型
-        target_patterns: 目标模块名称模式列表
+        target_patterns: 目标模块名称模式列表，或者参数名模式列表（routing模式）
+        mode: 匹配模式，"module"（模块匹配）或"parameter"（参数名匹配）
     
     Returns:
         可训练参数的字典
     """
-    target_module_names = get_target_modules_names(model, target_patterns)
-    
     # 冻结所有参数
     for param in model.parameters():
         param.requires_grad = False
     
-    # 解冻目标模块的参数
     trainable_params = {}
-    for name, module in model.named_modules():
-        if name in target_module_names:
-            for param_name, param in module.named_parameters():
-                param.requires_grad = True
-                full_param_name = f"{name}.{param_name}" if name else param_name
-                trainable_params[full_param_name] = param
     
-    print(f"设置全秩微调，目标模块: {target_module_names}")
+    if mode == "module":
+        # 原有的模块匹配逻辑
+        target_module_names = get_target_modules_names(model, target_patterns)
+        
+        # 解冻目标模块的参数
+        for name, module in model.named_modules():
+            if name in target_module_names:
+                for param_name, param in module.named_parameters():
+                    param.requires_grad = True
+                    full_param_name = f"{name}.{param_name}" if name else param_name
+                    trainable_params[full_param_name] = param
+        
+        print(f"设置全秩微调，目标模块: {target_module_names}")
+        
+    elif mode == "parameter":
+        # 新的参数名匹配逻辑（用于routing_only模式）
+        for name, param in model.named_parameters():
+            # 检查参数名是否匹配任何路由相关的模式
+            if any(pattern in name for pattern in target_patterns):
+                param.requires_grad = True
+                trainable_params[name] = param
+        
+        print(f"设置参数级微调，目标模式: {target_patterns}")
+        
+    else:
+        raise ValueError(f"不支持的模式: {mode}。支持的模式: ['module', 'parameter']")
+    
     trainable_count = sum(p.numel() for p in trainable_params.values())
     total_count = sum(p.numel() for p in model.parameters())
     print(f"可训练参数: {trainable_count:,} / 总参数: {total_count:,} ({100 * trainable_count / total_count:.2f}%)")
@@ -76,35 +94,52 @@ def setup_full_rank_training(model: torch.nn.Module, target_patterns: List[str])
     return trainable_params
 
 
-def save_full_rank_weights(model: torch.nn.Module, target_patterns: List[str], save_path: str) -> None:
+def save_full_rank_weights(model: torch.nn.Module, target_patterns: List[str], save_path: str, mode: str = "module") -> None:
     """
     保存全秩微调的模块权重。
     
     Args:
         model: PyTorch模型
-        target_patterns: 目标模块名称模式列表
+        target_patterns: 目标模块名称模式列表，或者参数名模式列表
         save_path: 保存路径
+        mode: 匹配模式，"module"（模块匹配）或"parameter"（参数名匹配）
     """
-    target_module_names = get_target_modules_names(model, target_patterns)
-    
-    # 收集目标模块的状态字典
+    # 收集目标参数的状态字典
     full_rank_state_dict = {}
-    for name, module in model.named_modules():
-        if name in target_module_names:
-            for param_name, param in module.named_parameters():
-                full_param_name = f"{name}.{param_name}" if name else param_name
-                full_rank_state_dict[full_param_name] = param.data.clone()
+    
+    if mode == "module":
+        target_module_names = get_target_modules_names(model, target_patterns)
+        
+        for name, module in model.named_modules():
+            if name in target_module_names:
+                for param_name, param in module.named_parameters():
+                    full_param_name = f"{name}.{param_name}" if name else param_name
+                    full_rank_state_dict[full_param_name] = param.data.clone()
+        
+        metadata = {'target_module_names': list(target_module_names)}
+        
+    elif mode == "parameter":
+        # 参数名模式匹配
+        for name, param in model.named_parameters():
+            if any(pattern in name for pattern in target_patterns):
+                full_rank_state_dict[name] = param.data.clone()
+        
+        metadata = {'target_patterns': target_patterns}
+        
+    else:
+        raise ValueError(f"不支持的模式: {mode}。支持的模式: ['module', 'parameter']")
     
     # 保存权重和元数据
     checkpoint = {
         'full_rank_weights': full_rank_state_dict,
+        'mode': mode,
         'target_patterns': target_patterns,
-        'target_module_names': list(target_module_names)
+        **metadata
     }
     
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
     torch.save(checkpoint, save_path)
-    print(f"全秩微调权重已保存到: {save_path}")
+    print(f"权重已保存到: {save_path} (模式: {mode}, 参数数量: {len(full_rank_state_dict)})")
 
 
 def load_full_rank_weights(model: torch.nn.Module, checkpoint_path: str) -> None:
@@ -120,24 +155,32 @@ def load_full_rank_weights(model: torch.nn.Module, checkpoint_path: str) -> None
     
     checkpoint = torch.load(checkpoint_path, map_location='cpu')
     full_rank_weights = checkpoint['full_rank_weights']
-    target_patterns = checkpoint['target_patterns']
-    
-    # 验证目标模块是否存在
-    target_module_names = get_target_modules_names(model, target_patterns)
+    mode = checkpoint.get('mode', 'module')  # 向后兼容
     
     # 加载权重
     model_state_dict = model.state_dict()
     loaded_count = 0
+    missing_params = []
     
     for param_name, weight in full_rank_weights.items():
         if param_name in model_state_dict:
-            model_state_dict[param_name].copy_(weight)
-            loaded_count += 1
+            # 检查形状是否匹配
+            if model_state_dict[param_name].shape == weight.shape:
+                model_state_dict[param_name].copy_(weight)
+                loaded_count += 1
+            else:
+                print(f"警告: 参数 {param_name} 形状不匹配 - 模型: {model_state_dict[param_name].shape}, 检查点: {weight.shape}")
         else:
-            print(f"警告: 参数 {param_name} 在模型中未找到")
+            missing_params.append(param_name)
     
-    print(f"成功加载 {loaded_count} 个全秩微调参数")
-    print(f"目标模块: {target_module_names}")
+    if missing_params:
+        print(f"警告: 以下 {len(missing_params)} 个参数在模型中未找到:")
+        for param in missing_params[:5]:  # 只显示前5个
+            print(f"  - {param}")
+        if len(missing_params) > 5:
+            print(f"  ... 还有 {len(missing_params) - 5} 个参数")
+    
+    print(f"成功加载 {loaded_count}/{len(full_rank_weights)} 个权重参数 (模式: {mode})")
 
 
 def print_trainable_parameters(model: torch.nn.Module) -> None:

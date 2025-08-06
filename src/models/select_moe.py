@@ -33,29 +33,27 @@ logger = logging.get_logger(__name__)
 
 
 class SelectMoeConfig(OlmoeConfig):
-    """Configuration for Select-MoE model with trash can experts."""
+    """Configuration for Select-MoE model with two-tier routing system."""
 
     model_type = "select_moe"
 
     def __init__(
         self,
         # Select-MoE specific parameters
-        trash_can_init_mean: float = 0.0,
-        trash_can_init_std: float = 0.02,
-        constraint_loss_weight: float = 0.01,
-        trash_can_loss_alpha: float = 1.0,
-        trash_can_loss_beta: float = 2.0,
-        enable_load_balancing: bool = False,  # New parameter to control load balancing
+        quality_gate_init_mean: float = 0.0,
+        quality_gate_init_std: float = 0.02,
+        quality_loss_weight: float = 0.01,
+        trash_expert_mode: str = "zero",  # "zero", "noise", "custom"
+        enable_load_balancing: bool = False,
         **kwargs,
     ):
         super().__init__(**kwargs)
 
-        # Select-MoE specific parameters
-        self.trash_can_init_mean = trash_can_init_mean
-        self.trash_can_init_std = trash_can_init_std
-        self.constraint_loss_weight = constraint_loss_weight
-        self.trash_can_loss_alpha = trash_can_loss_alpha
-        self.trash_can_loss_beta = trash_can_loss_beta
+        # Select-MoE specific parameters  
+        self.quality_gate_init_mean = quality_gate_init_mean
+        self.quality_gate_init_std = quality_gate_init_std
+        self.quality_loss_weight = quality_loss_weight
+        self.trash_expert_mode = trash_expert_mode
         self.enable_load_balancing = enable_load_balancing
 
         # Ensure router logits are output by default for MoE training
@@ -64,6 +62,84 @@ class SelectMoeConfig(OlmoeConfig):
             or self.output_router_logits is None
         ):
             self.output_router_logits = True
+
+
+
+class QualityGate(nn.Module):
+    """
+    First-tier routing network for quality classification.
+    Performs binary classification to determine data quality (good vs bad).
+    """
+    
+    def __init__(self, config: SelectMoeConfig):
+        super().__init__()
+        self.hidden_size = config.hidden_size
+        self.gate = nn.Linear(config.hidden_size, 2, bias=False)
+        
+        # Initialize gate weights
+        nn.init.normal_(
+            self.gate.weight.data,
+            mean=config.quality_gate_init_mean,
+            std=config.quality_gate_init_std,
+        )
+    
+    def forward(self, hidden_states: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Forward pass of QualityGate.
+        
+        Args:
+            hidden_states: Input tensor of shape (batch_size, seq_len, hidden_size)
+            
+        Returns:
+            quality_logits: Raw logits for quality classification (batch_size, seq_len, 2)
+            quality_probs: Normalized probabilities [good_ratio, bad_ratio] (batch_size, seq_len, 2)
+        """
+        batch_size, seq_len, hidden_dim = hidden_states.shape
+        hidden_states_reshaped = hidden_states.view(-1, hidden_dim)
+        
+        # Get quality classification logits
+        quality_logits = self.gate(hidden_states_reshaped)  # (batch_size * seq_len, 2)
+        
+        # Convert to probabilities
+        quality_probs = F.softmax(quality_logits, dim=-1)  # (batch_size * seq_len, 2)
+        
+        # Reshape back to original batch structure
+        quality_logits = quality_logits.view(batch_size, seq_len, 2)
+        quality_probs = quality_probs.view(batch_size, seq_len, 2)
+        
+        return quality_logits, quality_probs
+
+
+class TrashExpert(nn.Module):
+    """
+    Trash expert that implements different output modes.
+    """
+    
+    def __init__(self, config: SelectMoeConfig):
+        super().__init__()
+        self.mode = config.trash_expert_mode
+        self.hidden_size = config.hidden_size
+        
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass of TrashExpert.
+        
+        Args:
+            hidden_states: Input tensor
+            
+        Returns:
+            Output tensor based on the configured mode
+        """
+        if self.mode == "zero":
+            return torch.zeros_like(hidden_states)
+        elif self.mode == "noise":
+            # Return noise with same mean and std as input
+            mean = hidden_states.mean(dim=-1, keepdim=True)
+            std = hidden_states.std(dim=-1, keepdim=True) + 1e-8  # Add small epsilon to avoid zero std
+            noise = torch.randn_like(hidden_states) * std + mean
+            return noise
+        else:  # "custom" or future extensions
+            return torch.zeros_like(hidden_states)
 
 
 class TrashCanSparseMoeBlock(nn.Module):
@@ -189,13 +265,104 @@ class TrashCanSparseMoeBlock(nn.Module):
 
 
 class SelectMoeDecoderLayer(OlmoeDecoderLayer):
-    """Decoder layer with TrashCanSparseMoeBlock."""
+    """Decoder layer with two-tier routing system."""
 
     def __init__(self, config: SelectMoeConfig, layer_idx: int):
         super().__init__(config, layer_idx)
 
-        # Replace the MLP with TrashCanSparseMoeBlock
-        self.mlp = TrashCanSparseMoeBlock(config)
+        # Add our two-tier routing components on top of existing MLP
+        # First-tier: Quality gate for good/bad classification
+        self.quality_gate = QualityGate(config)
+        
+        # Second-tier: Reuse the existing MoE block (self.mlp) as normal_moe
+        self.normal_moe = self.mlp
+        # Remove the original mlp reference to avoid shared tensors issue
+        delattr(self, 'mlp')
+        
+        # Trash expert for low-quality data processing
+        self.trash_expert = TrashExpert(config)
+        
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_value: Optional[Tuple[torch.Tensor]] = None,
+        output_attentions: Optional[bool] = False,
+        output_router_logits: Optional[bool] = False,
+        use_cache: Optional[bool] = False,
+        cache_position: Optional[torch.LongTensor] = None,
+        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        **kwargs,
+    ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
+        """
+        Forward pass with two-tier routing system.
+        
+        Args:
+            hidden_states: Input tensor
+            ... (other standard transformer layer arguments)
+            
+        Returns:
+            tuple containing:
+            - output hidden states
+            - present key value (if use_cache)
+            - attention weights (if output_attentions)  
+            - router logits including quality_logits and moe_logits (if output_router_logits)
+        """
+        residual = hidden_states
+
+        # Self-attention computation (inherited from parent class)
+        hidden_states = self.input_layernorm(hidden_states)
+        
+        # Self attention
+        hidden_states, self_attn_weights, present_key_value = self.self_attn(
+            hidden_states=hidden_states,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_value=past_key_value,
+            output_attentions=output_attentions,
+            use_cache=use_cache,
+            cache_position=cache_position,
+            position_embeddings=position_embeddings,
+        )
+        hidden_states = residual + hidden_states
+
+        # MLP computation with two-tier routing
+        residual = hidden_states
+        hidden_states = self.post_attention_layernorm(hidden_states)
+        
+        # First-tier routing: Quality classification
+        quality_logits, quality_probs = self.quality_gate(hidden_states)
+        good_ratio = quality_probs[..., 0:1]  # Shape: (batch_size, seq_len, 1)
+        bad_ratio = quality_probs[..., 1:2]   # Shape: (batch_size, seq_len, 1)
+        
+        # Second-tier routing: Normal MoE processing
+        y_normal, moe_router_logits = self.normal_moe(hidden_states)
+        
+        # Trash expert processing
+        y_trash = self.trash_expert(hidden_states)
+        
+        # Combine outputs: y = good_ratio * y_normal + bad_ratio * y_trash
+        hidden_states = good_ratio * y_normal + bad_ratio * y_trash
+        hidden_states = residual + hidden_states
+
+        outputs = (hidden_states,)
+
+        if output_attentions:
+            outputs += (self_attn_weights,)
+
+        if use_cache:
+            outputs += (present_key_value,)
+
+        if output_router_logits:
+            # Return both quality logits and MoE router logits
+            router_logits = {
+                'quality_logits': quality_logits,
+                'moe_logits': moe_router_logits
+            }
+            outputs += (router_logits,)
+
+        return outputs
 
 
 class SelectMoePreTrainedModel(PreTrainedModel):
@@ -411,105 +578,67 @@ class SelectMoeModel(SelectMoePreTrainedModel):
         return None
 
 
-def custom_constraint_loss(
-    router_logits: List[torch.Tensor], config: SelectMoeConfig, debug: bool = True
+def quality_classification_loss(
+    router_logits: List[dict], config: SelectMoeConfig, debug: bool = False
 ) -> torch.Tensor:
     """
-    Compute custom constraint loss for trash can experts.
-
-    This loss encourages the model to balance between using real experts and trash can experts
-    based on data quality. Higher trash can usage should correlate with lower data quality.
+    Compute quality classification loss using sigmoid(good_ratio).
+    
+    This loss encourages the model to reduce good_ratio values, forcing it to learn
+    to distinguish between good and bad quality data.
+    
+    Args:
+        router_logits: List of dictionaries containing 'quality_logits' and 'moe_logits' for each layer
+        config: Model configuration
+        debug: Whether to print debug information
+        
+    Returns:
+        Quality classification loss tensor
     """
     if debug:
-        print(f"\n=== Custom Constraint Loss Debug ===")
+        print(f"\n=== Quality Classification Loss Debug ===")
         print(f"router_logits type: {type(router_logits)}")
         print(f"Number of layers (len(router_logits)): {len(router_logits)}")
 
     if len(router_logits) == 0:
-        return torch.tensor(
-            0.0, device=next(iter(router_logits)).device if router_logits else "cpu"
-        )
+        return torch.tensor(0.0, device="cpu")
 
     total_loss = 0.0
     num_layers = 0
 
     for layer_idx, layer_router_logits in enumerate(router_logits):
-        if layer_router_logits is None:
+        if layer_router_logits is None or 'quality_logits' not in layer_router_logits:
             continue
 
+        quality_logits = layer_router_logits['quality_logits']  # Shape: (batch_size, seq_len, 2)
+        
         if debug:
             print(f"\n--- Layer {layer_idx} ---")
-            print(f"layer_router_logits shape: {layer_router_logits.shape}")
-            print(f"layer_router_logits device: {layer_router_logits.device}")
+            print(f"quality_logits shape: {quality_logits.shape}")
+            print(f"quality_logits device: {quality_logits.device}")
 
-        # Get routing probabilities for all experts
-        routing_probs = F.softmax(layer_router_logits, dim=-1)
+        # Get quality probabilities
+        quality_probs = F.softmax(quality_logits, dim=-1)  # Shape: (batch_size, seq_len, 2)
+        good_ratio = quality_probs[..., 0]  # Shape: (batch_size, seq_len)
+        
         if debug:
-            print(f"routing_probs shape: {routing_probs.shape}")
+            print(f"good_ratio shape: {good_ratio.shape}")
+            print(f"good_ratio min/max/mean: {good_ratio.min().item():.4f}/{good_ratio.max().item():.4f}/{good_ratio.mean().item():.4f}")
 
-        # Get top-k routing decisions (actual expert selection)
-        top_k_probs, selected_experts = torch.topk(
-            routing_probs, k=config.num_experts_per_tok, dim=-1
-        )
+        # Apply sigmoid to good_ratio and use as loss
+        # This encourages the model to reduce good_ratio (i.e., classify more data as bad quality)
+        layer_loss = torch.sigmoid(good_ratio).mean()
+        
         if debug:
-            print(f"top_k_probs shape: {top_k_probs.shape}")
-            print(f"selected_experts shape: {selected_experts.shape}")
-            print(f"config.num_experts: {config.num_experts}")
-            print(f"config.num_experts_per_tok: {config.num_experts_per_tok}")
+            print(f"layer_loss: {layer_loss.item():.6f}")
 
-        # Calculate trash can expert usage ratio
-        # Trash can experts are indices >= config.num_experts
-        trash_can_mask = selected_experts >= config.num_experts
-        if debug:
-            print(f"trash_can_mask shape: {trash_can_mask.shape}")
-            print(f"trash_can_mask sum: {trash_can_mask.sum().item()}")
-
-        trash_can_probs = top_k_probs * trash_can_mask.float()
-        if debug:
-            print(f"trash_can_probs shape: {trash_can_probs.shape}")
-
-        trash_can_ratio = trash_can_probs.sum(dim=-1)  # Shape: (batch_size * seq_len,)
-        if debug:
-            print(f"trash_can_ratio shape: {trash_can_ratio.shape}")
-            print(
-                f"trash_can_ratio min/max/mean: {trash_can_ratio.min().item():.4f}/{trash_can_ratio.max().item():.4f}/{trash_can_ratio.mean().item():.4f}"
-            )
-
-        # Beta distribution inspired loss to encourage balanced usage
-        # When trash_can_ratio is too low (high quality data): loss increases
-        # When trash_can_ratio is too high (low quality data): loss decreases
-        alpha = config.trash_can_loss_alpha
-        beta = config.trash_can_loss_beta
-        if debug:
-            print(f"alpha: {alpha}, beta: {beta}")
-
-        # Clamp ratio to avoid log(0)
-        ratio_clamped = torch.clamp(trash_can_ratio, min=1e-8, max=1.0 - 1e-8)
-
-        if alpha == 1.0:
-            # Simplified form: encourages moderate trash can usage
-            layer_loss = -(beta - 1) * torch.log(ratio_clamped) - torch.log(
-                1 - ratio_clamped
-            )
-        else:
-            # Full beta distribution form
-            layer_loss = -(
-                (alpha - 1) * torch.log(ratio_clamped)
-                + (beta - 1) * torch.log(1 - ratio_clamped)
-            )
-
-        if debug:
-            print(f"layer_loss shape: {layer_loss.shape}")
-            print(
-                f"layer_loss min/max/mean: {layer_loss.min().item():.4f}/{layer_loss.max().item():.4f}/{layer_loss.mean().item():.4f}"
-            )
-
-        total_loss += layer_loss.mean()
+        total_loss += layer_loss
         num_layers += 1
 
     final_loss = total_loss / max(num_layers, 1)
+    
     if debug:
-        print(f"\nFinal constraint loss: {final_loss.item():.6f}")
+        print(f"\nFinal quality classification loss: {final_loss.item():.6f}")
         print("=== End Debug ===\n")
 
     return final_loss
@@ -624,7 +753,6 @@ class SelectMoeForCausalLM(SelectMoePreTrainedModel):
         # print(f"Loss: {loss.item() if loss is not None else 'N/A'}")
 
         aux_loss = None
-        constraint_loss = None
         if output_router_logits:
             # Load balancing loss (optional)
             if self.config.enable_load_balancing:
@@ -637,11 +765,11 @@ class SelectMoeForCausalLM(SelectMoePreTrainedModel):
             else:
                 aux_loss = torch.tensor(0.0, device=hidden_states.device)
 
-            # Custom constraint loss for trash can experts (always computed)
-            constraint_loss = custom_constraint_loss(
+            # Quality classification loss (always computed)
+            quality_loss = quality_classification_loss(
                 outputs.router_logits if return_dict else outputs[-1], self.config
             )
-            aux_loss += self.config.constraint_loss_weight * constraint_loss
+            aux_loss += self.config.quality_loss_weight * quality_loss
 
             if labels is not None:
                 loss += self.router_aux_loss_coef * aux_loss.to(loss.device)
@@ -664,6 +792,7 @@ class SelectMoeForCausalLM(SelectMoePreTrainedModel):
             attentions=outputs.attentions,
             router_logits=outputs.router_logits,
         )
+
 
     def prepare_inputs_for_generation(
         self,

@@ -25,7 +25,6 @@ from src.models.select_moe import (
     SelectMoeConfig,
     SelectMoeForCausalLM,
     register_select_moe,
-    replace_moe_layers_with_trashcan,
 )
 
 
@@ -51,11 +50,12 @@ def convert_and_save_model(
     model_name="allenai/OLMoE-1B-7B-0125",
     save_path=None,
     device="cpu",
-    trash_can_init_mean=0.0,
-    trash_can_init_std=0.02,
-    constraint_loss_weight=1,
-    trash_can_loss_alpha=1.0,
-    trash_can_loss_beta=5.0,
+    quality_gate_init_mean=0.0,
+    quality_gate_init_std=0.02,
+    quality_loss_weight=0.01,
+    trash_expert_mode="zero",
+    enable_load_balancing=False,
+    freeze_non_routing=False,  # New parameter
     push_to_hub=False,
     hub_repo_name=None,
     seed=42,
@@ -67,11 +67,12 @@ def convert_and_save_model(
         model_name: HuggingFace model name or local path
         save_path: Local path to save the converted model
         device: Device to use for conversion
-        trash_can_init_mean: Mean for trash can expert initialization
-        trash_can_init_std: Std for trash can expert initialization
-        constraint_loss_weight: Weight for constraint loss
-        trash_can_loss_alpha: Alpha parameter for beta distribution loss
-        trash_can_loss_beta: Beta parameter for beta distribution loss
+        quality_gate_init_mean: Mean for quality gate initialization
+        quality_gate_init_std: Std for quality gate initialization
+        quality_loss_weight: Weight for quality classification loss
+        trash_expert_mode: Trash expert mode ("zero", "noise", "custom")
+        enable_load_balancing: Whether to enable MoE load balancing
+        freeze_non_routing: Whether to freeze non-routing weights after conversion
         push_to_hub: Whether to push to HuggingFace Hub
         hub_repo_name: Repository name for Hub upload
         seed: Random seed for reproducibility (default: 42)
@@ -98,7 +99,7 @@ def convert_and_save_model(
 
         original_model = OlmoeForCausalLM.from_pretrained(
             model_name,
-            torch_dtype=torch.float32,  # Use float32 for precise weight handling
+            torch_dtype="auto",  # Use original model's dtype
             device_map=device if device != "cpu" else None,
         )
         original_config = original_model.config
@@ -119,41 +120,70 @@ def convert_and_save_model(
         select_moe_config_dict.update(
             {
                 "model_type": "select_moe",
-                "trash_can_init_mean": trash_can_init_mean,
-                "trash_can_init_std": trash_can_init_std,
-                "constraint_loss_weight": constraint_loss_weight,
-                "trash_can_loss_alpha": trash_can_loss_alpha,
-                "trash_can_loss_beta": trash_can_loss_beta,
+                "quality_gate_init_mean": quality_gate_init_mean,
+                "quality_gate_init_std": quality_gate_init_std,
+                "quality_loss_weight": quality_loss_weight,
+                "trash_expert_mode": trash_expert_mode,
+                "enable_load_balancing": enable_load_balancing,
             }
         )
 
         select_moe_config = SelectMoeConfig(**select_moe_config_dict)
 
         print("✓ Select-MoE config created!")
-        print(f"  - Original experts: {select_moe_config.num_experts}")
-        print(f"  - Trash can experts: {select_moe_config.num_experts_per_tok}")
-        print(
-            f"  - Total experts per layer: {select_moe_config.num_experts + select_moe_config.num_experts_per_tok}"
-        )
-        print(
-            f"  - Trash can init: mean={trash_can_init_mean}, std={trash_can_init_std}"
-        )
+        print(f"  - Two-tier routing: Quality Gate + MoE + Trash Expert")
+        print(f"  - Quality gate init: mean={quality_gate_init_mean}, std={quality_gate_init_std}")
+        print(f"  - Quality loss weight: {quality_loss_weight}")
+        print(f"  - Trash expert mode: {trash_expert_mode}")
+        print(f"  - Load balancing: {enable_load_balancing}")
 
-        # 3. Convert the model
-        print("\n3. Converting model architecture...")
-
-        # Convert MoE layers in-place
-        replace_moe_layers_with_trashcan(original_model, select_moe_config)
-
-        # Create proper Select-MoE model instance
+        # 3. Convert the model using new two-tier architecture
+        print("\n3. Converting to two-tier routing architecture...")
+        
+        # Create new Select-MoE model with two-tier routing
         select_moe_model = SelectMoeForCausalLM(select_moe_config)
-        select_moe_model.load_state_dict(original_model.state_dict(), strict=False)
+        
+        # Copy compatible weights from original model
+        original_state_dict = original_model.state_dict()
+        select_moe_state_dict = select_moe_model.state_dict()
+        
+        print("Mapping original MLP weights to normal_moe...")
+        copied_count = 0
+        
+        # Copy all weights from original model to new model
+        # Special handling for mlp -> normal_moe mapping
+        for key in original_state_dict:
+            if key in select_moe_state_dict:
+                # Direct mapping (non-MLP weights)
+                select_moe_state_dict[key].copy_(original_state_dict[key])
+                copied_count += 1
+            elif ".mlp." in key:
+                # Map mlp weights to normal_moe
+                new_key = key.replace(".mlp.", ".normal_moe.")
+                if new_key in select_moe_state_dict:
+                    select_moe_state_dict[new_key].copy_(original_state_dict[key])
+                    copied_count += 1
+                    print(f"  Mapped: {key} -> {new_key}")
+                else:
+                    print(f"  Warning: Could not map {key} to {new_key}")
+        
+        print(f"Total weights copied: {copied_count}/{len(original_state_dict)}")
+        
+        # Verify quality gates are initialized (they should be random)
+        quality_gate_count = 0
+        for key in select_moe_state_dict:
+            if "quality_gate" in key:
+                quality_gate_count += 1
+        print(f"Quality gates found: {quality_gate_count}")
+                
+        
+        print("✓ Weight copying completed!")
+        print("✓ Two-tier routing architecture conversion completed!")
 
+        
         # Move to device if specified
         if device != "cpu":
             select_moe_model = select_moe_model.to(device)
-
-        print("✓ Model conversion completed!")
 
         # 4. Verify the conversion
         print("\n4. Verifying conversion...")
@@ -172,17 +202,33 @@ def convert_and_save_model(
         print("✓ Forward pass successful!")
         print(f"  - Output shape: {outputs.logits.shape}")
         print(f"  - Router logits layers: {len(outputs.router_logits)}")
-        print(f"  - Router logits shape: {outputs.router_logits[0].shape}")
-
-        # Verify router logits dimensions
-        expected_experts = (
-            select_moe_config.num_experts + select_moe_config.num_experts_per_tok
-        )
-        actual_experts = outputs.router_logits[0].shape[-1]
-        assert actual_experts == expected_experts, (
-            f"Router logits mismatch: {actual_experts} != {expected_experts}"
-        )
-        print("✓ Router logits verification passed!")
+        
+        # Verify new two-tier router output format
+        first_layer_router = outputs.router_logits[0]
+        if isinstance(first_layer_router, dict):
+            print("✓ Two-tier routing output format verified!")
+            print(f"  - Quality logits shape: {first_layer_router['quality_logits'].shape}")
+            print(f"  - MoE logits shape: {first_layer_router['moe_logits'].shape}")
+            
+            # Verify dimensions
+            expected_quality_dims = (batch_size, seq_len, 2)  # [good, bad]
+            expected_moe_dims = (batch_size * seq_len, select_moe_config.num_experts)
+            
+            actual_quality_dims = first_layer_router['quality_logits'].shape
+            actual_moe_dims = first_layer_router['moe_logits'].shape
+            
+            assert actual_quality_dims == expected_quality_dims, f"Quality logits shape mismatch: {actual_quality_dims} != {expected_quality_dims}"
+            assert actual_moe_dims == expected_moe_dims, f"MoE logits shape mismatch: {actual_moe_dims} != {expected_moe_dims}"
+            
+            print("✓ Router logits dimensions verification passed!")
+        else:
+            raise ValueError("Expected dictionary format for two-tier router logits, got:", type(first_layer_router))
+        
+        # Optional: Freeze non-routing weights if specified
+        if freeze_non_routing:
+            print("\n4.5. Freezing non-routing weights...")
+            trainable_params, frozen_params = select_moe_model.freeze_non_routing_weights()
+            print(f"✓ Non-routing weights frozen. Trainable: {trainable_params:,}, Frozen: {frozen_params:,}")
 
         # 5. Save the model
         print("\n5. Saving converted model...")
@@ -219,7 +265,15 @@ def convert_and_save_model(
 
         print("✓ Loaded model forward pass successful!")
         print(f"  - Output shape: {test_outputs.logits.shape}")
-        print(f"  - Router logits shape: {test_outputs.router_logits[0].shape}")
+        
+        # Verify loaded model has correct two-tier routing format
+        loaded_first_layer_router = test_outputs.router_logits[0]
+        if isinstance(loaded_first_layer_router, dict):
+            print("✓ Loaded model two-tier routing format verified!")
+            print(f"  - Quality logits shape: {loaded_first_layer_router['quality_logits'].shape}")
+            print(f"  - MoE logits shape: {loaded_first_layer_router['moe_logits'].shape}")
+        else:
+            raise ValueError("Loaded model router output format incorrect")
 
         # 7. Push to Hub (optional)
         if push_to_hub:
@@ -261,7 +315,8 @@ def convert_and_save_model(
         print("   ✓ No manual conversion needed")
         print("   ✓ Standard HuggingFace API compatibility")
         print("   ✓ Preserves all original pretrained weights")
-        print("   ✓ Ready for fine-tuning with trash can experts")
+        print("   ✓ Two-tier routing: Quality Gate + MoE + Trash Expert")
+        print("   ✓ Ready for data selection and quality-aware training")
 
         return save_path
 
@@ -298,34 +353,39 @@ def main():
 
     # Select-MoE configuration
     parser.add_argument(
-        "--trash-can-init-mean",
+        "--quality-gate-init-mean",
         type=float,
         default=0.0,
-        help="Mean for trash can expert initialization",
+        help="Mean for quality gate initialization",
     )
     parser.add_argument(
-        "--trash-can-init-std",
+        "--quality-gate-init-std",
         type=float,
         default=0.02,
-        help="Std for trash can expert initialization",
+        help="Std for quality gate initialization",
     )
     parser.add_argument(
-        "--constraint-loss-weight",
+        "--quality-loss-weight",
         type=float,
-        default=1,
-        help="Weight for constraint loss",
+        default=0.01,
+        help="Weight for quality classification loss",
     )
     parser.add_argument(
-        "--trash-can-loss-alpha",
-        type=float,
-        default=1.0,
-        help="Alpha parameter for beta distribution loss",
+        "--trash-expert-mode",
+        type=str,
+        default="zero",
+        choices=["zero", "noise", "custom"],
+        help="Trash expert mode",
     )
     parser.add_argument(
-        "--trash-can-loss-beta",
-        type=float,
-        default=5.0,
-        help="Beta parameter for beta distribution loss",
+        "--enable-load-balancing",
+        action="store_true",
+        help="Enable MoE load balancing loss",
+    )
+    parser.add_argument(
+        "--freeze-non-routing",
+        action="store_true", 
+        help="Freeze non-routing weights after conversion (for routing-only training)",
     )
 
     # Random seed
@@ -369,11 +429,12 @@ def main():
         model_name=args.model,
         save_path=args.save_path,
         device=args.device,
-        trash_can_init_mean=args.trash_can_init_mean,
-        trash_can_init_std=args.trash_can_init_std,
-        constraint_loss_weight=args.constraint_loss_weight,
-        trash_can_loss_alpha=args.trash_can_loss_alpha,
-        trash_can_loss_beta=args.trash_can_loss_beta,
+        quality_gate_init_mean=args.quality_gate_init_mean,
+        quality_gate_init_std=args.quality_gate_init_std,
+        quality_loss_weight=args.quality_loss_weight,
+        trash_expert_mode=args.trash_expert_mode,
+        enable_load_balancing=args.enable_load_balancing,
+        freeze_non_routing=args.freeze_non_routing,  # New parameter
         push_to_hub=args.push_to_hub,
         hub_repo_name=args.hub_repo_name,
         seed=args.seed,

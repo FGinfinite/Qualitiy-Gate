@@ -2,7 +2,4 @@
 # Description: This script runs the second stage of the project: data selection.
 # Usage: ./scripts/run_stage_2.sh
 
-export CUDA_VISIBLE_DEVICES=0
-export CUDA_LAUNCH_BLOCKING=1
-
 uv run src/main.py --config-name=stage_2_selection "$@"

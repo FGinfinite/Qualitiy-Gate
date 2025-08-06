@@ -6,10 +6,10 @@ stage: pretrain
 # Hydra Configuration
 hydra:
   run:
-    dir: outputs/stage_1_pretrain/${now:%Y-%m-%d}/${now:%H-%M-%S}-batch=${training.batch_size},lr=${training.learning_rate},beta=${training.trash_can_loss_beta}
+    dir: outputs/stage_1_pretrain/${now:%Y-%m-%d}/${now:%H-%M-%S}-batch=${training.batch_size},lr=${training.learning_rate}
   sweep:
     dir: outputs/stage_1_pretrain
-    subdir: ${now:%Y-%m-%d}/${now:%H-%M-%S}-batch=${training.batch_size},lr=${training.learning_rate},beta=${training.trash_can_loss_beta}-${hydra.job.override_dirname}
+    subdir: ${now:%Y-%m-%d}/${now:%H-%M-%S}-batch=${training.batch_size},lr=${training.learning_rate}-${hydra.job.override_dirname}
   job:
     config:
       override_dirname:
@@ -22,7 +22,7 @@ hydra:
 
 # Model configuration
 selector_model:
-  path: "converted_models/select_moe_converted_OLMoE-1B-7B-0125"
+  path: "converted_models/select_moe_converted_OLMoE-1B-7B-0125_test"
   tokenizer_name: "allenai/OLMoE-1B-7B-0125"
 output_dir: ${hydra:run.dir}
 
@@ -48,7 +48,7 @@ training:
   epochs: 4
   optimizer: "AdamW"
   scheduler: "linear"
-  peft_mode: "full_rank"  # Options: "lora", "full_rank"
+  peft_mode: "full_rank"  # Options: "lora" (低秩微调), "full_rank" (路由参数全秩微调)
   lora:
     r: 16
     lora_alpha: 64
@@ -59,8 +59,10 @@ training:
     grab: false
     memory_need_gb: 24
     over_grab: false
-  # Custom loss parameters for trash can experts
-  trash_can_loss_alpha: 1.0
-  trash_can_loss_beta: 5.0
-  constraint_loss_weight: 1.0
+  # New two-tier routing architecture parameters
+  quality_loss_weight: 0.1
+  quality_gate_init_mean: 0.0
+  quality_gate_init_std: 0.02
+  trash_expert_mode: "zero"  # Options: "zero", "noise", "custom"
+  enable_load_balancing: false
 
