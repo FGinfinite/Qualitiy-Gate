@@ -2,8 +2,8 @@
 # Licensed under the Apache License, Version 2.0
 
 """
-Custom OLMoE model with trash can experts for transformers registration.
-Based on the TrashCanMoE implementation in src/modeling.py.
+使用垃圾桶专家的自定义OLMoE模型，用于transformers注册。
+基于src/modeling.py中的TrashCanMoE实现。
 """
 
 from typing import List, Optional, Tuple, Union
@@ -33,7 +33,7 @@ logger = logging.get_logger(__name__)
 
 
 class SelectMoeConfig(OlmoeConfig):
-    """Configuration for Select-MoE model with two-tier routing system."""
+    """Select-MoE模型配置，带有两层路由系统。"""
 
     model_type = "select_moe"
 
@@ -49,14 +49,14 @@ class SelectMoeConfig(OlmoeConfig):
     ):
         super().__init__(**kwargs)
 
-        # Select-MoE specific parameters  
+        # Select-MoE特定参数  
         self.quality_gate_init_mean = quality_gate_init_mean
         self.quality_gate_init_std = quality_gate_init_std
         self.quality_loss_weight = quality_loss_weight
         self.trash_expert_mode = trash_expert_mode
         self.enable_load_balancing = enable_load_balancing
 
-        # Ensure router logits are output by default for MoE training
+        # 确保默认输出router logits用于MoE训练
         if (
             not hasattr(self, "output_router_logits")
             or self.output_router_logits is None
@@ -67,8 +67,8 @@ class SelectMoeConfig(OlmoeConfig):
 
 class QualityGate(nn.Module):
     """
-    First-tier routing network for quality classification.
-    Performs binary classification to determine data quality (good vs bad).
+    质量分类的第一层路由网络。
+    执行二分类来判断数据质量（好vs坏）。
     """
     
     def __init__(self, config: SelectMoeConfig):
@@ -76,7 +76,7 @@ class QualityGate(nn.Module):
         self.hidden_size = config.hidden_size
         self.gate = nn.Linear(config.hidden_size, 2, bias=False)
         
-        # Initialize gate weights
+        # 初始化门控权重
         nn.init.normal_(
             self.gate.weight.data,
             mean=config.quality_gate_init_mean,
@@ -85,25 +85,25 @@ class QualityGate(nn.Module):
     
     def forward(self, hidden_states: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Forward pass of QualityGate.
+        QualityGate的前向传播。
         
         Args:
-            hidden_states: Input tensor of shape (batch_size, seq_len, hidden_size)
+            hidden_states: 输入张量，形状为(batch_size, seq_len, hidden_size)
             
         Returns:
-            quality_logits: Raw logits for quality classification (batch_size, seq_len, 2)
-            quality_probs: Normalized probabilities [good_ratio, bad_ratio] (batch_size, seq_len, 2)
+            quality_logits: 质量分类的原始logits (batch_size, seq_len, 2)
+            quality_probs: 归一化概率[good_ratio, bad_ratio] (batch_size, seq_len, 2)
         """
         batch_size, seq_len, hidden_dim = hidden_states.shape
         hidden_states_reshaped = hidden_states.view(-1, hidden_dim)
         
-        # Get quality classification logits
+        # 获取质量分类logits
         quality_logits = self.gate(hidden_states_reshaped)  # (batch_size * seq_len, 2)
         
-        # Convert to probabilities
+        # 转换为概率
         quality_probs = F.softmax(quality_logits, dim=-1)  # (batch_size * seq_len, 2)
         
-        # Reshape back to original batch structure
+        # 重新整形回原始批次结构
         quality_logits = quality_logits.view(batch_size, seq_len, 2)
         quality_probs = quality_probs.view(batch_size, seq_len, 2)
         
@@ -112,7 +112,7 @@ class QualityGate(nn.Module):
 
 class TrashExpert(nn.Module):
     """
-    Trash expert that implements different output modes.
+    实现不同输出模式的垃圾专家。
     """
     
     def __init__(self, config: SelectMoeConfig):
@@ -122,30 +122,30 @@ class TrashExpert(nn.Module):
         
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """
-        Forward pass of TrashExpert.
+        TrashExpert的前向传播。
         
         Args:
-            hidden_states: Input tensor
+            hidden_states: 输入张量
             
         Returns:
-            Output tensor based on the configured mode
+            基于配置模式的输出张量
         """
         if self.mode == "zero":
             return torch.zeros_like(hidden_states)
         elif self.mode == "noise":
-            # Return noise with same mean and std as input
+            # 返回与输入具有相同均值和标准差的噪声
             mean = hidden_states.mean(dim=-1, keepdim=True)
-            std = hidden_states.std(dim=-1, keepdim=True) + 1e-8  # Add small epsilon to avoid zero std
+            std = hidden_states.std(dim=-1, keepdim=True) + 1e-8  # 添加小epsilon避免零标准差
             noise = torch.randn_like(hidden_states) * std + mean
             return noise
-        else:  # "custom" or future extensions
+        else:  # "custom"或未来扩展
             return torch.zeros_like(hidden_states)
 
 
 class TrashCanSparseMoeBlock(nn.Module):
     """
-    A modified OlmoeSparseMoeBlock with trash can experts.
-    These experts don't perform any computation and return zeros as negative incentive for the router.
+    带有垃圾桶专家的修改版OlmoeSparseMoeBlock。
+    这些专家不执行任何计算，返回零作为对路由器的负激励。
     """
 
     def __init__(
@@ -153,48 +153,48 @@ class TrashCanSparseMoeBlock(nn.Module):
     ):
         super().__init__()
 
-        # Basic MoE settings
+        # 基础MoE设置
         self.top_k = config.num_experts_per_tok
         self.norm_topk_prob = config.norm_topk_prob
         self.original_num_experts = config.num_experts
 
-        # Trash can experts count equals to top_k
+        # 垃圾桶专家数量等于top_k
         self.trash_can_experts_count = self.top_k
 
-        # Total experts = original + trash can
+        # 总专家数 = 原始 + 垃圾桶
         self.total_num_experts = (
             self.original_num_experts + self.trash_can_experts_count
         )
 
-        # Copy experts from original MoE or create new ones
+        # 从原始MoE复制专家或创建新专家
         if original_moe is not None:
             self.experts = original_moe.experts
         else:
-            # Create new experts (for from_config initialization)
+            # 创建新专家（用于from_config初始化）
             from transformers.models.olmoe.modeling_olmoe import OlmoeMLP
 
             self.experts = nn.ModuleList(
                 [OlmoeMLP(config) for _ in range(self.original_num_experts)]
             )
 
-        # Create expanded gate
+        # 创建扩展的门控
         self.gate = nn.Linear(config.hidden_size, self.total_num_experts, bias=False)
 
-        # Initialize gate weights
+        # 初始化门控权重
         if original_moe is not None:
-            # Copy original gate weights
+            # 复制原始门控权重
             self.gate.weight.data[: self.original_num_experts, :] = (
                 original_moe.gate.weight.data.to(self.gate.weight.dtype)
             )
         else:
-            # Initialize original expert weights normally
+            # 正常初始化原始专家权重
             nn.init.normal_(
                 self.gate.weight.data[: self.original_num_experts, :],
                 mean=0.0,
                 std=config.initializer_range,
             )
 
-        # Initialize trash can expert weights
+        # 初始化垃圾桶专家权重
         nn.init.normal_(
             self.gate.weight.data[self.original_num_experts :, :],
             mean=config.trash_can_init_mean,
@@ -203,18 +203,18 @@ class TrashCanSparseMoeBlock(nn.Module):
 
     def forward(self, hidden_states: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Forward pass of TrashCanSparseMoeBlock.
+        TrashCanSparseMoeBlock的前向传播。
 
-        Routes tokens to original experts or trash cans, where they are effectively zeroed out.
-        Always returns router_logits for loss computation.
+        将tokens路由到原始专家或垃圾桶，垃圾桶中的tokens被有效地清零。
+        始终返回router_logits用于损失计算。
         """
         batch_size, sequence_length, hidden_dim = hidden_states.shape
         hidden_states_reshaped = hidden_states.view(-1, hidden_dim)
 
-        # Get routing logits from expanded gate
+        # 从扩展的门控获取路由logits
         router_logits = self.gate(hidden_states_reshaped)
 
-        # Get top-k routing weights and selected experts
+        # 获取top-k路由权重和选中的专家
         routing_weights = F.softmax(router_logits, dim=1, dtype=torch.float)
         routing_weights, selected_experts = torch.topk(
             routing_weights, self.top_k, dim=-1
@@ -225,33 +225,33 @@ class TrashCanSparseMoeBlock(nn.Module):
 
         routing_weights = routing_weights.to(hidden_states.dtype)
 
-        # Initialize final hidden states as zeros
-        # Tokens routed to trash cans will remain zero
+        # 将最终隐藏状态初始化为零
+        # 路由到垃圾桶的tokens将保持为零
         final_hidden_states = torch.zeros_like(hidden_states_reshaped)
 
-        # Create one-hot mask to identify which tokens are routed to which expert
+        # 创建独热掩码来识别哪些tokens被路由到哪个专家
         expert_mask = torch.nn.functional.one_hot(
             selected_experts, num_classes=self.total_num_experts
         ).permute(2, 1, 0)
 
-        # Process only original experts (trash can experts output zeros by default)
+        # 仅处理原始专家（垃圾桶专家默认输出零）
         for expert_idx in range(self.original_num_experts):
             expert_layer = self.experts[expert_idx]
-            # Find which tokens are routed to current expert
+            # 找到哪些tokens被路由到当前专家
             idx, top_x = torch.where(expert_mask[expert_idx])
 
             if top_x.shape[0] == 0:
                 continue
 
-            # Select hidden states for current expert
+            # 为当前专家选择隐藏状态
             current_state = hidden_states_reshaped[None, top_x].reshape(-1, hidden_dim)
 
-            # Compute expert output and scale by routing weights
+            # 计算专家输出并按路由权重缩放
             current_hidden_states = (
                 expert_layer(current_state) * routing_weights[top_x, idx, None]
             )
 
-            # Add expert output to final hidden states
+            # 将专家输出添加到最终隐藏状态
             final_hidden_states.index_add_(
                 0, top_x, current_hidden_states.to(hidden_states.dtype)
             )
@@ -260,26 +260,26 @@ class TrashCanSparseMoeBlock(nn.Module):
             batch_size, sequence_length, hidden_dim
         )
 
-        # Always return router_logits for loss computation
+        # 始终返回router_logits用于损失计算
         return final_hidden_states, router_logits
 
 
 class SelectMoeDecoderLayer(OlmoeDecoderLayer):
-    """Decoder layer with two-tier routing system."""
+    """带有两层路由系统的解码器层。"""
 
     def __init__(self, config: SelectMoeConfig, layer_idx: int):
         super().__init__(config, layer_idx)
 
-        # Add our two-tier routing components on top of existing MLP
-        # First-tier: Quality gate for good/bad classification
+        # 在现有MLP基础上添加我们的两层路由组件
+        # 第一层：用于好/坏分类的质量门控
         self.quality_gate = QualityGate(config)
         
-        # Second-tier: Reuse the existing MoE block (self.mlp) as normal_moe
+        # 第二层：重用现有的MoE块(self.mlp)作为normal_moe
         self.normal_moe = self.mlp
-        # Remove the original mlp reference to avoid shared tensors issue
+        # 移除原始mlp引用以避免共享张量问题
         delattr(self, 'mlp')
         
-        # Trash expert for low-quality data processing
+        # 用于低质量数据处理的垃圾专家
         self.trash_expert = TrashExpert(config)
         
     def forward(
@@ -296,25 +296,25 @@ class SelectMoeDecoderLayer(OlmoeDecoderLayer):
         **kwargs,
     ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
         """
-        Forward pass with two-tier routing system.
+        使用两层路由系统的前向传播。
         
         Args:
-            hidden_states: Input tensor
-            ... (other standard transformer layer arguments)
+            hidden_states: 输入张量
+            ... (其他标凇transformer层参数)
             
         Returns:
-            tuple containing:
-            - output hidden states
-            - present key value (if use_cache)
-            - attention weights (if output_attentions)  
-            - router logits including quality_logits and moe_logits (if output_router_logits)
+            包含以下内容的元组:
+            - 输出隐藏状态
+            - 当前键值(如果use_cache)
+            - 注意力权重(如果output_attentions)  
+            - 包括quality_logits和moe_logits的router logits(如果output_router_logits)
         """
         residual = hidden_states
 
-        # Self-attention computation (inherited from parent class)
+        # 自注意力计算（从父类继承）
         hidden_states = self.input_layernorm(hidden_states)
         
-        # Self attention
+        # 自注意力
         hidden_states, self_attn_weights, present_key_value = self.self_attn(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
@@ -327,22 +327,22 @@ class SelectMoeDecoderLayer(OlmoeDecoderLayer):
         )
         hidden_states = residual + hidden_states
 
-        # MLP computation with two-tier routing
+        # 使用两层路由的MLP计算
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
         
-        # First-tier routing: Quality classification
+        # 第一层路由：质量分类
         quality_logits, quality_probs = self.quality_gate(hidden_states)
-        good_ratio = quality_probs[..., 0:1]  # Shape: (batch_size, seq_len, 1)
-        bad_ratio = quality_probs[..., 1:2]   # Shape: (batch_size, seq_len, 1)
+        good_ratio = quality_probs[..., 0:1]  # 形状: (batch_size, seq_len, 1)
+        bad_ratio = quality_probs[..., 1:2]   # 形状: (batch_size, seq_len, 1)
         
-        # Second-tier routing: Normal MoE processing
+        # 第二层路由：正常MoE处理
         y_normal, moe_router_logits = self.normal_moe(hidden_states)
         
-        # Trash expert processing
+        # 垃圾专家处理
         y_trash = self.trash_expert(hidden_states)
         
-        # Combine outputs: y = good_ratio * y_normal + bad_ratio * y_trash
+        # 组合输出: y = good_ratio * y_normal + bad_ratio * y_trash
         hidden_states = good_ratio * y_normal + bad_ratio * y_trash
         hidden_states = residual + hidden_states
 
@@ -355,7 +355,7 @@ class SelectMoeDecoderLayer(OlmoeDecoderLayer):
             outputs += (present_key_value,)
 
         if output_router_logits:
-            # Return both quality logits and MoE router logits
+            # 返回质量logits和MoE路由器logits
             router_logits = {
                 'quality_logits': quality_logits,
                 'moe_logits': moe_router_logits
@@ -367,8 +367,7 @@ class SelectMoeDecoderLayer(OlmoeDecoderLayer):
 
 class SelectMoePreTrainedModel(PreTrainedModel):
     """
-    An abstract class to handle weights initialization and a simple interface for downloading and loading pretrained
-    models.
+    处理权重初始化和提供下载加载预训练模型简单接口的抽象类。
     """
 
     config_class = SelectMoeConfig
@@ -396,7 +395,7 @@ class SelectMoePreTrainedModel(PreTrainedModel):
 
 class SelectMoeModel(SelectMoePreTrainedModel):
     """
-    Transformer decoder consisting of *config.num_hidden_layers* layers with TrashCanMoE.
+    由*config.num_hidden_layers*层组成的Transformer解码器，使用TrashCanMoE。
     """
 
     def __init__(self, config: SelectMoeConfig):
@@ -414,7 +413,7 @@ class SelectMoeModel(SelectMoePreTrainedModel):
             ]
         )
 
-        # Import and use the same components as OlmoeModel
+        # 导入并使用与OlmoeModel相同的组件
         from transformers.models.olmoe.modeling_olmoe import (
             OlmoeRMSNorm,
             OlmoeRotaryEmbedding,
@@ -425,7 +424,7 @@ class SelectMoeModel(SelectMoePreTrainedModel):
 
         self.gradient_checkpointing = False
 
-        # Initialize weights and apply final processing
+        # 初始化权重并应用最终处理
         self.post_init()
 
     def get_input_embeddings(self):
@@ -448,7 +447,7 @@ class SelectMoeModel(SelectMoePreTrainedModel):
         return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
     ) -> Union[Tuple, MoeModelOutputWithPast]:
-        # Use the same implementation as OlmoeModel but with our custom layers
+        # 使用与OlmoeModel相同的实现，但使用我们的自定义层
         output_attentions = (
             output_attentions
             if output_attentions is not None
@@ -483,7 +482,7 @@ class SelectMoeModel(SelectMoePreTrainedModel):
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
 
-        # Simple implementation for cache and attention mask handling
+        # 缓存和注意力掩码处理的简单实现
         if cache_position is None:
             cache_position = torch.arange(
                 inputs_embeds.shape[1], device=inputs_embeds.device
@@ -491,7 +490,7 @@ class SelectMoeModel(SelectMoePreTrainedModel):
         if position_ids is None:
             position_ids = cache_position.unsqueeze(0)
 
-        # Create causal attention mask
+        # 创建因果注意力掩码
         causal_mask = self._update_causal_mask(
             attention_mask,
             inputs_embeds,
@@ -500,13 +499,13 @@ class SelectMoeModel(SelectMoePreTrainedModel):
             output_attentions,
         )
 
-        # embed positions
+        # 嵌入位置
         hidden_states = inputs_embeds
 
-        # create position embeddings to be shared across the decoder layers
+        # 创建在解码器层之间共享的位置嵌入
         position_embeddings = self.rotary_emb(hidden_states, position_ids)
 
-        # decoder layers
+        # 解码器层
         all_hidden_states = () if output_hidden_states else None
         all_self_attns = () if output_attentions else None
         all_router_logits = () if output_router_logits else None
@@ -541,7 +540,7 @@ class SelectMoeModel(SelectMoePreTrainedModel):
 
         hidden_states = self.norm(hidden_states)
 
-        # add hidden states from the last decoder layer
+        # 添加最后一个解码器层的隐藏状态
         if output_hidden_states:
             all_hidden_states += (hidden_states,)
 
@@ -573,8 +572,8 @@ class SelectMoeModel(SelectMoePreTrainedModel):
         past_key_values,
         output_attentions: bool,
     ):
-        """Simple implementation of causal mask update."""
-        # For simplicity, return None to let the attention layers handle causal masking internally
+        """因果掩码更新的简单实现。"""
+        # 为简单起见，返回None让注意力层内部处理因果掩码
         return None
 
 
@@ -582,23 +581,22 @@ def quality_classification_loss(
     router_logits: List[dict], config: SelectMoeConfig, debug: bool = False
 ) -> torch.Tensor:
     """
-    Compute quality classification loss using sigmoid(good_ratio).
+    使用sigmoid(good_ratio)计算质量分类损失。
     
-    This loss encourages the model to reduce good_ratio values, forcing it to learn
-    to distinguish between good and bad quality data.
+    该损失鼓励模型降低good_ratio值，强迫其学习区分好质量和坏质量数据。
     
     Args:
-        router_logits: List of dictionaries containing 'quality_logits' and 'moe_logits' for each layer
-        config: Model configuration
-        debug: Whether to print debug information
+        router_logits: 包含每层'quality_logits'和'moe_logits'的字典列表
+        config: 模型配置
+        debug: 是否打印调试信息
         
     Returns:
-        Quality classification loss tensor
+        质量分类损失张量
     """
     if debug:
-        print(f"\n=== Quality Classification Loss Debug ===")
-        print(f"router_logits type: {type(router_logits)}")
-        print(f"Number of layers (len(router_logits)): {len(router_logits)}")
+        print("\n=== 质量分类损失调试 ===")
+        print(f"router_logits类型: {type(router_logits)}")
+        print(f"层数量 (len(router_logits)): {len(router_logits)}")
 
     if len(router_logits) == 0:
         return torch.tensor(0.0, device="cpu")
@@ -613,24 +611,24 @@ def quality_classification_loss(
         quality_logits = layer_router_logits['quality_logits']  # Shape: (batch_size, seq_len, 2)
         
         if debug:
-            print(f"\n--- Layer {layer_idx} ---")
-            print(f"quality_logits shape: {quality_logits.shape}")
-            print(f"quality_logits device: {quality_logits.device}")
+            print(f"\n--- 第{layer_idx}层 ---")
+            print(f"quality_logits形状: {quality_logits.shape}")
+            print(f"quality_logits设备: {quality_logits.device}")
 
-        # Get quality probabilities
-        quality_probs = F.softmax(quality_logits, dim=-1)  # Shape: (batch_size, seq_len, 2)
-        good_ratio = quality_probs[..., 0]  # Shape: (batch_size, seq_len)
+        # 获取质量概率
+        quality_probs = F.softmax(quality_logits, dim=-1)  # 形状: (batch_size, seq_len, 2)
+        good_ratio = quality_probs[..., 0]  # 形状: (batch_size, seq_len)
         
         if debug:
-            print(f"good_ratio shape: {good_ratio.shape}")
-            print(f"good_ratio min/max/mean: {good_ratio.min().item():.4f}/{good_ratio.max().item():.4f}/{good_ratio.mean().item():.4f}")
+            print(f"good_ratio形状: {good_ratio.shape}")
+            print(f"good_ratio 最小/最大/均值: {good_ratio.min().item():.4f}/{good_ratio.max().item():.4f}/{good_ratio.mean().item():.4f}")
 
-        # Apply sigmoid to good_ratio and use as loss
-        # This encourages the model to reduce good_ratio (i.e., classify more data as bad quality)
+        # 对good_ratio应用sigmoid并用作损失
+        # 这鼓励模型降低good_ratio（即，将更多数据分类为坏质量）
         layer_loss = torch.sigmoid(good_ratio).mean()
         
         if debug:
-            print(f"layer_loss: {layer_loss.item():.6f}")
+            print(f"层损失: {layer_loss.item():.6f}")
 
         total_loss += layer_loss
         num_layers += 1
@@ -638,8 +636,8 @@ def quality_classification_loss(
     final_loss = total_loss / max(num_layers, 1)
     
     if debug:
-        print(f"\nFinal quality classification loss: {final_loss.item():.6f}")
-        print("=== End Debug ===\n")
+        print(f"\n最终质量分类损失: {final_loss.item():.6f}")
+        print("=== 调试结束 ===\n")
 
     return final_loss
 
@@ -654,13 +652,13 @@ class SelectMoeForCausalLM(SelectMoePreTrainedModel):
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
 
         self.router_aux_loss_coef = config.router_aux_loss_coef
-        # Note: total experts include trash can experts for load balancing
+        # 注意：总专家数包括用于负载均衡的垃圾桶专家
         self.num_experts = (
             config.num_experts + config.num_experts_per_tok
         )  # trash_can_experts_count
         self.num_experts_per_tok = config.num_experts_per_tok
 
-        # Initialize weights and apply final processing
+        # 初始化权重并应用最终处理
         self.post_init()
 
     def get_input_embeddings(self):
@@ -806,11 +804,11 @@ class SelectMoeForCausalLM(SelectMoePreTrainedModel):
         **kwargs,
     ):
         """
-        Prepare inputs for generation. This method is required by PEFT.
+        为生成准备输入。PEFT需要此方法。
         """
-        # If we have cache: let's slice `input_ids` through `cache_position`, to keep only the unprocessed tokens
-        # Exception 1: when passing input_embeds, input_ids may be missing entries
-        # Exception 2: some generation methods do special slicing of input_ids, so we don't need to do it here
+        # 如果有缓存：通过`cache_position`切片`input_ids`，只保留未处理的tokens
+        # 异常1：传递input_embeds时，input_ids可能缺少条目
+        # 异常2：一些生成方法对input_ids进行特殊切片，所以我们不需要在这里做
         if past_key_values is not None:
             if inputs_embeds is not None:  # Exception 1
                 input_ids = input_ids[:, -cache_position.shape[0] :]
@@ -820,13 +818,13 @@ class SelectMoeForCausalLM(SelectMoePreTrainedModel):
                 input_ids = input_ids[:, cache_position]
 
         if attention_mask is not None and position_ids is None:
-            # create position_ids on the fly for batch generation
+            # 为批次生成动态创建position_ids
             position_ids = attention_mask.long().cumsum(-1) - 1
             position_ids.masked_fill_(attention_mask == 0, 1)
             if past_key_values:
                 position_ids = position_ids[:, -input_ids.shape[1] :]
 
-        # if `inputs_embeds` are passed, we only want to use them in the 1st generation step
+        # 如果传递了`inputs_embeds`，我们只想在第一个生成步骤中使用它们
         if inputs_embeds is not None and cache_position[0] == 0:
             model_inputs = {"inputs_embeds": inputs_embeds, "input_ids": None}
         else:
@@ -846,21 +844,21 @@ class SelectMoeForCausalLM(SelectMoePreTrainedModel):
 
 def replace_moe_layers_with_trashcan(model: nn.Module, config: SelectMoeConfig):
     """
-    Recursively traverse the model and replace all OlmoeSparseMoeBlock instances with TrashCanSparseMoeBlock.
-    This function preserves pretrained weights.
+    递归遍历模型并将所有OlmoeSparseMoeBlock实例替换为TrashCanSparseMoeBlock。
+    此函数保留预训练权重。
     """
     for name, module in model.named_children():
         if isinstance(module, OlmoeSparseMoeBlock):
-            # Create a new TrashCanSparseMoeBlock to replace the original MoE block
+            # 创建新的TrashCanSparseMoeBlock来替换原始MoE块
             new_moe = TrashCanSparseMoeBlock(config, module)
             setattr(model, name, new_moe)
         elif len(list(module.children())) > 0:
-            # Recurse into submodules
+            # 递归进入子模块
             replace_moe_layers_with_trashcan(module, config)
 
 
 def register_select_moe():
-    """Register Select-MoE model for AutoConfig and AutoModel."""
+    """为AutoConfig和AutoModel注册Select-MoE模型。"""
     AutoConfig.register("select_moe", SelectMoeConfig)
     AutoModel.register(SelectMoeConfig, SelectMoeModel)
     AutoModelForCausalLM.register(SelectMoeConfig, SelectMoeForCausalLM)
