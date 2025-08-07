@@ -59,11 +59,6 @@ data_process:
 
 # Distance computation acceleration settings
 distance_computation:
-  # Whether to use GPU acceleration for Wasserstein distance matrix computation
-  # true: GPU acceleration (much faster, requires GPU memory)
-  # false: CPU computation (slower but more memory-efficient)
-  use_gpu_acceleration: true
-  
-  # Batch size for distance matrix computation (only for GPU mode)
+  # Batch size for distance matrix computation
   # Larger values are faster but use more GPU memory
   distance_batch_size: 1000

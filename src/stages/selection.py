@@ -8,7 +8,6 @@ import hydra
 import numpy as np
 import torch
 from omegaconf import DictConfig
-from scipy.stats import wasserstein_distance
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers import AutoTokenizer
@@ -100,11 +99,11 @@ def calculate_quality_score_from_gates(
     return final_quality_score
 
 
-def compute_wasserstein_distance_matrix_gpu(
+def compute_wasserstein_distance_matrix(
     logits_tensors: List[torch.Tensor], device: torch.device, batch_size: int = 1000
 ) -> np.ndarray:
     """
-    GPU加速计算所有样本对之间的Wasserstein距离矩阵
+    计算所有样本对之间的Wasserstein距离矩阵（GPU加速）
 
     Args:
         logits_tensors: 列表，每个元素为 [L, E] 形状的张量
@@ -192,80 +191,6 @@ def compute_batch_wasserstein_distance_gpu(batch_probs_i: torch.Tensor, batch_pr
     return total_distances
 
 
-def compute_wasserstein_distance_matrix_cpu(logits_tensors: List[torch.Tensor]) -> np.ndarray:
-    """
-    CPU版本：计算所有样本对之间的Wasserstein距离矩阵（原始实现）
-
-    Args:
-        logits_tensors: 列表，每个元素为 [L, E] 形状的张量
-                       L = num_layers, E = num_experts
-
-    Returns:
-        距离矩阵: [N, N] 形状的numpy数组，N为样本数量
-                 matrix[i,j] = Wasserstein距离(sample_i, sample_j)
-    """
-    n_samples = len(logits_tensors)
-    distance_matrix = np.zeros((n_samples, n_samples))
-
-    log = logging.getLogger(__name__)
-    log.info(f"使用CPU计算 {n_samples} 个样本的Wasserstein距离矩阵...")
-
-    # 将张量转换为概率分布（对每层的expert维度应用softmax）
-    prob_tensors = []
-    for logits in logits_tensors:
-        # logits: [L, E] -> probs: [L, E] (每行和为1)
-        probs = torch.softmax(logits.float(), dim=-1).numpy()
-        prob_tensors.append(probs)
-
-    # 计算距离矩阵
-    for i in tqdm(range(n_samples), desc="计算距离矩阵"):
-        for j in range(i + 1, n_samples):
-            # 计算第i和第j个样本之间的总Wasserstein距离
-            total_distance = 0.0
-            probs_i = prob_tensors[i]  # [L, E]
-            probs_j = prob_tensors[j]  # [L, E]
-
-            # 逐层计算Wasserstein距离并求和
-            for layer_idx in range(probs_i.shape[0]):  # L个层
-                layer_prob_i = probs_i[layer_idx, :]  # [E,]
-                layer_prob_j = probs_j[layer_idx, :]  # [E,]
-
-                # 计算该层的Wasserstein距离
-                layer_distance = wasserstein_distance(
-                    range(len(layer_prob_i)), range(len(layer_prob_j)), layer_prob_i, layer_prob_j
-                )
-                total_distance += layer_distance
-
-            # 对称填充距离矩阵
-            distance_matrix[i, j] = total_distance
-            distance_matrix[j, i] = total_distance
-
-    log.info(f"CPU距离矩阵计算完成，形状: {distance_matrix.shape}")
-    return distance_matrix
-
-
-def compute_wasserstein_distance_matrix(
-    logits_tensors: List[torch.Tensor], use_gpu: bool = True, device: torch.device = None, batch_size: int = 1000
-) -> np.ndarray:
-    """
-    计算所有样本对之间的Wasserstein距离矩阵（统一接口）
-
-    Args:
-        logits_tensors: 列表，每个元素为 [L, E] 形状的张量
-        use_gpu: 是否使用GPU加速
-        device: GPU设备（仅在use_gpu=True时使用）
-        batch_size: GPU批处理大小
-
-    Returns:
-        距离矩阵: [N, N] 形状的numpy数组
-    """
-    if use_gpu and device is not None and device.type == "cuda":
-        return compute_wasserstein_distance_matrix_gpu(logits_tensors, device, batch_size)
-    else:
-        if use_gpu:
-            log = logging.getLogger(__name__)
-            log.warning("GPU加速未可用，回退到CPU计算")
-        return compute_wasserstein_distance_matrix_cpu(logits_tensors)
 
 
 def farthest_point_sampling(distance_matrix: np.ndarray, n_samples: int, seed: int = 42) -> List[int]:
@@ -325,7 +250,6 @@ def diversity_based_selection(
     selection_percentage: float,
     importance_selection_percentage: float = None,
     enable_diversity: bool = True,
-    use_gpu_acceleration: bool = True,
     device: torch.device = None,
     distance_batch_size: int = 1000,
 ) -> List[dict]:
@@ -338,7 +262,6 @@ def diversity_based_selection(
         selection_percentage: 最终选择比例
         importance_selection_percentage: 第一阶段质量筛选比例（可选）
         enable_diversity: 是否启用多样性选择（False时回退到质量分数选择）
-        use_gpu_acceleration: 是否使用GPU加速距离矩阵计算
         device: GPU设备
         distance_batch_size: GPU批处理大小
 
@@ -400,7 +323,6 @@ def diversity_based_selection(
             high_quality_data,
             filtered_logits_by_dataset,
             stage2_selection_ratio,
-            use_gpu_acceleration,
             device,
             distance_batch_size,
         )
@@ -414,7 +336,7 @@ def diversity_based_selection(
         log.info(f"启用单阶段多样性选择: 从 {total_samples} 个样本中选择 {n_select} 个")
 
         selected_data = _perform_diversity_selection(
-            scored_data, all_logits_by_dataset, selection_percentage, use_gpu_acceleration, device, distance_batch_size
+            scored_data, all_logits_by_dataset, selection_percentage, device, distance_batch_size
         )
 
         return selected_data
@@ -424,7 +346,6 @@ def _perform_diversity_selection(
     scored_data: List[dict],
     all_logits_by_dataset: dict,
     selection_percentage: float,
-    use_gpu_acceleration: bool,
     device: torch.device,
     distance_batch_size: int,
 ) -> List[dict]:
@@ -435,7 +356,6 @@ def _perform_diversity_selection(
         scored_data: 待选择的数据列表
         all_logits_by_dataset: logits张量数据
         selection_percentage: 选择比例
-        use_gpu_acceleration: 是否使用GPU加速
         device: GPU设备
         distance_batch_size: GPU批处理大小
 
@@ -478,7 +398,7 @@ def _perform_diversity_selection(
 
     # 2. 计算Wasserstein距离矩阵
     distance_matrix = compute_wasserstein_distance_matrix(
-        all_logits, use_gpu=use_gpu_acceleration, device=device, batch_size=distance_batch_size
+        all_logits, device=device, batch_size=distance_batch_size
     )
 
     # 3. 使用FPS选择多样化样本
@@ -527,7 +447,7 @@ def get_sample_router_info(router_data: dict, sample_id: str) -> dict:
     try:
         position = router_data["sample_ids"].index(sample_id)
     except ValueError:
-        raise ValueError(f"样本ID '{sample_id}' 未在数据集 '{router_data['dataset_name']}' 中找到")
+        raise ValueError(f"样本ID '{sample_id}' 未在数据集 '{router_data['dataset_name']}' 中找到") from None
 
     return {
         "sample_id": sample_id,
@@ -805,7 +725,6 @@ def select(cfg: DictConfig) -> None:
     log.info(f"多样性选择模式: {'启用' if enable_diversity else '禁用(使用质量分数)'}")
 
     # 使用多样性选择算法
-    use_gpu_acceleration = getattr(cfg.distance_computation, "use_gpu_acceleration", True)
     distance_batch_size = getattr(cfg.distance_computation, "distance_batch_size", 1000)
     importance_selection_percentage = getattr(cfg, "importance_selection_percentage", None)
 
@@ -818,7 +737,6 @@ def select(cfg: DictConfig) -> None:
         selection_percentage=cfg.selection_percentage,
         importance_selection_percentage=importance_selection_percentage,
         enable_diversity=enable_diversity,
-        use_gpu_acceleration=use_gpu_acceleration,
         device=device,
         distance_batch_size=distance_batch_size,
     )
@@ -875,9 +793,8 @@ def select(cfg: DictConfig) -> None:
             log.info(f"  - 质量门logits形状: {router_data_dict['quality_logits'].shape}")
             log.info(f"  - MoE路由logits形状: {router_data_dict['moe_logits'].shape}")
             log.info(f"  - 样本数: {router_data_dict['num_samples']}")
-            log.info(
-                f"  - 样本ID示例: {dataset_router_data['sample_ids'][:3] if dataset_router_data['sample_ids'] else '无'}"
-            )
+            sample_ids_preview = dataset_router_data['sample_ids'][:3] if dataset_router_data['sample_ids'] else '无'
+            log.info(f"  - 样本ID示例: {sample_ids_preview}")
 
         else:
             log.warning(f"数据集 '{dataset_name}' 没有路由数据")
