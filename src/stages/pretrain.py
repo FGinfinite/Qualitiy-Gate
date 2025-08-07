@@ -22,12 +22,11 @@ from src.training.full_rank_finetuning import (
 from src.utils.logging_utils import setup_training_logging
 from src.utils.tools import grab_gpu
 
-
 # 路由权重相关的模式定义
 ROUTING_PATTERNS = [
-    'quality_gate',     # Quality gate parameters
-    '.gate.weight',     # MoE gate weights
-    'router',           # Any router-related parameters
+    "quality_gate",  # Quality gate parameters
+    ".gate.weight",  # MoE gate weights
+    "router",  # Any router-related parameters
 ]
 
 # ---------------------------------------------------------------------------
@@ -46,9 +45,7 @@ def get_peft_config(cfg: DictConfig) -> LoraConfig:
         LoraConfig: 生成的 LoRA 配置。
     """
     if cfg.training.peft_mode != "lora":
-        raise ValueError(
-            f"无效的 peft_mode: {cfg.training.peft_mode}。此函数仅为 'lora' 设计。"
-        )
+        raise ValueError(f"无效的 peft_mode: {cfg.training.peft_mode}。此函数仅为 'lora' 设计。")
 
     # 从配置中提取 LoRA 参数
     lora_config = cfg.training.lora
@@ -82,9 +79,7 @@ def get_model_and_tokenizer(
         "low_cpu_mem_usage": True,
         "torch_dtype": torch.bfloat16,
     }
-    model = SelectMoeForCausalLM.from_pretrained(
-        cfg.selector_model.path, **model_kwargs
-    )
+    model = SelectMoeForCausalLM.from_pretrained(cfg.selector_model.path, **model_kwargs)
 
     # 从训练配置中覆写损失函数参数
     if hasattr(cfg.training, "quality_loss_weight"):
@@ -117,7 +112,7 @@ def pretrain(cfg: DictConfig) -> None:
     """
     # 设置训练日志系统
     log, hydra_callback = setup_training_logging(__name__)
-    
+
     log.info("--- 开始阶段 1：Select-MoE 预训练 ---")
 
     accelerator = Accelerator()
@@ -169,9 +164,7 @@ def pretrain(cfg: DictConfig) -> None:
     # 6. 输出数据统计信息
     get_data_statistics(tokenized_dataset)
 
-    data_collator = DataCollatorForSeq2Seq(
-        tokenizer=tokenizer, model=model, padding="longest"
-    )
+    data_collator = DataCollatorForSeq2Seq(tokenizer=tokenizer, model=model, padding="longest")
 
     # 7. 配置训练参数
     # LoRA模式：保存中间权重；全秩微调和routing_only：不保存中间权重
@@ -189,7 +182,7 @@ def pretrain(cfg: DictConfig) -> None:
         # 改进的日志配置，确保与Hydra日志系统集成
         logging_first_step=True,
         log_level="info",
-        log_level_replica="warning", 
+        log_level_replica="warning",
         disable_tqdm=False,  # 保持进度条显示
         logging_nan_inf_filter=True,  # 过滤NaN/Inf值
     )
@@ -228,12 +221,8 @@ def pretrain(cfg: DictConfig) -> None:
             trainer.save_model(cfg.output_dir)
         elif cfg.training.peft_mode == "full_rank":
             log.info(f"正在将路由全秩微调权重保存到 {cfg.output_dir}")
-            full_rank_weights_path = os.path.join(
-                cfg.output_dir, "full_rank_weights.pt"
-            )
-            save_full_rank_weights(
-                model, ROUTING_PATTERNS, full_rank_weights_path, mode="parameter"
-            )
+            full_rank_weights_path = os.path.join(cfg.output_dir, "full_rank_weights.pt")
+            save_full_rank_weights(model, ROUTING_PATTERNS, full_rank_weights_path, mode="parameter")
 
     log.info("--- 阶段 1：预训练完成 ---")
 

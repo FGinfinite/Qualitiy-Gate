@@ -33,9 +33,7 @@ def get_peft_config(cfg: DictConfig) -> LoraConfig:
         LoraConfig: 生成的 LoRA 配置。
     """
     if cfg.training.peft_mode != "lora":
-        raise ValueError(
-            f"无效的 peft_mode: {cfg.training.peft_mode}。此函数仅为 'lora' 设计。"
-        )
+        raise ValueError(f"无效的 peft_mode: {cfg.training.peft_mode}。此函数仅为 'lora' 设计。")
 
     # 从配置中提取 LoRA 参数
     lora_config = cfg.training.lora
@@ -147,17 +145,13 @@ def finetune(cfg: DictConfig) -> None:
 
     # 7. 计算每设备批次大小
     num_processes = accelerator.num_processes
-    per_device_batch_size = calculate_per_device_batch_size(
-        cfg.training.batch_size, num_processes, log
-    )
+    per_device_batch_size = calculate_per_device_batch_size(cfg.training.batch_size, num_processes, log)
     log.info(f"总批次大小: {cfg.training.batch_size}")
     log.info(f"进程数: {num_processes}")
     log.info(f"每设备批次大小: {per_device_batch_size}")
 
     # 8. 数据整理器
-    data_collator = DataCollatorForSeq2Seq(
-        tokenizer=tokenizer, model=model, padding="longest"
-    )
+    data_collator = DataCollatorForSeq2Seq(tokenizer=tokenizer, model=model, padding="longest")
 
     # 9. 配置训练参数
     training_args = TrainingArguments(

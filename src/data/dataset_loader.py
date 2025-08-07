@@ -53,9 +53,7 @@ def load_local_datasets(
 
     # 如果没有指定数据集名称，自动发现所有可用数据集
     if dataset_names is None:
-        dataset_names = [
-            d for d in os.listdir(data_dir) if os.path.isdir(os.path.join(data_dir, d))
-        ]
+        dataset_names = [d for d in os.listdir(data_dir) if os.path.isdir(os.path.join(data_dir, d))]
 
     if not dataset_names:
         raise ValueError(f"在目录 {data_dir} 中没有找到任何数据集")
@@ -106,9 +104,7 @@ def load_local_datasets(
     return combined_dataset
 
 
-def encode_with_messages_format(
-    example: Dict, tokenizer: AutoTokenizer, max_seq_length: int
-) -> Dict:
+def encode_with_messages_format(example: Dict, tokenizer: AutoTokenizer, max_seq_length: int) -> Dict:
     """
     使用messages格式编码数据，基于LESS库的实现
 
@@ -125,9 +121,7 @@ def encode_with_messages_format(
         raise ValueError("messages字段为空")
 
     example_text = concat_messages(messages, tokenizer)
-    tokenized_example = tokenizer(
-        example_text, return_tensors="pt", max_length=max_seq_length, truncation=True
-    )
+    tokenized_example = tokenizer(example_text, return_tensors="pt", max_length=max_seq_length, truncation=True)
     input_ids = tokenized_example.input_ids
     labels = input_ids.clone()
 
@@ -144,19 +138,11 @@ def encode_with_messages_format(
                     truncation=True,
                 ).input_ids.shape[1]
 
-            if (
-                message_idx < len(messages) - 1
-                and messages[message_idx + 1]["role"] == "assistant"
-            ):
+            if message_idx < len(messages) - 1 and messages[message_idx + 1]["role"] == "assistant":
                 # 这里也忽略assistant的role部分
-                messages_so_far = (
-                    concat_messages(messages[: message_idx + 1], tokenizer)
-                    + "<|assistant|>\n"
-                )
+                messages_so_far = concat_messages(messages[: message_idx + 1], tokenizer) + "<|assistant|>\n"
             else:
-                messages_so_far = concat_messages(
-                    messages[: message_idx + 1], tokenizer
-                )
+                messages_so_far = concat_messages(messages[: message_idx + 1], tokenizer)
 
             message_end_idx = tokenizer(
                 messages_so_far,
@@ -186,12 +172,7 @@ def concat_messages(messages, tokenizer):
         elif message["role"] == "user":
             message_text += "<|user|>\n" + message["content"].strip() + "\n"
         elif message["role"] == "assistant":
-            message_text += (
-                "<|assistant|>\n"
-                + message["content"].strip()
-                + tokenizer.eos_token
-                + "\n"
-            )
+            message_text += "<|assistant|>\n" + message["content"].strip() + tokenizer.eos_token + "\n"
         else:
             raise ValueError(f"不支持的role: {message['role']}")
     return message_text
@@ -357,7 +338,7 @@ def get_data_statistics(lm_datasets: Dataset) -> None:
     avg_c_length = sum(c_lengths) / len(c_lengths)
 
     log = logging.getLogger(__name__)
-    
+
     log.info("数据集统计信息:")
     log.info(f"  样本数: {data_size}")
     log.info(f"  平均token数: {avg_length:.2f}")

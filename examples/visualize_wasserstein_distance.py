@@ -70,9 +70,7 @@ def visualize_probability_distributions(probs1, probs2, layer_idx=0, title_suffi
 
     ax2.plot(expert_indices, cdf1, "o-", label="样本 1 CDF", color="blue", linewidth=2)
     ax2.plot(expert_indices, cdf2, "s-", label="样本 2 CDF", color="red", linewidth=2)
-    ax2.fill_between(
-        expert_indices, cdf1, cdf2, alpha=0.3, color="gray", label="CDF差异区域"
-    )
+    ax2.fill_between(expert_indices, cdf1, cdf2, alpha=0.3, color="gray", label="CDF差异区域")
     ax2.set_xlabel("专家索引")
     ax2.set_ylabel("累积概率")
     ax2.set_title(f"累积分布函数（CDF）{title_suffix}")
@@ -88,9 +86,7 @@ def visualize_probability_distributions(probs1, probs2, layer_idx=0, title_suffi
     layer_wasserstein = np.sum(cdf_diff)
     ax3.set_xlabel("专家索引")
     ax3.set_ylabel("|CDF1 - CDF2|")
-    ax3.set_title(
-        f"第{layer_idx}层Wasserstein距离 = {layer_wasserstein:.4f}{title_suffix}"
-    )
+    ax3.set_title(f"第{layer_idx}层Wasserstein距离 = {layer_wasserstein:.4f}{title_suffix}")
     ax3.grid(True, alpha=0.3)
 
     # 在柱状图上标注贡献值
@@ -124,9 +120,7 @@ def calculate_total_wasserstein_step_by_step(probs1, probs2, show_first_n_layers
 
         # 使用scipy计算该层的Wasserstein距离
         expert_indices = np.arange(len(prob1))
-        layer_distance = wasserstein_distance(
-            expert_indices, expert_indices, prob1, prob2
-        )
+        layer_distance = wasserstein_distance(expert_indices, expert_indices, prob1, prob2)
         layer_distances.append(layer_distance)
 
         if layer_idx < show_first_n_layers:
@@ -169,9 +163,7 @@ def demonstrate_gpu_computation(probs1, probs2):
 
     if device.type == "cuda":
         # GPU计算
-        gpu_distance_matrix = compute_batch_wasserstein_distance_gpu(
-            batch_probs1, batch_probs2
-        )
+        gpu_distance_matrix = compute_batch_wasserstein_distance_gpu(batch_probs1, batch_probs2)
         gpu_result = gpu_distance_matrix[0, 0].item()
         print(f"GPU计算结果: {gpu_result:.6f}")
     else:
@@ -236,9 +228,7 @@ def create_distance_heatmap(router_data_path, max_samples=20):
                 prob1 = probs_i[layer_idx].numpy()
                 prob2 = probs_j[layer_idx].numpy()
                 expert_indices = np.arange(len(prob1))
-                layer_dist = wasserstein_distance(
-                    expert_indices, expert_indices, prob1, prob2
-                )
+                layer_dist = wasserstein_distance(expert_indices, expert_indices, prob1, prob2)
                 total_dist += layer_dist
 
             distance_matrix[i, j] = total_dist
@@ -274,9 +264,7 @@ def create_distance_heatmap(router_data_path, max_samples=20):
     plt.figtext(
         0.02,
         0.02,
-        "说明：颜色越深表示距离越大，样本间差异越大\n"
-        "对角线为0（样本与自身距离）\n"
-        "矩阵对称（距离具有对称性）",
+        "说明：颜色越深表示距离越大，样本间差异越大\n对角线为0（样本与自身距离）\n矩阵对称（距离具有对称性）",
         fontsize=10,
         ha="left",
     )
@@ -288,15 +276,9 @@ def create_distance_heatmap(router_data_path, max_samples=20):
 def main():
     parser = argparse.ArgumentParser(description="Wasserstein距离计算和可视化")
     parser.add_argument("router_data_path", help="路由数据文件路径(.pt格式)")
-    parser.add_argument(
-        "--sample1-idx", type=int, default=0, help="第一个样本的索引 (默认: 0)"
-    )
-    parser.add_argument(
-        "--sample2-idx", type=int, default=1, help="第二个样本的索引 (默认: 1)"
-    )
-    parser.add_argument(
-        "--layer-idx", type=int, default=0, help="要详细分析的层索引 (默认: 0)"
-    )
+    parser.add_argument("--sample1-idx", type=int, default=0, help="第一个样本的索引 (默认: 0)")
+    parser.add_argument("--sample2-idx", type=int, default=1, help="第二个样本的索引 (默认: 1)")
+    parser.add_argument("--layer-idx", type=int, default=0, help="要详细分析的层索引 (默认: 0)")
     parser.add_argument("--save-plots", action="store_true", help="保存图片到文件")
     parser.add_argument(
         "--output-dir",
@@ -347,17 +329,13 @@ def main():
     probs2 = torch.softmax(logits2.float(), dim=-1)  # [L, E]
 
     # 3. 逐步计算总距离
-    total_distance, layer_distances = calculate_total_wasserstein_step_by_step(
-        probs1, probs2
-    )
+    total_distance, layer_distances = calculate_total_wasserstein_step_by_step(probs1, probs2)
 
     # 4. 可视化特定层的分布
     layer_idx = min(args.layer_idx, probs1.shape[0] - 1)
     title_suffix = f" (样本{sample1_idx} vs 样本{sample2_idx})"
 
-    fig1, layer_wasserstein = visualize_probability_distributions(
-        probs1, probs2, layer_idx, title_suffix
-    )
+    fig1, layer_wasserstein = visualize_probability_distributions(probs1, probs2, layer_idx, title_suffix)
 
     if args.save_plots:
         fig1.savefig(

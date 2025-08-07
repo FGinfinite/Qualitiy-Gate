@@ -31,3 +31,21 @@ name = "pytorch-cu124"
 url = "https://download.pytorch.org/whl/cu124"
 explicit = true
 
+
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+# 选择一个更保守、更安全的规则集
+select = [
+    "E",  # pycodestyle errors
+    "F",  # pyflakes
+    "W",  # pycodestyle warnings
+    "I",  # isort (整理 imports)
+    "B",  # flake8-bugbear (发现潜在bug)
+    "A",  # flake8-builtins (防止覆盖内置函数)
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["select-moe"]

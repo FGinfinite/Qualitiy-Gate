@@ -41,8 +41,7 @@ class ZeroExpert(torch.nn.Module):
 class ConstantExpert(torch.nn.Module):
     def __init__(self, expert):
         super(ConstantExpert, self).__init__()
-        self.constant = torch.nn.Parameter(
-            torch.empty((expert.hidden_size)))
+        self.constant = torch.nn.Parameter(torch.empty((expert.hidden_size)))
         torch.nn.init.normal_(self.constant)
 
         self.wg = torch.nn.Linear(expert.hidden_size, 2, bias=False)
@@ -52,11 +51,14 @@ class ConstantExpert(torch.nn.Module):
         # print(inputs.size())
         weight = self.wg(inputs)
         weight = self.softmax(weight)
-        return torch.einsum('b,bd->bd', [weight[:, 0].type_as(inputs), inputs]) + torch.einsum(
-                'b,d->bd', [weight[:, 1].type_as(inputs), self.constant.type_as(inputs)])
+        return torch.einsum("b,bd->bd", [weight[:, 0].type_as(inputs), inputs]) + torch.einsum(
+            "b,d->bd", [weight[:, 1].type_as(inputs), self.constant.type_as(inputs)]
+        )
 
 
-def gating(logits: Tensor, moe_use_mixtral_gating=False, moe_use_logits_norm=False, moe_gate_norm_std=1.0) -> Dict[int, List[Tuple[int, float]]]:
+def gating(
+    logits: Tensor, moe_use_mixtral_gating=False, moe_use_logits_norm=False, moe_gate_norm_std=1.0
+) -> Dict[int, List[Tuple[int, float]]]:
     # gates shape [num_tokens, num_experts]
     num_experts = logits.size(1)
     if moe_use_mixtral_gating:
@@ -76,7 +78,9 @@ def gating(logits: Tensor, moe_use_mixtral_gating=False, moe_use_logits_norm=Fal
         # gates shape [num_tokens, MOE_TOP_K]
         # indices shape [num_tokens, MOE_TOP_K]
         gates, indices = torch.topk(gates, k=MOE_TOP_K, dim=1)
-        gates = torch.where(indices==(num_experts-1), torch.zeros_like(gates).to(gates.dtype).to(gates.device), gates)
+        gates = torch.where(
+            indices == (num_experts - 1), torch.zeros_like(gates).to(gates.dtype).to(gates.device), gates
+        )
         gates /= torch.sum(gates, dim=1, keepdim=True)
 
     expert_info = defaultdict(list)
@@ -88,21 +92,23 @@ def gating(logits: Tensor, moe_use_mixtral_gating=False, moe_use_logits_norm=Fal
 
 
 class Router(Module):
-    def __init__(self,
-                 model_dim: int,
-                 num_experts: int,
-                 moe_use_mixtral_gating: bool,
-                 moe_2layer_gate: bool,
-                 moe_use_logits_norm: bool,
-                 moe_gate_norm_std: float,
-                 ) -> None:
+    def __init__(
+        self,
+        model_dim: int,
+        num_experts: int,
+        moe_use_mixtral_gating: bool,
+        moe_2layer_gate: bool,
+        moe_use_logits_norm: bool,
+        moe_gate_norm_std: float,
+    ) -> None:
         super().__init__()
 
         if moe_2layer_gate:
             self.wg = torch.nn.Sequential(
                 torch.nn.Linear(model_dim, num_experts * 8, bias=False).float(),
                 torch.nn.Tanh(),
-                torch.nn.Linear(num_experts * 8, num_experts, bias=False).float()).float()
+                torch.nn.Linear(num_experts * 8, num_experts, bias=False).float(),
+            ).float()
         else:
             self.wg = torch.nn.Linear(model_dim, num_experts, bias=False).float()
 
@@ -117,7 +123,7 @@ class Router(Module):
         if isinstance(self.wg, torch.nn.Linear):
             if self.wg.weight.dtype != torch.float32:
                 self.wg = self.wg.float()
-                setattr(self.wg.weight, 'router', True)
+                setattr(self.wg.weight, "router", True)
         else:
             if self.wg[0].weight.dtype != torch.float32:
                 self.wg = self.wg.float()
@@ -140,22 +146,25 @@ class Experts(torch.nn.Module):
         super(Experts, self).__init__()
 
         self.experts = torch.nn.ModuleList(
-            [copy.deepcopy(expert) for _ in range(num_local_experts - 2 - Constant)] +
-            [ConstantExpert(expert) for _ in range(Constant)] +
-            [CopyExpert(expert), ZeroExpert(expert)])
+            [copy.deepcopy(expert) for _ in range(num_local_experts - 2 - Constant)]
+            + [ConstantExpert(expert) for _ in range(Constant)]
+            + [CopyExpert(expert), ZeroExpert(expert)]
+        )
 
     def forward(self, inputs):
         raise NotImplementedError
 
 
 class MOELayer(Base):
-    def __init__(self,
-                 gate: Module,
-                 experts: Module,
-                 ep_size,
-                 num_local_experts: int,
-                 moe_use_mixtral_gating: bool,
-                 moe_feature_no_mul_topk: bool) -> None:
+    def __init__(
+        self,
+        gate: Module,
+        experts: Module,
+        ep_size,
+        num_local_experts: int,
+        moe_use_mixtral_gating: bool,
+        moe_feature_no_mul_topk: bool,
+    ) -> None:
         super().__init__()
         self.gate = gate
         self.experts = experts
@@ -184,16 +193,18 @@ class MOELayer(Base):
 
 
 class MOE(torch.nn.Module):
-    def __init__(self,
-                 hidden_size,
-                 expert,
-                 num_experts=1,
-                 ep_size=1,
-                 moe_use_mixtral_gating=False,
-                 moe_2layer_gate=True,
-                 moe_use_logits_norm=False,
-                 moe_gate_norm_std=1.0,
-                 moe_feature_no_mul_topk=False):
+    def __init__(
+        self,
+        hidden_size,
+        expert,
+        num_experts=1,
+        ep_size=1,
+        moe_use_mixtral_gating=False,
+        moe_2layer_gate=True,
+        moe_use_logits_norm=False,
+        moe_gate_norm_std=1.0,
+        moe_feature_no_mul_topk=False,
+    ):
         super(MOE, self).__init__()
 
         self.ep_size = ep_size
@@ -206,18 +217,21 @@ class MOE(torch.nn.Module):
         self.moe_feature_no_mul_topk = moe_feature_no_mul_topk
 
         experts = Experts(expert, self.num_local_experts)
-        self.moe = MOELayer(Router(hidden_size,
-                                   num_experts,
-                                   self.moe_use_mixtral_gating,
-                                   self.moe_2layer_gate,
-                                   self.moe_use_logits_norm,
-                                   self.moe_gate_norm_std),
-                            experts,
-                            self.ep_size,
-                            self.num_local_experts,
-                            self.moe_use_mixtral_gating,
-                            self.moe_feature_no_mul_topk,
-                            )
+        self.moe = MOELayer(
+            Router(
+                hidden_size,
+                num_experts,
+                self.moe_use_mixtral_gating,
+                self.moe_2layer_gate,
+                self.moe_use_logits_norm,
+                self.moe_gate_norm_std,
+            ),
+            experts,
+            self.ep_size,
+            self.num_local_experts,
+            self.moe_use_mixtral_gating,
+            self.moe_feature_no_mul_topk,
+        )
 
     def forward(self, hidden_states, used_token=None, gate_residual=None):
         output, gate_residual = self.moe(hidden_states, used_token, gate_residual=gate_residual)

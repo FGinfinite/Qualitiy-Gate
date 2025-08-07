@@ -12,7 +12,6 @@ LLAMA_PRETRAINED_CONFIG_ARCHIVE_MAP = {}
 
 
 class MoeConfig(PretrainedConfig):
-
     model_type = "MoE++"
     keys_to_ignore_at_inference = ["past_key_values"]
 
@@ -43,7 +42,6 @@ class MoeConfig(PretrainedConfig):
         moe_use_logits_norm=False,
         moe_gate_norm_std=1.0,
         moe_feature_no_mul_topk=False,
-        
         **kwargs,
     ):
         self.vocab_size = vocab_size

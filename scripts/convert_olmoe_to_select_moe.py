@@ -110,9 +110,7 @@ def convert_and_save_model(
         print(f"  - Experts per token: {original_config.num_experts_per_tok}")
         print(f"  - Number of layers: {original_config.num_hidden_layers}")
         print(f"  - Hidden size: {original_config.hidden_size}")
-        print(
-            f"  - Total parameters: {sum(p.numel() for p in original_model.parameters()):,}"
-        )
+        print(f"  - Total parameters: {sum(p.numel() for p in original_model.parameters()):,   }")
 
         # 2. Create Select-MoE config
         print("\n2. Creating Select-MoE configuration...")
@@ -139,17 +137,17 @@ def convert_and_save_model(
 
         # 3. Convert the model using new two-tier architecture
         print("\n3. Converting to two-tier routing architecture...")
-        
+
         # Create new Select-MoE model with two-tier routing
         select_moe_model = SelectMoeForCausalLM(select_moe_config)
-        
+
         # Copy compatible weights from original model
         original_state_dict = original_model.state_dict()
         select_moe_state_dict = select_moe_model.state_dict()
-        
+
         print("Mapping original MLP weights to normal_moe...")
         copied_count = 0
-        
+
         # Copy all weights from original model to new model
         # Special handling for mlp -> normal_moe mapping
         for key in original_state_dict:
@@ -166,21 +164,19 @@ def convert_and_save_model(
                     print(f"  Mapped: {key} -> {new_key}")
                 else:
                     print(f"  Warning: Could not map {key} to {new_key}")
-        
+
         print(f"Total weights copied: {copied_count}/{len(original_state_dict)}")
-        
+
         # Verify quality gates are initialized (they should be random)
         quality_gate_count = 0
         for key in select_moe_state_dict:
             if "quality_gate" in key:
                 quality_gate_count += 1
         print(f"Quality gates found: {quality_gate_count}")
-                
-        
+
         print("✓ Weight copying completed!")
         print("✓ Two-tier routing architecture conversion completed!")
 
-        
         # Move to device if specified
         if device != "cpu":
             select_moe_model = select_moe_model.to(device)
@@ -190,9 +186,7 @@ def convert_and_save_model(
 
         # Test forward pass
         batch_size, seq_len = 1, 8
-        test_input = torch.randint(
-            0, select_moe_config.vocab_size, (batch_size, seq_len)
-        )
+        test_input = torch.randint(0, select_moe_config.vocab_size, (batch_size, seq_len))
         if device != "cpu":
             test_input = test_input.to(device)
 
@@ -202,28 +196,32 @@ def convert_and_save_model(
         print("✓ Forward pass successful!")
         print(f"  - Output shape: {outputs.logits.shape}")
         print(f"  - Router logits layers: {len(outputs.router_logits)}")
-        
+
         # Verify new two-tier router output format
         first_layer_router = outputs.router_logits[0]
         if isinstance(first_layer_router, dict):
             print("✓ Two-tier routing output format verified!")
             print(f"  - Quality logits shape: {first_layer_router['quality_logits'].shape}")
             print(f"  - MoE logits shape: {first_layer_router['moe_logits'].shape}")
-            
+
             # Verify dimensions
             expected_quality_dims = (batch_size, seq_len, 2)  # [good, bad]
             expected_moe_dims = (batch_size * seq_len, select_moe_config.num_experts)
-            
-            actual_quality_dims = first_layer_router['quality_logits'].shape
-            actual_moe_dims = first_layer_router['moe_logits'].shape
-            
-            assert actual_quality_dims == expected_quality_dims, f"Quality logits shape mismatch: {actual_quality_dims} != {expected_quality_dims}"
-            assert actual_moe_dims == expected_moe_dims, f"MoE logits shape mismatch: {actual_moe_dims} != {expected_moe_dims}"
-            
+
+            actual_quality_dims = first_layer_router["quality_logits"].shape
+            actual_moe_dims = first_layer_router["moe_logits"].shape
+
+            assert actual_quality_dims == expected_quality_dims, (
+                f"Quality logits shape mismatch: {actual_quality_dims} != {expected_quality_dims}"
+            )
+            assert actual_moe_dims == expected_moe_dims, (
+                f"MoE logits shape mismatch: {actual_moe_dims} != {expected_moe_dims}"
+            )
+
             print("✓ Router logits dimensions verification passed!")
         else:
             raise ValueError("Expected dictionary format for two-tier router logits, got:", type(first_layer_router))
-        
+
         # Optional: Freeze non-routing weights if specified
         if freeze_non_routing:
             print("\n4.5. Freezing non-routing weights...")
@@ -234,9 +232,7 @@ def convert_and_save_model(
         print("\n5. Saving converted model...")
 
         if save_path is None:
-            save_path = (
-                f"./converted_models/select_moe_converted_{model_name.split('/')[-1]}"
-            )
+            save_path = f"./converted_models/select_moe_converted_{model_name.split('/')[-1]}"
 
         # Create directory if it doesn't exist
         os.makedirs(save_path, exist_ok=True)
@@ -265,7 +261,7 @@ def convert_and_save_model(
 
         print("✓ Loaded model forward pass successful!")
         print(f"  - Output shape: {test_outputs.logits.shape}")
-        
+
         # Verify loaded model has correct two-tier routing format
         loaded_first_layer_router = test_outputs.router_logits[0]
         if isinstance(loaded_first_layer_router, dict):
@@ -286,9 +282,7 @@ def convert_and_save_model(
                 select_moe_model.push_to_hub(hub_repo_name, private=False)
                 print(f"✓ Model pushed to Hub: {hub_repo_name}")
                 print("   You can now load it with:")
-                print(
-                    f"   model = SelectMoeForCausalLM.from_pretrained('{hub_repo_name}')"
-                )
+                print(f"   model = SelectMoeForCausalLM.from_pretrained('{hub_repo_name}')")
             except Exception as hub_error:
                 print(f"❌ Failed to push to Hub: {hub_error}")
                 print("   Make sure you're logged in with: huggingface-cli login")
@@ -301,9 +295,7 @@ def convert_and_save_model(
         print(f"\n📁 Local save path: {os.path.abspath(save_path)}")
         print("\n📝 Usage instructions:")
         print("   # Load the converted model directly")
-        print(
-            "   from models.select_moe import SelectMoeForCausalLM, register_select_moe"
-        )
+        print("   from models.select_moe import SelectMoeForCausalLM, register_select_moe")
         print("   register_select_moe()")
         print(f"   model = SelectMoeForCausalLM.from_pretrained('{save_path}')")
 
@@ -330,9 +322,7 @@ def convert_and_save_model(
 
 def main():
     """Main conversion script."""
-    parser = argparse.ArgumentParser(
-        description="Convert OLMoE pretrained models to Select-MoE format"
-    )
+    parser = argparse.ArgumentParser(description="Convert OLMoE pretrained models to Select-MoE format")
 
     # Model arguments
     parser.add_argument(
@@ -341,9 +331,7 @@ def main():
         default="allenai/OLMoE-1B-7B-0125",
         help="Source model name or path",
     )
-    parser.add_argument(
-        "--save-path", type=str, default=None, help="Local path to save converted model"
-    )
+    parser.add_argument("--save-path", type=str, default=None, help="Local path to save converted model")
     parser.add_argument(
         "--device",
         type=str,
@@ -384,7 +372,7 @@ def main():
     )
     parser.add_argument(
         "--freeze-non-routing",
-        action="store_true", 
+        action="store_true",
         help="Freeze non-routing weights after conversion (for routing-only training)",
     )
 
@@ -402,9 +390,7 @@ def main():
         action="store_true",
         help="Push converted model to HuggingFace Hub",
     )
-    parser.add_argument(
-        "--hub-repo-name", type=str, default=None, help="Repository name for Hub upload"
-    )
+    parser.add_argument("--hub-repo-name", type=str, default=None, help="Repository name for Hub upload")
 
     args = parser.parse_args()
 
@@ -420,9 +406,7 @@ def main():
 
     print(f"Using device: {args.device}")
     if args.device != "cpu":
-        print(
-            f"GPU memory: {torch.cuda.get_device_properties(args.device).total_memory / 1024**3:.1f} GB"
-        )
+        print(f"GPU memory: {torch.cuda.get_device_properties(args.device).total_memory / 1024**3:.1f} GB")
 
     # Convert and save
     result_path = convert_and_save_model(

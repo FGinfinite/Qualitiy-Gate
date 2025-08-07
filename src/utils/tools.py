@@ -44,7 +44,7 @@ def grab_gpu(memory_need: float, accelerator: Accelerator | None = None, over_gr
         while True:
             try:
                 free, _ = torch.cuda.mem_get_info(device_index)
-                
+
                 # 根据 over_grab 标志决定分配策略
                 if over_grab:
                     safety_margin = 200 * 1024 * 1024  # 200MB 安全边际
@@ -86,9 +86,7 @@ def grab_gpu(memory_need: float, accelerator: Accelerator | None = None, over_gr
         # Accelerate 多进程模式
         device_index = accelerator.process_index
         if device_index >= num_gpus:
-            print(
-                f"进程 {device_index}: 目标 GPU 索引超出可用范围 ({num_gpus} 个)。跳过抢占。"
-            )
+            print(f"进程 {device_index}: 目标 GPU 索引超出可用范围 ({num_gpus} 个)。跳过抢占。")
             # 仍然需要等待，以防其他进程正在抢占
             accelerator.wait_for_everyone()
             return None

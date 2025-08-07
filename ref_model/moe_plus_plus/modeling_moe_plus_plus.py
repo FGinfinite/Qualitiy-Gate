@@ -11,7 +11,11 @@ from torch import nn
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 
 from transformers.activations import ACT2FN
-from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast, SequenceClassifierOutputWithPast
+from transformers.modeling_outputs import (
+    BaseModelOutputWithPast,
+    CausalLMOutputWithPast,
+    SequenceClassifierOutputWithPast,
+)
 from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import logging
 from .configuration_moe_plus_plus import MoeConfig
@@ -153,14 +157,13 @@ class DynamicNTKScalingRotaryEmbedding(RotaryEmbedding):
         self.register_buffer("sin_cached", emb.sin()[None, None, :, :].to(dtype), persistent=False)
 
 
-
 class NTKScalingRotaryEmbedding(torch.nn.Module):
     def __init__(self, dim, max_position_embeddings=2048, base=10000, scaling_factor=100, device=None):
         super().__init__()
 
         self.dim = dim
         self.max_position_embeddings = max_position_embeddings
-        self.base = base * scaling_factor 
+        self.base = base * scaling_factor
         inv_freq = 1.0 / (self.base ** (torch.arange(0, self.dim, 2).float().to(device) / self.dim))
         self.register_buffer("inv_freq", inv_freq, persistent=False)
 
@@ -185,6 +188,7 @@ class NTKScalingRotaryEmbedding(torch.nn.Module):
             self.cos_cached[:, :, :seq_len, ...].to(dtype=x.dtype),
             self.sin_cached[:, :, :seq_len, ...].to(dtype=x.dtype),
         )
+
 
 def rotate_half(x):
     """Rotates half the hidden dims of the input."""
@@ -222,9 +226,7 @@ class MLP(nn.Module):
             up_proj_slices = self.up_proj.weight.split(slice, dim=0)
             down_proj_slices = self.down_proj.weight.split(slice, dim=1)
 
-            gate_proj = torch.cat(
-                [F.linear(x, gate_proj_slices[i]) for i in range(self.config.pretraining_tp)], dim=-1
-            )
+            gate_proj = torch.cat([F.linear(x, gate_proj_slices[i]) for i in range(self.config.pretraining_tp)], dim=-1)
             up_proj = torch.cat([F.linear(x, up_proj_slices[i]) for i in range(self.config.pretraining_tp)], dim=-1)
 
             intermediate_states = (self.act_fn(gate_proj) * up_proj).split(slice, dim=2)
@@ -246,9 +248,11 @@ class MLPMoE(nn.Module):
         self.intermediate_size = config.intermediate_size
         self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size * 2, bias=False)
         self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=False)
+
         def swiglu(x):
             x = torch.chunk(x, 2, dim=-1)
             return F.silu(x[0]) * x[1]
+
         self.act_fn = swiglu
 
     def forward(self, x):
@@ -327,9 +331,9 @@ class Attention(nn.Module):
                 )
             else:
                 raise ValueError(f"Unknown RoPE scaling type {scaling_type}")
-            print('-'*80)
+            print("-" * 80)
             print(f"USING COSTOM MODELING, scaling_type is {scaling_type}, scaling_factor is {scaling_factor}")
-            
+
     def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
         return tensor.view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2).contiguous()
 
@@ -433,29 +437,33 @@ class DecoderLayer(nn.Module):
         super().__init__()
         self.hidden_size = config.hidden_size
         self.self_attn = Attention(config=config)
-        
+
         if config.moe_expert_interval == 1:
-            self.mlp = MOE(config.hidden_size,
-                           MLPMoE(config),
-                           num_experts=config.num_experts[0],
-                           moe_use_mixtral_gating=config.moe_use_mixtral_gating,
-                           moe_2layer_gate=config.moe_2layer_gate,
-                           moe_use_logits_norm=config.moe_use_logits_norm,
-                           moe_gate_norm_std=config.moe_gate_norm_std,
-                           moe_feature_no_mul_topk=config.moe_feature_no_mul_topk)
+            self.mlp = MOE(
+                config.hidden_size,
+                MLPMoE(config),
+                num_experts=config.num_experts[0],
+                moe_use_mixtral_gating=config.moe_use_mixtral_gating,
+                moe_2layer_gate=config.moe_2layer_gate,
+                moe_use_logits_norm=config.moe_use_logits_norm,
+                moe_gate_norm_std=config.moe_gate_norm_std,
+                moe_feature_no_mul_topk=config.moe_feature_no_mul_topk,
+            )
         else:
             if (layer_id + 1) % config.moe_expert_interval == 0:
-                self.mlp = MOE(config.hidden_size,
-                               MLPMoE(config),
-                               num_experts=config.num_experts[0],
-                               moe_use_mixtral_gating=config.moe_use_mixtral_gating,
-                               moe_2layer_gate=config.moe_2layer_gate,
-                               moe_use_logits_norm=config.moe_use_logits_norm,
-                               moe_gate_norm_std=config.moe_gate_norm_std,
-                               moe_feature_no_mul_topk=config.moe_feature_no_mul_topk)
+                self.mlp = MOE(
+                    config.hidden_size,
+                    MLPMoE(config),
+                    num_experts=config.num_experts[0],
+                    moe_use_mixtral_gating=config.moe_use_mixtral_gating,
+                    moe_2layer_gate=config.moe_2layer_gate,
+                    moe_use_logits_norm=config.moe_use_logits_norm,
+                    moe_gate_norm_std=config.moe_gate_norm_std,
+                    moe_feature_no_mul_topk=config.moe_feature_no_mul_topk,
+                )
             else:
                 self.mlp = MLP(config)
-        
+
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
@@ -467,7 +475,7 @@ class DecoderLayer(nn.Module):
         past_key_value: Optional[Tuple[torch.Tensor]] = None,
         output_attentions: Optional[bool] = False,
         use_cache: Optional[bool] = False,
-        gate_residual = None,
+        gate_residual=None,
     ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
         """
         Args:
@@ -514,6 +522,7 @@ class DecoderLayer(nn.Module):
 
         return outputs, gate_residual
 
+
 class MoePreTrainedModel(PreTrainedModel):
     config_class = MoeConfig
     base_model_prefix = "model"
@@ -535,6 +544,7 @@ class MoePreTrainedModel(PreTrainedModel):
     def _set_gradient_checkpointing(self, module, value=False):
         if isinstance(module, MoeModel):
             module.gradient_checkpointing = value
+
 
 class MoeModel(MoePreTrainedModel):
     """
@@ -764,7 +774,6 @@ class MoeForCausalLM(MoePreTrainedModel):
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
-
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
@@ -887,8 +896,6 @@ class ForSequenceClassification(MoePreTrainedModel):
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
     ) -> Union[Tuple, SequenceClassifierOutputWithPast]:
-
-
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         transformer_outputs = self.model(

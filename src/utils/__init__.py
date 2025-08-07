@@ -18,11 +18,11 @@ from .logging_utils import (
 
 __all__ = [
     "HydraLoggingCallback",
-    "configure_transformers_logging", 
+    "configure_transformers_logging",
     "get_logger",
     "setup_training_logging",
     "info",
-    "warning", 
+    "warning",
     "error",
     "debug",
 ]

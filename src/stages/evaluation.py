@@ -9,6 +9,7 @@ from omegaconf import DictConfig, OmegaConf
 
 log = logging.getLogger(__name__)
 
+
 def make_json_serializable(obj):
     """
     递归地将对象中不可序列化的Numpy类型转换为JSON兼容的Python原生类型。
@@ -31,6 +32,7 @@ def make_json_serializable(obj):
     except (TypeError, OverflowError):
         return str(obj)
 
+
 def save_results(results: dict, output_path: str | Path):
     """将评估结果保存到指定的JSON文件。"""
     output_path = Path(output_path)
@@ -42,6 +44,7 @@ def save_results(results: dict, output_path: str | Path):
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(serializable_results, f, indent=4, ensure_ascii=False)
     log.info("评估结果已成功保存。")
+
 
 @hydra.main(version_base=None, config_path="../../configs", config_name="stage_4_evaluate")
 def main(cfg: DictConfig) -> None:
@@ -67,11 +70,12 @@ def main(cfg: DictConfig) -> None:
         tasks=list(cfg.eval.tasks),
         batch_size=cfg.eval.batch_size,
         device=cfg.eval.device,
-        log_samples=True
+        log_samples=True,
     )
 
     save_results(results, cfg.output.results_path)
     log.info("======== 第四阶段：模型评估完成 ========")
+
 
 if __name__ == "__main__":
     main()

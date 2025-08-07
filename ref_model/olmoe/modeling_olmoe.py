@@ -975,9 +975,7 @@ class OlmoeModel(OlmoePreTrainedModel):
             causal_mask = attention_mask
         else:
             min_dtype = torch.finfo(dtype).min
-            causal_mask = torch.full(
-                (sequence_length, target_length), fill_value=min_dtype, dtype=dtype, device=device
-            )
+            causal_mask = torch.full((sequence_length, target_length), fill_value=min_dtype, dtype=dtype, device=device)
             if sequence_length != 1:
                 causal_mask = torch.triu(causal_mask, diagonal=1)
             causal_mask *= torch.arange(target_length, device=device) > cache_position.reshape(-1, 1)
