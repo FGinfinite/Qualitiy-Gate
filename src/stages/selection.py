@@ -490,6 +490,54 @@ def _perform_diversity_selection(scored_data: List[dict], all_logits_by_dataset:
     return selected_data
 
 
+def load_router_data(router_data_path: str) -> dict:
+    """
+    加载保存的完整路由数据
+    
+    Args:
+        router_data_path: 路由数据文件路径
+        
+    Returns:
+        包含完整路由信息的字典
+    """
+    router_data = torch.load(router_data_path, map_location='cpu')
+    
+    log = logging.getLogger(__name__)
+    log.info(f"加载路由数据: {router_data_path}")
+    log.info(f"  - 数据集: {router_data['dataset_name']}")
+    log.info(f"  - 样本数: {router_data['num_samples']}")
+    log.info(f"  - 质量门logits形状: {router_data['quality_logits'].shape}")
+    log.info(f"  - MoE路由logits形状: {router_data['moe_logits'].shape}")
+    
+    return router_data
+
+
+def get_sample_router_info(router_data: dict, sample_id: str) -> dict:
+    """
+    根据样本ID获取对应的路由信息
+    
+    Args:
+        router_data: 从load_router_data加载的数据字典
+        sample_id: 样本的唯一ID（例如: "oasst1_25460"）
+        
+    Returns:
+        包含该样本路由信息的字典
+    """
+    # 在样本ID列表中查找位置
+    try:
+        position = router_data['sample_ids'].index(sample_id)
+    except ValueError:
+        raise ValueError(f"样本ID '{sample_id}' 未在数据集 '{router_data['dataset_name']}' 中找到")
+    
+    return {
+        'sample_id': sample_id,
+        'dataset_name': router_data['dataset_name'],
+        'quality_logits': router_data['quality_logits'][position],  # [num_layers, 2]
+        'moe_logits': router_data['moe_logits'][position],          # [num_layers, num_experts]
+        'position_in_dataset': position,
+    }
+
+
 def select(cfg: DictConfig) -> None:
     """
     数据选择阶段的主函数
@@ -556,15 +604,22 @@ def select(cfg: DictConfig) -> None:
     )
 
     if cfg.dataset.shuffle:
+        log.info("对数据集进行shuffle...")
         dataset = dataset.shuffle(seed=cfg.dataset.seed)
 
     log.info(f"总样本数: {len(dataset)}")
+    log.info("✓ 数据集已准备完毕，每个样本包含唯一ID用于索引对应")
 
-    # 4. 数据评分和logits记录
+    # 4. 数据评分和路由logits记录
     scored_data = []
-    all_logits_by_dataset = {
-        name: [] for name in cfg.dataset.dataset_names
-    }  # 按数据集记录logits
+    # 重构：同时记录质量门和MoE路由的输出
+    all_router_data_by_dataset = {
+        name: {
+            'quality_logits': [],  # 质量门logits: [样本数, 层数, 序列长度, 2]
+            'moe_logits': [],      # MoE路由logits: [样本数, 层数, 专家数] (平均后)
+            'sample_ids': [],      # 样本的原始ID（唯一标识符）
+        } for name in cfg.dataset.dataset_names
+    }
     dataset_sample_counts = {
         name: 0 for name in cfg.dataset.dataset_names
     }  # 记录每个数据集的样本数
@@ -650,12 +705,30 @@ def select(cfg: DictConfig) -> None:
                 debug=debug_mode,
             )
 
-            # 记录MoE路由logits用于多样性采样
-            # MoE logits形状: [num_layers, batch*seq_len, num_experts]
-            # 我们需要提取每个样本的 [num_layers, num_experts] 特征矩阵
+            # 获取有效token的掩码信息
             valid_mask = sample_attention_mask.bool()
             actual_length = valid_mask.sum().item()
+
+            # 记录完整的路由信息用于分析和多样性采样
+            # 1. 收集质量门logits并在序列维度进行平均 - 与MoE路由保持一致的形状
+            quality_logits_averaged = []
+            for layer_quality_logits in quality_logits_list:
+                # layer_quality_logits: [seq_len, 2]
+                if actual_length > 0:
+                    # 使用attention_mask提取有效token的logits
+                    valid_quality_logits = layer_quality_logits[valid_mask]  # [actual_length, 2]
+                    # 对有效token求平均
+                    layer_avg_quality_logits = valid_quality_logits.mean(dim=0)  # [2]
+                else:
+                    # 如果没有有效token，使用零值
+                    layer_avg_quality_logits = torch.zeros(2)
+                
+                quality_logits_averaged.append(layer_avg_quality_logits)
             
+            # 堆叠为 [num_layers, 2]
+            quality_logits_sample = torch.stack(quality_logits_averaged)  # [num_layers, 2]
+            
+            # 2. 收集MoE路由logits并计算平均概率分布
             if actual_length > 0:
                 moe_logits_list = []
                 seq_len = inputs["input_ids"].shape[1]  # 序列长度
@@ -690,22 +763,29 @@ def select(cfg: DictConfig) -> None:
                 num_layers = len(outputs.router_logits)
                 num_experts = outputs.router_logits[0]["moe_logits"].shape[-1]
                 sample_moe_matrix = torch.ones(num_layers, num_experts) / num_experts
+                quality_logits_sample = torch.zeros(num_layers, 2)  # 修正：[num_layers, 2]
 
-            all_logits_by_dataset[dataset_name].append(sample_moe_matrix.cpu())
+            # 3. 保存到数据结构中，建立ID对应关系
+            all_router_data_by_dataset[dataset_name]['quality_logits'].append(quality_logits_sample.cpu())
+            all_router_data_by_dataset[dataset_name]['moe_logits'].append(sample_moe_matrix.cpu())
+            all_router_data_by_dataset[dataset_name]['sample_ids'].append(ids[j])
+            
             dataset_sample_counts[dataset_name] += 1
 
             if i == 0 and j < 3:
+                current_sample_index = i * cfg.data_process.batch_size + j
                 log.info(
-                    f"--- 样本 {i * cfg.data_process.batch_size + j} 详细计算过程 ---"
+                    f"--- 样本 {current_sample_index} 详细计算过程 ---"
                 )
                 log.info(f"  - 数据集: {dataset_names[j]}")
-                log.info(f"  - ID: {ids[j]}")
+                log.info(f"  - 样本ID: {ids[j]}")
                 log.info(
                     f"  - 实际长度: {actual_length} / 总长度: {sample_attention_mask.shape[0]}"
                 )
                 log.info(
                     f"  - 质量门输出形状: {quality_logits_list[0].shape}"
                 )
+                log.info(f"  - 质量门张量形状: {quality_logits_sample.shape}")
                 log.info(f"  - MoE路由矩阵形状: {sample_moe_matrix.shape}")
 
                 # 显示质量门和MoE路由的详细信息
@@ -713,7 +793,7 @@ def select(cfg: DictConfig) -> None:
                     f"  - Quality Gate前3层的输出形状: {[ql.shape for ql in quality_logits_list[:3]]}"
                 )
                 log.info(
-                    f"  - MoE Logits前3层的输出形状: {[outputs.router_logits[i]['moe_logits'][j].shape for i in range(min(3, len(outputs.router_logits)))]}"
+                    f"  - MoE Logits前3层的输出形状: {[outputs.router_logits[i]['moe_logits'][j*sequence_length:(j+1)*sequence_length].shape for i in range(min(3, len(outputs.router_logits)))]}"
                 )
 
                 log.info(f"  - 最终质量分数: {quality_score:.6f}")
@@ -728,17 +808,23 @@ def select(cfg: DictConfig) -> None:
                 }
             )
 
-    # 5. 筛选和保存数据 - 使用新的多样性选择算法
+    # 5. 筛选和保存数据 - 使用多样性选择算法
     log.info("开始多样性数据选择...")
     
     # 检查是否启用多样性选择
     enable_diversity = getattr(cfg, 'enable_diversity_selection', True)
     log.info(f"多样性选择模式: {'启用' if enable_diversity else '禁用(使用质量分数)'}")
     
-    # 使用新的多样性选择算法
+    # 使用多样性选择算法
     use_gpu_acceleration = getattr(cfg.distance_computation, 'use_gpu_acceleration', True)
     distance_batch_size = getattr(cfg.distance_computation, 'distance_batch_size', 1000)
     importance_selection_percentage = getattr(cfg, 'importance_selection_percentage', None)
+    
+    # 直接使用路由数据进行多样性选择
+    all_logits_by_dataset = {
+        name: all_router_data_by_dataset[name]['moe_logits'] 
+        for name in cfg.dataset.dataset_names
+    }
     
     selected_data = diversity_based_selection(
         scored_data=scored_data,
@@ -771,24 +857,45 @@ def select(cfg: DictConfig) -> None:
 
     log.info(f"筛选后的数据已保存到: {output_path}")
 
-    # 6. 保存logits张量文件
-    log.info("保存logits张量文件...")
-    logits_dir = os.path.join(output_dir, "logits")
-    os.makedirs(logits_dir, exist_ok=True)
+    # 6. 保存完整的路由张量文件（包含质量门和MoE路由输出）
+    log.info("保存完整路由张量文件...")
+    router_data_dir = os.path.join(output_dir, "router_data")
+    os.makedirs(router_data_dir, exist_ok=True)
 
     for dataset_name in cfg.dataset.dataset_names:
-        if (
-            dataset_name in all_logits_by_dataset
-            and all_logits_by_dataset[dataset_name]
-        ):
-            # 将列表中的张量堆叠成一个大张量
-            dataset_logits = torch.stack(all_logits_by_dataset[dataset_name])
-            logits_path = os.path.join(logits_dir, f"{dataset_name}_logits.pt")
-            torch.save(dataset_logits, logits_path)
-            log.info(f"数据集 '{dataset_name}' 的logits已保存到: {logits_path}")
-            log.info(f"  - 形状: {dataset_logits.shape}")
-            log.info(f"  - 样本数: {dataset_sample_counts[dataset_name]}")
+        dataset_router_data = all_router_data_by_dataset[dataset_name]
+        
+        if (dataset_router_data['quality_logits'] and 
+            dataset_router_data['moe_logits']):
+            
+            # 构建完整的数据字典 - 两种路由数据形状现在保持一致
+            router_data_dict = {
+                'quality_logits': torch.stack(dataset_router_data['quality_logits']),  # [N, L, 2]
+                'moe_logits': torch.stack(dataset_router_data['moe_logits']),          # [N, L, E]
+                'sample_ids': dataset_router_data['sample_ids'],
+                'dataset_name': dataset_name,
+                'num_samples': dataset_sample_counts[dataset_name],
+                'metadata': {
+                    'description': '完整的路由数据，包含质量门和MoE路由输出',
+                    'quality_logits_shape': '[N, num_layers, 2] - 质量门平均概率',
+                    'moe_logits_shape': '[N, num_layers, num_experts] - MoE路由平均概率',
+                    'sample_ids': '样本的唯一ID标识，可与原数据集精确对应',
+                    'id_format': 'dataset_name + "_" + number (例如: oasst1_25460)',
+                    'note': '两种路由数据均已在序列维度进行平均，形状保持一致',
+                }
+            }
+            
+            # 保存完整数据字典
+            router_data_path = os.path.join(router_data_dir, f"{dataset_name}_router_data.pt")
+            torch.save(router_data_dict, router_data_path)
+            
+            log.info(f"数据集 '{dataset_name}' 的完整路由数据已保存到: {router_data_path}")
+            log.info(f"  - 质量门logits形状: {router_data_dict['quality_logits'].shape}")
+            log.info(f"  - MoE路由logits形状: {router_data_dict['moe_logits'].shape}")
+            log.info(f"  - 样本数: {router_data_dict['num_samples']}")
+            log.info(f"  - 样本ID示例: {dataset_router_data['sample_ids'][:3] if dataset_router_data['sample_ids'] else '无'}")
+            
         else:
-            log.warning(f"数据集 '{dataset_name}' 没有logits数据")
+            log.warning(f"数据集 '{dataset_name}' 没有路由数据")
 
     log.info("--- 阶段2：数据选择完成 ---")
