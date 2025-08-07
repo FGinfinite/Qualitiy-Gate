@@ -19,7 +19,8 @@ from src.training.full_rank_finetuning import (
     save_full_rank_weights,
     setup_full_rank_training,
 )
-from utils.tools import grab_gpu
+from src.utils.logging_utils import setup_training_logging
+from src.utils.tools import grab_gpu
 
 
 # 路由权重相关的模式定义
@@ -114,32 +115,34 @@ def pretrain(cfg: DictConfig) -> None:
     """
     使用预转换的 Select-MoE 模型进行训练，并使用 PEFT 进行微调。
     """
-
-    print("--- 开始阶段 1：Select-MoE 预训练 ---")
+    # 设置训练日志系统
+    log, hydra_callback = setup_training_logging(__name__)
+    
+    log.info("--- 开始阶段 1：Select-MoE 预训练 ---")
 
     accelerator = Accelerator()
     if cfg.training.gpu_grab.grab:
         # 1. 抢占GPU并持有占位符
-        print("--- 正在抢占GPU显存 ---")
+        log.info("--- 正在抢占GPU显存 ---")
         placeholders = grab_gpu(
             memory_need=cfg.training.gpu_grab.memory_need_gb,
             accelerator=accelerator,
             over_grab=cfg.training.gpu_grab.over_grab,
         )
-        print("--- GPU显存抢占完成 ---")
+        log.info("--- GPU显存抢占完成 ---")
 
     # 2. 加载 Select-MoE 模型和分词器
-    print("正在加载和配置 Select-MoE 模型...")
+    log.info("正在加载和配置 Select-MoE 模型...")
     model, tokenizer = get_model_and_tokenizer(cfg)
-    print("模型加载完成。")
+    log.info("模型加载完成。")
 
     # 2. 配置微调模式
-    print(f"正在为 '{cfg.training.peft_mode}' 模式配置微调...")
+    log.info(f"正在为 '{cfg.training.peft_mode}' 模式配置微调...")
 
     if cfg.training.peft_mode == "lora":
         peft_config = get_peft_config(cfg)
         model = get_peft_model(model, peft_config)
-        print("PEFT 模型已创建。可训练参数：")
+        log.info("PEFT 模型已创建。可训练参数：")
         model.print_trainable_parameters()
     elif cfg.training.peft_mode == "full_rank":
         # 全秩微调模式：只微调路由参数（quality gates + MoE gates），但是全秩训练
@@ -183,6 +186,12 @@ def pretrain(cfg: DictConfig) -> None:
         logging_steps=10,
         save_strategy=save_strategy,
         report_to="none",
+        # 改进的日志配置，确保与Hydra日志系统集成
+        logging_first_step=True,
+        log_level="info",
+        log_level_replica="warning", 
+        disable_tqdm=False,  # 保持进度条显示
+        logging_nan_inf_filter=True,  # 过滤NaN/Inf值
     )
 
     # 8. 初始化并运行训练器
@@ -192,32 +201,33 @@ def pretrain(cfg: DictConfig) -> None:
         del placeholders
         torch.cuda.empty_cache()
         if accelerator.is_main_process:
-            print("已释放GPU占位符以准备训练...")
+            log.info("已释放GPU占位符以准备训练...")
 
     trainer = Trainer(
         model=model,
         args=training_args,
         train_dataset=tokenized_dataset,
         data_collator=data_collator,
+        callbacks=[hydra_callback],  # 使用设置好的日志回调
     )
 
-    print("正在使用 Hugging Face Trainer 开始训练...")
+    log.info("正在使用 Hugging Face Trainer 开始训练...")
     # 使用 try...finally 确保训练过程的稳健性
     try:
         trainer.train()
     finally:
         # 可以在此处添加清理代码（如果需要）
         pass
-    print("训练完成。")
+    log.info("训练完成。")
 
     # 9. 保存最终模型
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:
         if cfg.training.peft_mode == "lora":
-            print(f"正在将最终的 PEFT 适配模型保存到 {cfg.output_dir}")
+            log.info(f"正在将最终的 PEFT 适配模型保存到 {cfg.output_dir}")
             trainer.save_model(cfg.output_dir)
         elif cfg.training.peft_mode == "full_rank":
-            print(f"正在将路由全秩微调权重保存到 {cfg.output_dir}")
+            log.info(f"正在将路由全秩微调权重保存到 {cfg.output_dir}")
             full_rank_weights_path = os.path.join(
                 cfg.output_dir, "full_rank_weights.pt"
             )
@@ -225,7 +235,7 @@ def pretrain(cfg: DictConfig) -> None:
                 model, ROUTING_PATTERNS, full_rank_weights_path, mode="parameter"
             )
 
-    print("\n--- 阶段 1：预训练完成 ---")
+    log.info("--- 阶段 1：预训练完成 ---")
 
 
 if __name__ == "__main__":

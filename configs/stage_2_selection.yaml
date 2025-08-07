@@ -15,7 +15,7 @@ hydra:
     dir: outputs/stage_2_selection/${now:%Y-%m-%d}/${now:%H-%M-%S}
 
 # Path to the full rank weights from stage 1
-model_checkpoint_path: "outputs/stage_1_pretrain/2025-08-06/20-54-24-batch=4,lr=0.0001/full_rank_weights.pt"
+model_checkpoint_path: "outputs/stage_1_pretrain/2025-08-07/02-15-08-batch=4,lr=0.001/full_rank_weights.pt"
 
 # The final output path for the selected data.
 # It uses the Hydra-generated run directory.

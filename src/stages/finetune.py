@@ -14,6 +14,7 @@ from transformers import (
 )
 
 from src.data import encode_data, get_data_statistics, load_selected_data
+from src.utils.logging_utils import setup_training_logging
 from utils.tools import grab_gpu
 
 # ---------------------------------------------------------------------------
@@ -75,14 +76,14 @@ def get_model_and_tokenizer(
     return model, tokenizer
 
 
-def calculate_per_device_batch_size(total_batch_size: int, num_processes: int) -> int:
+def calculate_per_device_batch_size(total_batch_size: int, num_processes: int, log) -> int:
     """
     根据总批次大小和进程数计算每个设备的批次大小
     """
     per_device_batch_size = total_batch_size // num_processes
     if total_batch_size % num_processes != 0:
-        print(f"警告: 总批次大小 {total_batch_size} 不能被进程数 {num_processes} 整除")
-        print(f"使用每设备批次大小: {per_device_batch_size}")
+        log.warning(f"总批次大小 {total_batch_size} 不能被进程数 {num_processes} 整除")
+        log.info(f"使用每设备批次大小: {per_device_batch_size}")
     return per_device_batch_size
 
 
@@ -95,39 +96,41 @@ def finetune(cfg: DictConfig) -> None:
     """
     使用Llama-2-7B模型进行LoRA微调。
     """
+    # 设置训练日志系统
+    log, hydra_callback = setup_training_logging(__name__)
 
-    print("--- 开始阶段 3：Llama-2-7B LoRA 微调 ---")
+    log.info("--- 开始阶段 3：Llama-2-7B LoRA 微调 ---")
 
     accelerator = Accelerator()
     set_seed(cfg.training.seed)
 
     if cfg.training.gpu_grab.grab:
         # 1. 抢占GPU并持有占位符
-        print("--- 正在抢占GPU显存 ---")
+        log.info("--- 正在抢占GPU显存 ---")
         placeholders = grab_gpu(
             memory_need=cfg.training.gpu_grab.memory_need_gb,
             accelerator=accelerator,
             over_grab=cfg.training.gpu_grab.over_grab,
         )
-        print("--- GPU显存抢占完成 ---")
+        log.info("--- GPU显存抢占完成 ---")
 
     # 2. 加载 Llama-2-7B 模型和分词器
-    print("正在加载和配置 Llama-2-7B 模型...")
+    log.info("正在加载和配置 Llama-2-7B 模型...")
     model, tokenizer = get_model_and_tokenizer(cfg)
-    print("模型加载完成。")
+    log.info("模型加载完成。")
 
     # 3. 配置LoRA微调
-    print("正在配置LoRA微调...")
+    log.info("正在配置LoRA微调...")
     peft_config = get_peft_config(cfg)
     model = get_peft_model(model, peft_config)
-    print("PEFT 模型已创建。可训练参数：")
+    log.info("PEFT 模型已创建。可训练参数：")
     model.print_trainable_parameters()
 
     # 确保 `use_cache` 已禁用以保证训练兼容性
     model.config.use_cache = False
 
     # 4. 加载并准备选择后的数据集
-    print("正在加载选择后的数据集...")
+    log.info("正在加载选择后的数据集...")
     dataset = load_selected_data(cfg.dataset.data_path)
 
     # 5. 编码数据集
@@ -145,11 +148,11 @@ def finetune(cfg: DictConfig) -> None:
     # 7. 计算每设备批次大小
     num_processes = accelerator.num_processes
     per_device_batch_size = calculate_per_device_batch_size(
-        cfg.training.batch_size, num_processes
+        cfg.training.batch_size, num_processes, log
     )
-    print(f"总批次大小: {cfg.training.batch_size}")
-    print(f"进程数: {num_processes}")
-    print(f"每设备批次大小: {per_device_batch_size}")
+    log.info(f"总批次大小: {cfg.training.batch_size}")
+    log.info(f"进程数: {num_processes}")
+    log.info(f"每设备批次大小: {per_device_batch_size}")
 
     # 8. 数据整理器
     data_collator = DataCollatorForSeq2Seq(
@@ -179,31 +182,32 @@ def finetune(cfg: DictConfig) -> None:
         del placeholders
         torch.cuda.empty_cache()
         if accelerator.is_main_process:
-            print("已释放GPU占位符以准备训练...")
+            log.info("已释放GPU占位符以准备训练...")
 
     trainer = Trainer(
         model=model,
         args=training_args,
         train_dataset=tokenized_dataset,
         data_collator=data_collator,
+        callbacks=[hydra_callback],  # 使用设置好的日志回调
     )
 
-    print("正在使用 Hugging Face Trainer 开始LoRA微调...")
+    log.info("正在使用 Hugging Face Trainer 开始LoRA微调...")
     # 使用 try...finally 确保训练过程的稳健性
     try:
         trainer.train()
     finally:
         # 可以在此处添加清理代码（如果需要）
         pass
-    print("LoRA微调完成。")
+    log.info("LoRA微调完成。")
 
     # 11. 保存最终模型
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:
-        print(f"正在将最终的 LoRA 适配器保存到 {cfg.output_dir}")
+        log.info(f"正在将最终的 LoRA 适配器保存到 {cfg.output_dir}")
         trainer.save_model(cfg.output_dir)
 
-    print("\n--- 阶段 3：LoRA微调完成 ---")
+    log.info("--- 阶段 3：LoRA微调完成 ---")
 
 
 # 为了兼容性，保留原来的train函数名

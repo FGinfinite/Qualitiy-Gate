@@ -1,5 +1,6 @@
 # src/data/dataset_loader.py
 import contextlib
+import logging
 import os
 from functools import partial
 from typing import Dict, List, Optional
@@ -262,7 +263,8 @@ def load_and_prepare_dataset(cfg: DictConfig) -> Dataset:
     shuffle = getattr(cfg.dataset, "shuffle", True)
 
     # 加载本地数据集
-    print(f"正在从 {data_dir} 加载数据集...")
+    log = logging.getLogger(__name__)
+    log.info(f"正在从 {data_dir} 加载数据集...")
     dataset = load_local_datasets(
         data_dir=data_dir,
         dataset_names=dataset_names,
@@ -273,9 +275,9 @@ def load_and_prepare_dataset(cfg: DictConfig) -> Dataset:
     # 打乱数据集
     if shuffle:
         dataset = dataset.shuffle(seed=seed)
-        print(f"已打乱数据集，使用种子: {seed}")
+        log.info(f"已打乱数据集，使用种子: {seed}")
 
-    print(f"数据集准备完成，总共 {len(dataset)} 个样本")
+    log.info(f"数据集准备完成，总共 {len(dataset)} 个样本")
     return dataset
 
 
@@ -354,7 +356,9 @@ def get_data_statistics(lm_datasets: Dataset) -> None:
     c_lengths = dataset_with_lengths["c_length"]
     avg_c_length = sum(c_lengths) / len(c_lengths)
 
-    print("数据集统计信息:")
-    print(f"  样本数: {data_size}")
-    print(f"  平均token数: {avg_length:.2f}")
-    print(f"  平均完成token数: {avg_c_length:.2f}")
+    log = logging.getLogger(__name__)
+    
+    log.info("数据集统计信息:")
+    log.info(f"  样本数: {data_size}")
+    log.info(f"  平均token数: {avg_length:.2f}")
+    log.info(f"  平均完成token数: {avg_c_length:.2f}")

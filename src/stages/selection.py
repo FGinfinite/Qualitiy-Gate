@@ -72,8 +72,9 @@ def calculate_quality_score_from_gates(
     actual_length = valid_mask.sum().item()
     
     if debug:
-        print(f"    [函数内部] 质量门logits数量: {len(quality_logits_list)}")
-        print(f"    [函数内部] 实际token数量: {actual_length}")
+        log = logging.getLogger(__name__)
+        log.debug(f"    [函数内部] 质量门logits数量: {len(quality_logits_list)}")
+        log.debug(f"    [函数内部] 实际token数量: {actual_length}")
     
     if actual_length == 0:
         return 0.0
@@ -92,13 +93,13 @@ def calculate_quality_score_from_gates(
         layer_quality_scores.append(layer_avg_good_prob)
         
         if debug and layer_idx < 3:
-            print(f"    [函数内部] 第{layer_idx+1}层好数据概率: {layer_avg_good_prob:.6f}")
+            log.debug(f"    [函数内部] 第{layer_idx+1}层好数据概率: {layer_avg_good_prob:.6f}")
     
     # 对所有层求平均
     final_quality_score = sum(layer_quality_scores) / len(layer_quality_scores)
     
     if debug:
-        print(f"    [函数内部] 最终质量分数: {final_quality_score:.6f}")
+        log.debug(f"    [函数内部] 最终质量分数: {final_quality_score:.6f}")
     
     return final_quality_score
 
@@ -118,7 +119,8 @@ def compute_wasserstein_distance_matrix_gpu(logits_tensors: List[torch.Tensor],
         距离矩阵: [N, N] 形状的numpy数组
     """
     n_samples = len(logits_tensors)
-    print(f"使用GPU加速计算 {n_samples} 个样本的Wasserstein距离矩阵...")
+    log = logging.getLogger(__name__)
+    log.info(f"使用GPU加速计算 {n_samples} 个样本的Wasserstein距离矩阵...")
     
     # 将所有logits转移到GPU并转换为概率分布
     prob_tensors = []
@@ -132,7 +134,7 @@ def compute_wasserstein_distance_matrix_gpu(logits_tensors: List[torch.Tensor],
     n_samples = all_probs.shape[0]
     # n_layers, n_experts = all_probs.shape[1], all_probs.shape[2]  # 未使用，注释掉
     
-    print(f"概率张量形状: {all_probs.shape}")
+    log.info(f"概率张量形状: {all_probs.shape}")
     
     # 初始化距离矩阵
     distance_matrix = torch.zeros(n_samples, n_samples, device=device)
@@ -158,7 +160,7 @@ def compute_wasserstein_distance_matrix_gpu(logits_tensors: List[torch.Tensor],
             if start_i != start_j:
                 distance_matrix[start_j:end_j, start_i:end_i] = batch_distances.T
     
-    print(f"GPU距离矩阵计算完成，形状: {distance_matrix.shape}")
+    log.info(f"GPU距离矩阵计算完成，形状: {distance_matrix.shape}")
     return distance_matrix.cpu().numpy()
 
 
@@ -212,7 +214,8 @@ def compute_wasserstein_distance_matrix_cpu(logits_tensors: List[torch.Tensor]) 
     n_samples = len(logits_tensors)
     distance_matrix = np.zeros((n_samples, n_samples))
     
-    print(f"使用CPU计算 {n_samples} 个样本的Wasserstein距离矩阵...")
+    log = logging.getLogger(__name__)
+    log.info(f"使用CPU计算 {n_samples} 个样本的Wasserstein距离矩阵...")
     
     # 将张量转换为概率分布（对每层的expert维度应用softmax）
     prob_tensors = []
@@ -245,7 +248,7 @@ def compute_wasserstein_distance_matrix_cpu(logits_tensors: List[torch.Tensor]) 
             distance_matrix[i, j] = total_distance
             distance_matrix[j, i] = total_distance
     
-    print(f"CPU距离矩阵计算完成，形状: {distance_matrix.shape}")
+    log.info(f"CPU距离矩阵计算完成，形状: {distance_matrix.shape}")
     return distance_matrix
 
 
@@ -269,7 +272,8 @@ def compute_wasserstein_distance_matrix(logits_tensors: List[torch.Tensor],
         return compute_wasserstein_distance_matrix_gpu(logits_tensors, device, batch_size)
     else:
         if use_gpu:
-            print("警告: GPU加速未可用，回退到CPU计算")
+            log = logging.getLogger(__name__)
+            log.warning("GPU加速未可用，回退到CPU计算")
         return compute_wasserstein_distance_matrix_cpu(logits_tensors)
 
 
@@ -293,7 +297,8 @@ def farthest_point_sampling(distance_matrix: np.ndarray, n_samples: int, seed: i
     
     # 1. 随机选择初始点
     selected_indices = [np.random.randint(0, n_total)]
-    print(f"FPS初始点: {selected_indices[0]}")
+    log = logging.getLogger(__name__)
+    log.info(f"FPS初始点: {selected_indices[0]}")
     
     # 2. 贪心选择剩余点
     for step in range(1, n_samples):
@@ -318,9 +323,9 @@ def farthest_point_sampling(distance_matrix: np.ndarray, n_samples: int, seed: i
         
         selected_indices.append(best_candidate)
         if step % 100 == 0 or step < 10:
-            print(f"FPS第{step}步: 选择点{best_candidate}, 最小距离={max_min_distance:.4f}")
+            log.info(f"FPS第{step}步: 选择点{best_candidate}, 最小距离={max_min_distance:.4f}")
     
-    print(f"FPS完成，选择了{len(selected_indices)}个样本")
+    log.info(f"FPS完成，选择了{len(selected_indices)}个样本")
     return selected_indices
 
 
@@ -359,17 +364,18 @@ def diversity_based_selection(scored_data: List[dict], all_logits_by_dataset: di
     
     if use_two_stage:
         # 两阶段选择策略
-        print("启用两阶段选择策略:")
-        print(f"  - 第一阶段: 基于质量分数选择前 {importance_selection_percentage*100:.1f}% 数据")
-        print(f"  - 第二阶段: 基于多样性从高质量数据中选择 {selection_percentage*100:.1f}% 数据")
+        log = logging.getLogger(__name__)
+        log.info("启用两阶段选择策略:")
+        log.info(f"  - 第一阶段: 基于质量分数选择前 {importance_selection_percentage*100:.1f}% 数据")
+        log.info(f"  - 第二阶段: 基于多样性从高质量数据中选择 {selection_percentage*100:.1f}% 数据")
         
         # 第一阶段：基于质量分数预筛选
         n_importance = int(total_samples * importance_selection_percentage)
         scored_data.sort(key=lambda x: x["scores"], reverse=True)
         high_quality_data = scored_data[:n_importance]
         
-        print(f"  - 第一阶段完成: 从 {total_samples} 个样本中选择了 {len(high_quality_data)} 个高质量样本")
-        print(f"  - 质量分数范围: {high_quality_data[0]['scores']:.6f} ~ {high_quality_data[-1]['scores']:.6f}")
+        log.info(f"  - 第一阶段完成: 从 {total_samples} 个样本中选择了 {len(high_quality_data)} 个高质量样本")
+        log.info(f"  - 质量分数范围: {high_quality_data[0]['scores']:.6f} ~ {high_quality_data[-1]['scores']:.6f}")
         
         # 调整logits数据对应关系
         filtered_logits_by_dataset = {name: [] for name in all_logits_by_dataset.keys()}
@@ -388,23 +394,24 @@ def diversity_based_selection(scored_data: List[dict], all_logits_by_dataset: di
                 dataset_logits_index[dataset_name] += 1
         
         # 第二阶段：从高质量数据中进行多样性选择
-        print(f"  - 第二阶段: 从 {len(high_quality_data)} 个高质量样本中进行多样性选择...")
+        log.info(f"  - 第二阶段: 从 {len(high_quality_data)} 个高质量样本中进行多样性选择...")
         
         # 计算第二阶段的实际选择比例
         stage2_selection_ratio = n_select / len(high_quality_data)
-        print(f"  - 第二阶段选择比例: {stage2_selection_ratio*100:.1f}% ({n_select}/{len(high_quality_data)})")
+        log.info(f"  - 第二阶段选择比例: {stage2_selection_ratio*100:.1f}% ({n_select}/{len(high_quality_data)})")
         
         selected_data = _perform_diversity_selection(
             high_quality_data, filtered_logits_by_dataset, stage2_selection_ratio,
             use_gpu_acceleration, device, distance_batch_size
         )
         
-        print(f"两阶段选择完成: 最终选择了 {len(selected_data)} 个样本")
+        log.info(f"两阶段选择完成: 最终选择了 {len(selected_data)} 个样本")
         return selected_data
     
     else:
         # 单阶段多样性选择（原始逻辑）
-        print(f"启用单阶段多样性选择: 从 {total_samples} 个样本中选择 {n_select} 个")
+        log = logging.getLogger(__name__)
+        log.info(f"启用单阶段多样性选择: 从 {total_samples} 个样本中选择 {n_select} 个")
         
         selected_data = _perform_diversity_selection(
             scored_data, all_logits_by_dataset, selection_percentage,
@@ -452,16 +459,19 @@ def _perform_diversity_selection(scored_data: List[dict], all_logits_by_dataset:
             sample_to_data_mapping.append(data_item)
             dataset_logits_index[dataset_name] += 1
         else:
-            print(f"警告: 数据集 {dataset_name} 的logits不足")
+            log = logging.getLogger(__name__)
+            log.warning(f"数据集 {dataset_name} 的logits不足")
     
     if len(all_logits) != len(scored_data):
-        print(f"警告: logits数量({len(all_logits)}) 与数据数量({len(scored_data)})不匹配")
+        log = logging.getLogger(__name__)
+        log.warning(f"logits数量({len(all_logits)}) 与数据数量({len(scored_data)})不匹配")
         # 回退到质量分数选择
         scored_data.sort(key=lambda x: x["scores"], reverse=True)
         return scored_data[:n_select]
     
-    print(f"收集到 {len(all_logits)} 个logits张量")
-    print(f"张量形状示例: {all_logits[0].shape} (应为 [L, E])")
+    log = logging.getLogger(__name__)
+    log.info(f"收集到 {len(all_logits)} 个logits张量")
+    log.info(f"张量形状示例: {all_logits[0].shape} (应为 [L, E])")
     
     # 2. 计算Wasserstein距离矩阵
     distance_matrix = compute_wasserstein_distance_matrix(
