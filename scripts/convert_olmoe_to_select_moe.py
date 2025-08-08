@@ -110,7 +110,7 @@ def convert_and_save_model(
         print(f"  - Experts per token: {original_config.num_experts_per_tok}")
         print(f"  - Number of layers: {original_config.num_hidden_layers}")
         print(f"  - Hidden size: {original_config.hidden_size}")
-        print(f"  - Total parameters: {sum(p.numel() for p in original_model.parameters()):,   }")
+        print(f"  - Total parameters: {sum(p.numel() for p in original_model.parameters())}")
 
         # 2. Create Select-MoE config
         print("\n2. Creating Select-MoE configuration...")

@@ -9,7 +9,7 @@ hydra:
     dir: outputs/stage_1_pretrain/${now:%Y-%m-%d}/${now:%H-%M-%S}-batch=${training.batch_size},lr=${training.learning_rate}
   sweep:
     dir: outputs/stage_1_pretrain
-    subdir: ${now:%Y-%m-%d}/${now:%H-%M-%S}-batch=${training.batch_size},lr=${training.learning_rate}-${hydra.job.override_dirname}
+    subdir: ${now:%Y-%m-%d}/${now:%H-%M-%S}-batch=${training.batch_size},lr=${training.learning_rate}
   job:
     config:
       override_dirname:
@@ -37,7 +37,7 @@ dataset:
   subset_ratio: 0.05
   seed: 42
   shuffle: true
-  max_sequence_length: 512
+  max_sequence_length: 1024
   processing_num_workers: 10
   overwrite_cache: false
 
