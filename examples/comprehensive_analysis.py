@@ -10,31 +10,32 @@ Select-MoE数据选择综合可视化分析脚本
 5. 选择结果对比：质量选择 vs 多样性选择
 
 这个脚本帮助理解整个Select-MoE数据选择管道的工作原理。
+支持读取整个router_data文件夹内的所有.pt文件，并对每个数据集进行分析。
 """
 
-import sys
 import os
+import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import torch
-import numpy as np
-import matplotlib.pyplot as plt
+import argparse
+import glob
 
-import seaborn as sns
-from scipy.stats import wasserstein_distance
+import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
+import seaborn as sns
+import torch
+from scipy.stats import wasserstein_distance
 from sklearn.manifold import MDS
 from sklearn.preprocessing import StandardScaler
 
 from src.stages.selection import (
-    load_router_data,
     calculate_quality_score_from_gates,
     compute_batch_wasserstein_distance_gpu,
-    farthest_point_sampling,
+    farthest_point_sampling_gpu,
+    load_router_data,
 )
-import argparse
-
 
 plt.rcParams["font.sans-serif"] = ["Maple Mono NF CN"]
 
@@ -194,7 +195,10 @@ def perform_selection_comparison(router_data, distance_matrix, demo_indices, qua
     print()
 
     # 2. 多样性选择：使用FPS算法
-    fps_selected_local = farthest_point_sampling(distance_matrix, n_select, seed=42)
+    distance_tensor = torch.from_numpy(distance_matrix).float()
+    if torch.cuda.is_available():
+        distance_tensor = distance_tensor.cuda()
+    fps_selected_local = farthest_point_sampling_gpu(distance_tensor, n_select, seed=42)
     fps_selected_global = demo_indices[fps_selected_local]
 
     print(f"2. 多样性选择（FPS算法）:")
@@ -383,7 +387,7 @@ def create_comprehensive_visualization(
     ax7.set_title("选择策略性能对比", fontsize=14, pad=20)
 
     plt.suptitle(
-        f"Select-MoE数据选择综合分析\n数据集: {router_data['dataset_name']}, "
+        f"Select-MoE数据选择综合分析 - {router_data['dataset_name']}\n"
         f"总样本: {len(sample_ids)}, 分析样本: {len(demo_indices)}",
         fontsize=16,
         y=0.98,
@@ -397,28 +401,34 @@ def create_comprehensive_visualization(
     return fig
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Select-MoE综合数据选择分析")
-    parser.add_argument("router_data_path", help="路由数据文件路径(.pt格式)")
-    parser.add_argument("--max-samples", type=int, default=40, help="分析的最大样本数 (默认: 40)")
-    parser.add_argument("--selection-ratio", type=float, default=0.2, help="选择比例 (默认: 0.2)")
-    parser.add_argument("--save-plots", action="store_true", help="保存图片到文件")
-    parser.add_argument("--output-dir", default="./outputs/visual_figs/comprehensive_analysis", help="图片保存目录")
+def load_all_router_data_files(router_data_path):
+    """加载router_data文件或目录中的所有router_data文件"""
+    if os.path.isfile(router_data_path) and router_data_path.endswith('.pt'):
+        # 单个文件
+        return {os.path.basename(router_data_path).replace('_router_data.pt', ''): load_router_data(router_data_path)}
+    elif os.path.isdir(router_data_path):
+        # 目录，查找所有_router_data.pt文件
+        router_data_files = glob.glob(os.path.join(router_data_path, '*_router_data.pt'))
+        if not router_data_files:
+            raise ValueError(f"在目录 {router_data_path} 中未找到任何_router_data.pt文件")
+        
+        all_router_data = {}
+        for file_path in sorted(router_data_files):
+            dataset_name = os.path.basename(file_path).replace('_router_data.pt', '')
+            print(f"加载数据集: {dataset_name} - {file_path}")
+            all_router_data[dataset_name] = load_router_data(file_path)
+        
+        return all_router_data
+    else:
+        raise ValueError(f"路径不是有效的.pt文件或目录: {router_data_path}")
 
-    args = parser.parse_args()
 
-    # 创建输出目录
-    if args.save_plots:
-        os.makedirs(args.output_dir, exist_ok=True)
-
-    print("Select-MoE数据选择综合分析")
-    print("=" * 70)
-
-    # 1. 加载数据
-    print(f"加载路由数据: {args.router_data_path}")
-    router_data = load_router_data(args.router_data_path)
-
-    print(f"数据集: {router_data['dataset_name']}")
+def analyze_single_dataset(dataset_name, router_data, args):
+    """分析单个数据集"""
+    print(f"\n{'=' * 80}")
+    print(f"分析数据集: {dataset_name}")
+    print(f"{'=' * 80}")
+    
     print(f"总样本数: {len(router_data['sample_ids'])}")
     print(f"模型层数: {router_data['moe_logits'].shape[1]}")
     print(f"专家数量: {router_data['moe_logits'].shape[2]}")
@@ -440,10 +450,14 @@ def main():
 
     # 6. 创建综合可视化
     print("=" * 70)
-    print("创建综合可视化...")
+    print(f"创建{dataset_name}数据集综合可视化...")
     print("=" * 70)
 
-    save_path = os.path.join(args.output_dir, "comprehensive_analysis.png") if args.save_plots else None
+    save_path = None
+    if args.save_plots:
+        safe_dataset_name = dataset_name.replace('/', '_').replace('\\', '_')
+        save_path = os.path.join(args.output_dir, f"comprehensive_analysis_{safe_dataset_name}.png")
+    
     fig = create_comprehensive_visualization(
         router_data, distance_matrix, demo_indices, quality_scores, expert_usage, sample_entropy, strategies, save_path
     )
@@ -452,10 +466,9 @@ def main():
 
     # 7. 生成分析报告
     print("=" * 70)
-    print("分析总结")
+    print(f"{dataset_name} - 分析总结")
     print("=" * 70)
 
-    dataset_name = router_data["dataset_name"]
     n_total = len(router_data["sample_ids"])
     n_analyzed = len(demo_indices)
     n_selected = len(strategies["Quality"][0])
@@ -498,7 +511,81 @@ def main():
 
         print(f"  {strategy_name:>10}: 质量={selected_quality.mean():.4f}, 多样性={avg_diversity:.4f}")
 
-    print()
+    return {
+        'dataset_name': dataset_name,
+        'quality_scores': quality_scores,
+        'expert_usage': expert_usage,
+        'sample_entropy': sample_entropy,
+        'strategies': strategies,
+        'n_total': n_total
+    }
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Select-MoE综合数据选择分析")
+    parser.add_argument("router_data_path", help="路由数据文件路径(.pt格式)或包含多个router_data文件的目录")
+    parser.add_argument("--max-samples", type=int, default=40, help="分析的最大样本数 (默认: 40)")
+    parser.add_argument("--selection-ratio", type=float, default=0.2, help="选择比例 (默认: 0.2)")
+    parser.add_argument("--save-plots", action="store_true", help="保存图片到文件")
+    parser.add_argument("--output-dir", default="./outputs/visual_figs/comprehensive_analysis", help="图片保存目录")
+    parser.add_argument("--dataset-filter", help="只分析匹配此模式的数据集 (支持通配符)")
+
+    args = parser.parse_args()
+
+    # 创建输出目录
+    if args.save_plots:
+        os.makedirs(args.output_dir, exist_ok=True)
+
+    print("Select-MoE数据选择综合分析")
+    print("=" * 70)
+
+    # 1. 加载数据
+    print(f"加载路由数据: {args.router_data_path}")
+    all_router_data = load_all_router_data_files(args.router_data_path)
+    
+    # 过滤数据集
+    if args.dataset_filter:
+        import fnmatch
+        filtered_data = {}
+        for dataset_name in all_router_data:
+            if fnmatch.fnmatch(dataset_name, args.dataset_filter):
+                filtered_data[dataset_name] = all_router_data[dataset_name]
+        all_router_data = filtered_data
+        print(f"应用过滤器 '{args.dataset_filter}', 匹配到 {len(all_router_data)} 个数据集")
+    
+    print(f"将分析 {len(all_router_data)} 个数据集: {list(all_router_data.keys())}")
+    
+    # 分析每个数据集
+    all_results = []
+    for dataset_name, router_data in all_router_data.items():
+        result = analyze_single_dataset(dataset_name, router_data, args)
+        all_results.append(result)
+    
+    # 生成总体分析报告
+    if len(all_results) > 1:
+        print(f"\n{'=' * 80}")
+        print("总体分析报告")
+        print(f"{'=' * 80}")
+        
+        total_samples = sum(r['n_total'] for r in all_results)
+        avg_quality_scores = [r['quality_scores'].mean() for r in all_results]
+        avg_entropy_scores = [r['sample_entropy'].mean() for r in all_results]
+        
+        print(f"分析了 {len(all_results)} 个数据集，共 {total_samples} 个样本")
+        print(f"平均质量分数范围: {min(avg_quality_scores):.4f} - {max(avg_quality_scores):.4f}")
+        print(f"平均路由熵范围: {min(avg_entropy_scores):.4f} - {max(avg_entropy_scores):.4f}")
+        print()
+        
+        # 按数据集展示统计信息
+        print("各数据集统计:")
+        print(f"{'数据集':<15} {'样本数':<8} {'平均质量':<10} {'平均熵':<10} {'专家平衡度':<12}")
+        print("-" * 65)
+        for result in all_results:
+            balance = 1 - result['expert_usage'].std() * len(result['expert_usage'])
+            print(f"{result['dataset_name']:<15} {result['n_total']:<8} {result['quality_scores'].mean():<10.4f} "
+                  f"{result['sample_entropy'].mean():<10.4f} {balance:<12.4f}")
+    
+    print("\n" + "=" * 70)
     print("关键洞察:")
     print("1. 质量选择优化数据质量，但可能选择相似样本")
     print("2. 多样性选择确保样本覆盖面，但质量可能不是最高")

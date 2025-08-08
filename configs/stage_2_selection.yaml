@@ -12,7 +12,7 @@ selector_model:
 # Hydra settings to create a timestamped output directory, similar to stage 1
 hydra:
   run:
-    dir: outputs/stage_2_selection/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    dir: outputs/stage_2_selection/${now:%Y-%m-%d}/${now:%H-%M-%S}-${tag}
 
 # Path to the full rank weights from stage 1
 model_checkpoint_path: "outputs/stage_1_pretrain/2025-08-07/02-15-08-batch=4,lr=0.001/full_rank_weights.pt"
@@ -20,6 +20,8 @@ model_checkpoint_path: "outputs/stage_1_pretrain/2025-08-07/02-15-08-batch=4,lr=
 # The final output path for the selected data.
 # It uses the Hydra-generated run directory.
 output_path: "${hydra:run.dir}/selected_data.jsonl"
+
+tag: "none"
 
 # Dataset configuration - 使用与stage 1相同的4个数据集
 dataset:
@@ -62,3 +64,8 @@ distance_computation:
   # Batch size for distance matrix computation
   # Larger values are faster but use more GPU memory
   distance_batch_size: 1000
+  # FPS algorithm settings
+  # Log interval for FPS progress (log every N steps)
+  fps_log_interval: 100
+  # Enable memory-efficient FPS mode
+  fps_memory_efficient: true

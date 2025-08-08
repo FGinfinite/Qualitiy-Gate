@@ -12,6 +12,7 @@
 4. 重复步骤2-3直到选够指定数量的点
 
 这确保了选出的每个点都尽可能远离已选点，从而获得最大的多样性。
+支持读取整个router_data文件夹内的所有.pt文件，并对每个数据集进行FPS可视化分析。
 """
 
 import sys
@@ -26,15 +27,38 @@ import matplotlib.animation as animation
 from matplotlib.colors import ListedColormap
 import seaborn as sns
 from scipy.stats import wasserstein_distance
-from src.stages.selection import load_router_data, farthest_point_sampling
+from src.stages.selection import load_router_data, farthest_point_sampling_gpu, compute_batch_wasserstein_distance_gpu
 import argparse
+import glob
 
 
 plt.rcParams["font.sans-serif"] = ["Maple Mono NF CN"]
 
 
-def compute_distance_matrix(moe_logits, max_samples=50):
-    """计算样本间的Wasserstein距离矩阵"""
+def load_all_router_data_files(router_data_path):
+    """加载router_data文件或目录中的所有router_data文件"""
+    if os.path.isfile(router_data_path) and router_data_path.endswith('.pt'):
+        # 单个文件
+        return {os.path.basename(router_data_path).replace('_router_data.pt', ''): load_router_data(router_data_path)}
+    elif os.path.isdir(router_data_path):
+        # 目录，查找所有_router_data.pt文件
+        router_data_files = glob.glob(os.path.join(router_data_path, '*_router_data.pt'))
+        if not router_data_files:
+            raise ValueError(f"在目录 {router_data_path} 中未找到任何_router_data.pt文件")
+        
+        all_router_data = {}
+        for file_path in sorted(router_data_files):
+            dataset_name = os.path.basename(file_path).replace('_router_data.pt', '')
+            print(f"加载数据集: {dataset_name} - {file_path}")
+            all_router_data[dataset_name] = load_router_data(file_path)
+        
+        return all_router_data
+    else:
+        raise ValueError(f"路径不是有效的.pt文件或目录: {router_data_path}")
+
+
+def compute_distance_matrix(moe_logits, max_samples=50, use_gpu=True):
+    """计算样本间的Wasserstein距离矩阵，优先使用GPU加速"""
     n_samples = min(len(moe_logits), max_samples)
     selected_indices = np.linspace(0, len(moe_logits) - 1, n_samples, dtype=int)
 
@@ -43,25 +67,118 @@ def compute_distance_matrix(moe_logits, max_samples=50):
 
     print(f"计算{n_samples}个样本的距离矩阵...")
 
-    for i in range(n_samples):
-        for j in range(i + 1, n_samples):
-            # 转换为概率分布
-            probs_i = torch.softmax(moe_subset[i].float(), dim=-1)
-            probs_j = torch.softmax(moe_subset[j].float(), dim=-1)
+    # 尝试使用GPU加速计算
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
+    if device.type == "cuda" and use_gpu:
+        print("使用GPU加速计算...")
+        # 转换为概率并移至GPU
+        moe_probs = torch.softmax(moe_subset.float(), dim=-1).to(device)
+        
+        # 批量计算距离矩阵
+        gpu_distance_matrix = compute_batch_wasserstein_distance_gpu(moe_probs, moe_probs)
+        distance_matrix = gpu_distance_matrix.cpu().numpy()
+        
+        print(f"✓ GPU计算完成")
+    else:
+        print("使用CPU计算...")
+        for i in range(n_samples):
+            for j in range(i + 1, n_samples):
+                # 转换为概率分布
+                probs_i = torch.softmax(moe_subset[i].float(), dim=-1)
+                probs_j = torch.softmax(moe_subset[j].float(), dim=-1)
 
-            # 计算总Wasserstein距离
-            total_dist = 0
-            for layer_idx in range(probs_i.shape[0]):
-                prob1 = probs_i[layer_idx].numpy()
-                prob2 = probs_j[layer_idx].numpy()
-                expert_indices = np.arange(len(prob1))
-                layer_dist = wasserstein_distance(expert_indices, expert_indices, prob1, prob2)
-                total_dist += layer_dist
+                # 计算总Wasserstein距离
+                total_dist = 0
+                for layer_idx in range(probs_i.shape[0]):
+                    prob1 = probs_i[layer_idx].numpy()
+                    prob2 = probs_j[layer_idx].numpy()
+                    expert_indices = np.arange(len(prob1))
+                    layer_dist = wasserstein_distance(expert_indices, expert_indices, prob1, prob2)
+                    total_dist += layer_dist
 
-            distance_matrix[i, j] = total_dist
-            distance_matrix[j, i] = total_dist
+                distance_matrix[i, j] = total_dist
+                distance_matrix[j, i] = total_dist
 
     return distance_matrix, selected_indices
+
+
+def analyze_single_dataset(dataset_name, router_data, args):
+    """分析单个数据集的FPS算法"""
+    print(f"\n{'=' * 70}")
+    print(f"FPS算法可视化 - 数据集: {dataset_name}")
+    print(f"{'=' * 70}")
+    
+    moe_logits = router_data["moe_logits"]  # [N, L, E]
+    sample_ids = router_data["sample_ids"]
+
+    print(f"总样本数: {len(sample_ids)}")
+    print(f"将使用前{args.max_samples}个样本进行演示")
+    print()
+
+    # 2. 计算距离矩阵
+    distance_matrix, selected_indices_for_demo = compute_distance_matrix(moe_logits, args.max_samples)
+    n_total = distance_matrix.shape[0]
+    n_select = min(args.n_select, n_total - 1)
+
+    print(f"距离矩阵大小: {distance_matrix.shape}")
+    print(f"将从{n_total}个样本中选择{n_select}个")
+    print()
+
+    # 3. 执行FPS算法
+    print("执行FPS算法...")
+    fps_selected, fps_steps = fps_step_by_step(distance_matrix, n_select)
+
+    print(f"✓ FPS选择完成，选中样本索引: {fps_selected}")
+    print(f"✓ 记录了{len(fps_steps)}个步骤")
+    print()
+
+    # 4. 创建2D投影
+    print(f"创建2D投影 (方法: {args.projection_method})...")
+    coords_2d = create_2d_projection(distance_matrix, args.projection_method)
+    print("✓ 2D投影完成")
+    print()
+
+    # 5. 创建静态可视化
+    print(f"创建{dataset_name}数据集静态可视化...")
+    save_path_static = None
+    if args.save_plots:
+        safe_dataset_name = dataset_name.replace('/', '_').replace('\\', '_')
+        save_path_static = os.path.join(args.output_dir, f"fps_static_visualization_{safe_dataset_name}.png")
+        
+    fig_static = visualize_fps_static(distance_matrix, fps_selected, fps_steps, coords_2d, sample_ids, save_path_static)
+    plt.show()
+
+    # 6. 创建动画（可选）
+    if args.save_animation:
+        print(f"创建{dataset_name}数据集FPS算法动画...")
+        safe_dataset_name = dataset_name.replace('/', '_').replace('\\', '_')
+        save_path_anim = os.path.join(args.output_dir, f"fps_animation_{safe_dataset_name}.gif")
+        fig_anim, anim = create_fps_animation(distance_matrix, fps_steps, coords_2d, save_path_anim)
+        # 显示第一帧
+        plt.show()
+
+    # 7. 验证与selection.py中实现的一致性
+    print("验证与selection.py中FPS实现的一致性...")
+    distance_tensor = torch.from_numpy(distance_matrix).float()
+    if torch.cuda.is_available():
+        distance_tensor = distance_tensor.cuda()
+    reference_selected = farthest_point_sampling_gpu(distance_tensor, n_select, seed=42)
+
+    if fps_selected == reference_selected:
+        print("✓ 与selection.py中的FPS实现结果一致")
+    else:
+        print("⚠ 与selection.py中的FPS实现结果不一致")
+        print(f"  当前实现: {fps_selected}")
+        print(f"  参考实现: {reference_selected}")
+
+    return {
+        'dataset_name': dataset_name,
+        'fps_selected': fps_selected,
+        'distance_matrix': distance_matrix,
+        'n_total': n_total,
+        'n_selected': n_select
+    }
 
 
 def fps_step_by_step(distance_matrix, n_select, seed=42):
@@ -319,7 +436,7 @@ def visualize_fps_static(distance_matrix, selected_indices, steps, coords_2d, sa
     )
     ax6.axis("off")
 
-    plt.suptitle(f"最远点采样(FPS)算法可视化 - 从{n_total}个样本中选择{n_select}个", fontsize=16, y=0.98)
+    plt.suptitle(f"最远点采样(FPS)算法可视化 - {router_data.get('dataset_name', '未知数据集')} - 从{n_total}个样本中选择{n_select}个", fontsize=16, y=0.98)
     plt.tight_layout()
 
     plt.rcParams["font.sans-serif"] = ["Maple Mono NF CN"]
@@ -456,13 +573,15 @@ def create_fps_animation(distance_matrix, steps, coords_2d, save_path=None):
 
 def main():
     parser = argparse.ArgumentParser(description="FPS算法可视化演示")
-    parser.add_argument("router_data_path", help="路由数据文件路径(.pt格式)")
+    parser.add_argument("router_data_path", help="路由数据文件路径(.pt格式)或包含多个router_data文件的目录")
     parser.add_argument("--max-samples", type=int, default=30, help="使用的最大样本数 (默认: 30)")
     parser.add_argument("--n-select", type=int, default=8, help="选择的样本数 (默认: 8)")
     parser.add_argument("--save-plots", action="store_true", help="保存图片到文件")
     parser.add_argument("--save-animation", action="store_true", help="保存动画到文件")
     parser.add_argument("--output-dir", default="./outputs/visual_figs/fps_plots", help="图片保存目录")
     parser.add_argument("--projection-method", choices=["mds", "pca"], default="mds", help="2D投影方法 (默认: mds)")
+    parser.add_argument("--dataset-filter", help="只分析匹配此模式的数据集 (支持通配符)")
+    parser.add_argument("--disable-gpu", action="store_true", help="禁用GPU加速，强制使用CPU计算")
 
     args = parser.parse_args()
 
@@ -472,78 +591,64 @@ def main():
 
     print("最远点采样(FPS)算法可视化演示")
     print("=" * 70)
-
+    
     # 1. 加载数据
     print(f"加载路由数据: {args.router_data_path}")
-    router_data = load_router_data(args.router_data_path)
+    all_router_data = load_all_router_data_files(args.router_data_path)
+    
+    # 过滤数据集
+    if args.dataset_filter:
+        import fnmatch
+        filtered_data = {}
+        for dataset_name in all_router_data:
+            if fnmatch.fnmatch(dataset_name, args.dataset_filter):
+                filtered_data[dataset_name] = all_router_data[dataset_name]
+        all_router_data = filtered_data
+        print(f"应用过滤器 '{args.dataset_filter}', 匹配到 {len(all_router_data)} 个数据集")
+    
+    print(f"将分析 {len(all_router_data)} 个数据集: {list(all_router_data.keys())}")
+    
+    # 分析每个数据集
+    all_results = []
+    for dataset_name, router_data in all_router_data.items():
+        result = analyze_single_dataset(dataset_name, router_data, args)
+        all_results.append(result)
+    
+    # 生成总体分析报告
+    if len(all_results) > 1:
+        print(f"\n{'=' * 80}")
+        print("总体FPS分析报告")
+        print(f"{'=' * 80}")
+        
+        total_samples = sum(r['n_total'] for r in all_results)
+        total_selected = sum(r['n_selected'] for r in all_results)
+        
+        print(f"分析了 {len(all_results)} 个数据集")
+        print(f"总样本数: {total_samples}")
+        print(f"总选择数: {total_selected}")
+        print()
+        
+        # 按数据集展示统计信息
+        print("各数据集FPS选择统计:")
+        print(f"{'数据集':<15} {'分析样本数':<12} {'选择样本数':<12} {'选择率':<8} {'平均距离':<12}")
+        print("-" * 70)
+        for result in all_results:
+            avg_distance = result['distance_matrix'][result['distance_matrix'] > 0].mean()
+            selection_rate = result['n_selected'] / result['n_total']
+            print(f"{result['dataset_name']:<15} {result['n_total']:<12} {result['n_selected']:<12} "
+                  f"{selection_rate:<8.2%} {avg_distance:<12.4f}")
 
-    moe_logits = router_data["moe_logits"]  # [N, L, E]
-    sample_ids = router_data["sample_ids"]
-    dataset_name = router_data["dataset_name"]
-
-    print(f"数据集: {dataset_name}")
-    print(f"总样本数: {len(sample_ids)}")
-    print(f"将使用前{args.max_samples}个样本进行演示")
-    print()
-
-    # 2. 计算距离矩阵
-    distance_matrix, selected_indices_for_demo = compute_distance_matrix(moe_logits, args.max_samples)
-    n_total = distance_matrix.shape[0]
-    n_select = min(args.n_select, n_total - 1)
-
-    print(f"距离矩阵大小: {distance_matrix.shape}")
-    print(f"将从{n_total}个样本中选择{n_select}个")
-    print()
-
-    # 3. 执行FPS算法
-    print("执行FPS算法...")
-    fps_selected, fps_steps = fps_step_by_step(distance_matrix, n_select)
-
-    print(f"✓ FPS选择完成，选中样本索引: {fps_selected}")
-    print(f"✓ 记录了{len(fps_steps)}个步骤")
-    print()
-
-    # 4. 创建2D投影
-    print(f"创建2D投影 (方法: {args.projection_method})...")
-    coords_2d = create_2d_projection(distance_matrix, args.projection_method)
-    print("✓ 2D投影完成")
-    print()
-
-    # 5. 创建静态可视化
-    print("创建静态可视化...")
-    save_path_static = os.path.join(args.output_dir, "fps_static_visualization.png") if args.save_plots else None
-    fig_static = visualize_fps_static(distance_matrix, fps_selected, fps_steps, coords_2d, sample_ids, save_path_static)
-    plt.show()
-
-    # 6. 创建动画（可选）
-    if args.save_animation:
-        print("创建FPS算法动画...")
-        save_path_anim = os.path.join(args.output_dir, "fps_animation.gif")
-        fig_anim, anim = create_fps_animation(distance_matrix, fps_steps, coords_2d, save_path_anim)
-        # 显示第一帧
-        plt.show()
-
-    # 7. 验证与selection.py中实现的一致性
-    print("验证与selection.py中FPS实现的一致性...")
-    reference_selected = farthest_point_sampling(distance_matrix, n_select, seed=42)
-
-    if fps_selected == reference_selected:
-        print("✓ 与selection.py中的FPS实现结果一致")
-    else:
-        print("⚠ 与selection.py中的FPS实现结果不一致")
-        print(f"  当前实现: {fps_selected}")
-        print(f"  参考实现: {reference_selected}")
-
-    print()
-    print("=" * 70)
-    print("可视化完成！")
-    print()
+    print("\n" + "=" * 70)
     print("FPS算法关键概念：")
     print("1. 贪心策略：每次选择距离已选点集最远的点")
     print("2. 多样性最大化：确保选出的样本在特征空间中尽可能分散")
     print("3. 时间复杂度：O(n²k)，其中n是总样本数，k是选择数量")
     print("4. 应用场景：在计算Wasserstein距离后，选择最多样化的数据子集")
     print("5. 优点：简单高效，能有效避免选择相似的样本")
+    print("6. GPU加速：支持批量计算Wasserstein距离，显著提升大规模数据处理效率")
+    
+    print("=" * 70)
+    print("可视化完成！")
 
 
 if __name__ == "__main__":

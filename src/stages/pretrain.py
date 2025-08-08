@@ -92,6 +92,8 @@ def get_model_and_tokenizer(
         model.config.trash_expert_mode = cfg.training.trash_expert_mode
     if hasattr(cfg.training, "enable_load_balancing"):
         model.config.enable_load_balancing = cfg.training.enable_load_balancing
+    if hasattr(cfg.training, "output_router_logits"):
+        model.config.output_router_logits = cfg.training.output_router_logits
 
     # 加载分词器（使用原始模型名称）
     tokenizer = AutoTokenizer.from_pretrained(cfg.selector_model.tokenizer_name)

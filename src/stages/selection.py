@@ -5,7 +5,6 @@ import os
 from typing import List, Tuple
 
 import hydra
-import numpy as np
 import torch
 from omegaconf import DictConfig
 from torch.utils.data import DataLoader
@@ -101,7 +100,7 @@ def calculate_quality_score_from_gates(
 
 def compute_wasserstein_distance_matrix(
     logits_tensors: List[torch.Tensor], device: torch.device, batch_size: int = 1000
-) -> np.ndarray:
+) -> torch.Tensor:
     """
     计算所有样本对之间的Wasserstein距离矩阵（GPU加速）
 
@@ -111,7 +110,7 @@ def compute_wasserstein_distance_matrix(
         batch_size: 批处理大小，控制GPU内存使用
 
     Returns:
-        距离矩阵: [N, N] 形状的numpy数组
+        距离矩阵: [N, N] 形状的GPU张量
     """
     n_samples = len(logits_tensors)
     log = logging.getLogger(__name__)
@@ -127,7 +126,6 @@ def compute_wasserstein_distance_matrix(
     # 堆叠成一个大张量 [N, L, E]
     all_probs = torch.stack(prob_tensors)  # [N, L, E]
     n_samples = all_probs.shape[0]
-    # n_layers, n_experts = all_probs.shape[1], all_probs.shape[2]  # 未使用，注释掉
 
     log.info(f"概率张量形状: {all_probs.shape}")
 
@@ -154,7 +152,7 @@ def compute_wasserstein_distance_matrix(
                 distance_matrix[start_j:end_j, start_i:end_i] = batch_distances.T
 
     log.info(f"GPU距离矩阵计算完成，形状: {distance_matrix.shape}")
-    return distance_matrix.cpu().numpy()
+    return distance_matrix
 
 
 def compute_batch_wasserstein_distance_gpu(batch_probs_i: torch.Tensor, batch_probs_j: torch.Tensor) -> torch.Tensor:
@@ -193,54 +191,81 @@ def compute_batch_wasserstein_distance_gpu(batch_probs_i: torch.Tensor, batch_pr
 
 
 
-def farthest_point_sampling(distance_matrix: np.ndarray, n_samples: int, seed: int = 42) -> List[int]:
+def farthest_point_sampling_gpu(
+    distance_matrix: torch.Tensor, n_samples: int, quality_scores: List[float] = None, seed: int = 42, log_interval: int = 100
+) -> List[int]:
     """
-    使用最远点采样(FPS)算法选择多样化样本
+    使用GPU加速的最远点采样(FPS)算法选择多样化样本
 
     Args:
-        distance_matrix: [N, N] 距离矩阵
+        distance_matrix: [N, N] GPU上的距离矩阵
         n_samples: 要选择的样本数量
+        quality_scores: 质量分数列表，用于选择初始点（可选）
         seed: 随机种子
+        log_interval: 日志输出间隔
 
     Returns:
         选中样本的索引列表
     """
-    np.random.seed(seed)
+    log = logging.getLogger(__name__)
+    device = distance_matrix.device
     n_total = distance_matrix.shape[0]
 
     if n_samples >= n_total:
         return list(range(n_total))
 
-    # 1. 随机选择初始点
-    selected_indices = [np.random.randint(0, n_total)]
-    log = logging.getLogger(__name__)
-    log.info(f"FPS初始点: {selected_indices[0]}")
+    # 设置随机种子
+    torch.manual_seed(seed)
+    if device.type == "cuda":
+        torch.cuda.manual_seed(seed)
+
+    # 初始化选择状态和距离向量
+    selected = torch.zeros(n_total, dtype=torch.bool, device=device)
+    min_distances = torch.full((n_total,), float('inf'), device=device)
+    selected_indices = []
+
+    log.info(f"GPU FPS: 从 {n_total} 个样本中选择 {n_samples} 个")
+
+    # 1. 选择初始点 - 优先使用质量分数最高的点
+    if quality_scores is not None and len(quality_scores) == n_total:
+        # 使用质量分数最高的点作为初始点
+        quality_tensor = torch.tensor(quality_scores, device=device)
+        first_idx = quality_tensor.argmax().item()
+        log.info(f"FPS初始点: {first_idx} (质量分数: {quality_scores[first_idx]:.6f})")
+    else:
+        # 回退到随机选择
+        first_idx = torch.randint(0, n_total, (1,), device=device).item()
+        log.info(f"FPS初始点: {first_idx} (随机选择)")
+    
+    selected[first_idx] = True
+    selected_indices.append(first_idx)
+
+    # 更新到初始点的距离
+    min_distances = distance_matrix[first_idx].clone()
+    min_distances[first_idx] = 0  # 已选点距离设为0
 
     # 2. 贪心选择剩余点
     for step in range(1, n_samples):
-        max_min_distance = -1.0
-        best_candidate = -1
+        # 在未选择的点中找到距离最大的点（向量化操作）
+        candidate_distances = min_distances.clone()
+        candidate_distances[selected] = -1  # 已选点设为负值，排除
 
-        # 对每个未选择的点，计算到已选点集的最小距离
-        for candidate in range(n_total):
-            if candidate in selected_indices:
-                continue
+        next_idx = candidate_distances.argmax().item()
+        max_distance = candidate_distances[next_idx].item()
 
-            # 计算candidate到已选点集的最小距离
-            min_distance_to_selected = min(
-                distance_matrix[candidate, selected_idx] for selected_idx in selected_indices
-            )
+        # 更新选择状态
+        selected[next_idx] = True
+        selected_indices.append(next_idx)
 
-            # 选择最小距离最大的点
-            if min_distance_to_selected > max_min_distance:
-                max_min_distance = min_distance_to_selected
-                best_candidate = candidate
+        # 批量更新所有点到已选点集的最小距离（向量化操作）
+        new_distances = distance_matrix[next_idx]
+        min_distances = torch.min(min_distances, new_distances)
+        min_distances[selected] = 0  # 已选点距离保持为0
 
-        selected_indices.append(best_candidate)
-        if step % 100 == 0 or step < 10:
-            log.info(f"FPS第{step}步: 选择点{best_candidate}, 最小距离={max_min_distance:.4f}")
+        if step % log_interval == 0 or step < 10:
+            log.info(f"FPS第{step}步: 选择点{next_idx}, 最大最小距离={max_distance:.4f}")
 
-    log.info(f"FPS完成，选择了{len(selected_indices)}个样本")
+    log.info(f"GPU FPS完成，选择了{len(selected_indices)}个样本")
     return selected_indices
 
 
@@ -252,6 +277,7 @@ def diversity_based_selection(
     enable_diversity: bool = True,
     device: torch.device = None,
     distance_batch_size: int = 1000,
+    fps_log_interval: int = 100,
 ) -> List[dict]:
     """
     基于多样性的数据选择（支持两阶段选择策略）
@@ -264,6 +290,7 @@ def diversity_based_selection(
         enable_diversity: 是否启用多样性选择（False时回退到质量分数选择）
         device: GPU设备
         distance_batch_size: GPU批处理大小
+        fps_log_interval: FPS日志输出间隔
 
     Returns:
         选择后的数据列表
@@ -325,6 +352,7 @@ def diversity_based_selection(
             stage2_selection_ratio,
             device,
             distance_batch_size,
+            fps_log_interval,
         )
 
         log.info(f"两阶段选择完成: 最终选择了 {len(selected_data)} 个样本")
@@ -336,7 +364,7 @@ def diversity_based_selection(
         log.info(f"启用单阶段多样性选择: 从 {total_samples} 个样本中选择 {n_select} 个")
 
         selected_data = _perform_diversity_selection(
-            scored_data, all_logits_by_dataset, selection_percentage, device, distance_batch_size
+            scored_data, all_logits_by_dataset, selection_percentage, device, distance_batch_size, fps_log_interval
         )
 
         return selected_data
@@ -348,6 +376,7 @@ def _perform_diversity_selection(
     selection_percentage: float,
     device: torch.device,
     distance_batch_size: int,
+    fps_log_interval: int = 100,
 ) -> List[dict]:
     """
     执行多样性选择的核心逻辑
@@ -358,6 +387,7 @@ def _perform_diversity_selection(
         selection_percentage: 选择比例
         device: GPU设备
         distance_batch_size: GPU批处理大小
+        fps_log_interval: FPS日志输出间隔
 
     Returns:
         选择后的数据列表
@@ -401,8 +431,11 @@ def _perform_diversity_selection(
         all_logits, device=device, batch_size=distance_batch_size
     )
 
-    # 3. 使用FPS选择多样化样本
-    selected_indices = farthest_point_sampling(distance_matrix, n_select)
+    # 3. 使用GPU FPS选择多样化样本，传递质量分数用于初始点选择
+    sample_quality_scores = [item["scores"] for item in sample_to_data_mapping]
+    selected_indices = farthest_point_sampling_gpu(
+        distance_matrix, n_select, quality_scores=sample_quality_scores, log_interval=fps_log_interval
+    )
 
     # 4. 根据选择的索引返回对应的数据
     selected_data = [sample_to_data_mapping[idx] for idx in selected_indices]
@@ -606,8 +639,6 @@ def select(cfg: DictConfig) -> None:
             log.info(f"Router logits形状: {all_router_logits.shape}")
             log.info(f"批次大小: {batch_size}, 序列长度: {sequence_length}")
 
-        # 为了简化，我们不再处理重塑的MoE logits，直接使用质量门输出
-
         # 计算质量分数 - 使用新架构的质量门输出
         for j in range(batch_size):
             dataset_name = dataset_names[j]
@@ -717,50 +748,12 @@ def select(cfg: DictConfig) -> None:
                 }
             )
 
-    # 5. 筛选和保存数据 - 使用多样性选择算法
-    log.info("开始多样性数据选择...")
-
-    # 检查是否启用多样性选择
-    enable_diversity = getattr(cfg, "enable_diversity_selection", True)
-    log.info(f"多样性选择模式: {'启用' if enable_diversity else '禁用(使用质量分数)'}")
-
-    # 使用多样性选择算法
-    distance_batch_size = getattr(cfg.distance_computation, "distance_batch_size", 1000)
-    importance_selection_percentage = getattr(cfg, "importance_selection_percentage", None)
-
-    # 直接使用路由数据进行多样性选择
-    all_logits_by_dataset = {name: all_router_data_by_dataset[name]["moe_logits"] for name in cfg.dataset.dataset_names}
-
-    selected_data = diversity_based_selection(
-        scored_data=scored_data,
-        all_logits_by_dataset=all_logits_by_dataset,
-        selection_percentage=cfg.selection_percentage,
-        importance_selection_percentage=importance_selection_percentage,
-        enable_diversity=enable_diversity,
-        device=device,
-        distance_batch_size=distance_batch_size,
-    )
-
-    log.info(f"选择了前 {len(selected_data)} 个样本 ({cfg.selection_percentage * 100:.2f}%)")
-    if len(selected_data) > 3:
-        log.info(f"前3个分数: {[d['scores'] for d in selected_data[:3]]}")
-        log.info(f"后3个分数: {[d['scores'] for d in selected_data[-3:]]}")
-
-    # 保存选择的数据
+    # 5. 立即保存完整的路由张量文件（包含质量门和MoE路由输出）
+    log.info("模型推理完成，立即保存完整路由张量文件...")
     output_path = hydra.utils.to_absolute_path(cfg.output_path)
-    log.info(f"确保输出目录存在: {output_path}")
-
     output_dir = os.path.dirname(output_path)
     os.makedirs(output_dir, exist_ok=True)
 
-    with open(output_path, "w", encoding="utf-8") as f:
-        for item in selected_data:
-            f.write(json.dumps(item, ensure_ascii=False) + "\n")
-
-    log.info(f"筛选后的数据已保存到: {output_path}")
-
-    # 6. 保存完整的路由张量文件（包含质量门和MoE路由输出）
-    log.info("保存完整路由张量文件...")
     router_data_dir = os.path.join(output_dir, "router_data")
     os.makedirs(router_data_dir, exist_ok=True)
 
@@ -798,5 +791,72 @@ def select(cfg: DictConfig) -> None:
 
         else:
             log.warning(f"数据集 '{dataset_name}' 没有路由数据")
+
+    # 释放模型和GPU内存，为距离计算腾出空间
+    log.info("释放模型实例和GPU内存...")
+    del model
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+    log.info("模型内存已释放")
+
+    # 6. 尝试进行多样性数据选择
+    log.info("开始多样性数据选择...")
+
+    # 检查是否启用多样性选择
+    enable_diversity = getattr(cfg, "enable_diversity_selection", True)
+    log.info(f"多样性选择模式: {'启用' if enable_diversity else '禁用(使用质量分数)'}")
+
+    # 使用多样性选择算法
+    distance_batch_size = getattr(cfg.distance_computation, "distance_batch_size", 1000)
+    fps_log_interval = getattr(cfg.distance_computation, "fps_log_interval", 100)
+    importance_selection_percentage = getattr(cfg, "importance_selection_percentage", None)
+
+    # 直接使用路由数据进行多样性选择
+    all_logits_by_dataset = {name: all_router_data_by_dataset[name]["moe_logits"] for name in cfg.dataset.dataset_names}
+
+    try:
+        selected_data = diversity_based_selection(
+            scored_data=scored_data,
+            all_logits_by_dataset=all_logits_by_dataset,
+            selection_percentage=cfg.selection_percentage,
+            importance_selection_percentage=importance_selection_percentage,
+            enable_diversity=enable_diversity,
+            device=device,
+            distance_batch_size=distance_batch_size,
+            fps_log_interval=fps_log_interval,
+        )
+    except torch.OutOfMemoryError as e:
+        log.error(f"GPU内存不足，距离计算失败: {e}")
+        log.error("但是，宝贵的logits张量已经安全保存！")
+        log.info("您可以使用独立脚本继续数据选择过程:")
+        log.info(f"  python scripts/continue_selection.py --router_data_dir {router_data_dir} "
+                 f"--output_path {output_path} --selection_percentage {cfg.selection_percentage}")
+        if importance_selection_percentage:
+            log.info(f"  添加参数: --importance_selection_percentage "
+                     f"{importance_selection_percentage}")
+        if not enable_diversity:
+            log.info("  添加参数: --disable_diversity")
+        log.info(f"  添加参数: --distance_batch_size {distance_batch_size}")
+        raise
+    except Exception as e:
+        log.error(f"数据选择过程中发生错误: {e}")
+        log.error("但是，宝贵的logits张量已经安全保存！")
+        log.info("您可以使用独立脚本继续数据选择过程:")
+        log.info(f"  python scripts/continue_selection.py --router_data_dir {router_data_dir} "
+                 f"--output_path {output_path}")
+        raise
+
+    log.info(f"选择了前 {len(selected_data)} 个样本 ({cfg.selection_percentage * 100:.2f}%)")
+    if len(selected_data) > 3:
+        log.info(f"前3个分数: {[d['scores'] for d in selected_data[:3]]}")
+        log.info(f"后3个分数: {[d['scores'] for d in selected_data[-3:]]}")
+
+    # 保存选择的数据
+    with open(output_path, "w", encoding="utf-8") as f:
+        for item in selected_data:
+            f.write(json.dumps(item, ensure_ascii=False) + "\n")
+
+    log.info(f"筛选后的数据已保存到: {output_path}")
 
     log.info("--- 阶段2：数据选择完成 ---")

@@ -4,13 +4,14 @@
 演示如何加载和使用新的路由数据格式
 """
 
-import sys
 import os
+import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import torch
-from src.stages.selection import load_router_data, get_sample_router_info
+
+from src.stages.selection import get_sample_router_info, load_router_data
 
 
 def analyze_router_data(router_data_path: str):

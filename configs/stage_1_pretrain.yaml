@@ -65,4 +65,5 @@ training:
   quality_gate_init_std: 0.02
   trash_expert_mode: "zero"  # Options: "zero", "noise", "custom"
   enable_load_balancing: false
+  output_router_logits: true
 

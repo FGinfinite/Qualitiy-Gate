@@ -614,6 +614,7 @@ class SelectMoeForCausalLM(SelectMoePreTrainedModel):
             quality_loss = quality_classification_loss(
                 outputs.router_logits if return_dict else outputs[-1], self.config
             )
+            # print(f"Quality Loss: {quality_loss.item()}")
             aux_loss += self.config.quality_loss_weight * quality_loss
 
             if labels is not None:

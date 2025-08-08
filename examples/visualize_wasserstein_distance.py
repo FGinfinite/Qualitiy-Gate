@@ -7,6 +7,7 @@ Wasserstein距离也被称为Earth Mover's Distance（EMD），用于衡量两�
 
 在Select-MoE项目中，我们使用Wasserstein距离来衡量不同样本的MoE路由分布之间的相似性。
 距离越大，样本的路由模式差异越大，从而在多样性选择中被认为是更加多样化的样本。
+支持读取整个router_data文件夹内的所有.pt文件，并对每个数据集进行Wasserstein距离分析。
 """
 
 import os
@@ -15,6 +16,7 @@ import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import argparse
+import glob
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -28,6 +30,28 @@ from src.stages.selection import (
 )
 
 plt.rcParams["font.sans-serif"] = ["Maple Mono NF CN"]
+
+
+def load_all_router_data_files(router_data_path):
+    """加载router_data文件或目录中的所有router_data文件"""
+    if os.path.isfile(router_data_path) and router_data_path.endswith('.pt'):
+        # 单个文件
+        return {os.path.basename(router_data_path).replace('_router_data.pt', ''): load_router_data(router_data_path)}
+    elif os.path.isdir(router_data_path):
+        # 目录，查找所有_router_data.pt文件
+        router_data_files = glob.glob(os.path.join(router_data_path, '*_router_data.pt'))
+        if not router_data_files:
+            raise ValueError(f"在目录 {router_data_path} 中未找到任何_router_data.pt文件")
+        
+        all_router_data = {}
+        for file_path in sorted(router_data_files):
+            dataset_name = os.path.basename(file_path).replace('_router_data.pt', '')
+            print(f"加载数据集: {dataset_name} - {file_path}")
+            all_router_data[dataset_name] = load_router_data(file_path)
+        
+        return all_router_data
+    else:
+        raise ValueError(f"路径不是有效的.pt文件或目录: {router_data_path}")
 
 
 def visualize_probability_distributions(probs1, probs2, layer_idx=0, title_suffix=""):
@@ -193,14 +217,12 @@ def demonstrate_gpu_computation(probs1, probs2):
     print()
 
 
-def create_distance_heatmap(router_data_path, max_samples=20):
+def create_distance_heatmap(router_data, max_samples=20):
     """创建样本间距离的热力图"""
     print("=" * 70)
     print("创建样本间Wasserstein距离热力图")
     print("=" * 70)
 
-    # 加载路由数据
-    router_data = load_router_data(router_data_path)
     moe_logits = router_data["moe_logits"]  # [N, L, E]
     sample_ids = router_data["sample_ids"]
 
@@ -216,29 +238,44 @@ def create_distance_heatmap(router_data_path, max_samples=20):
     # 计算距离矩阵
     distance_matrix = np.zeros((n_samples, n_samples))
 
-    for i in range(n_samples):
-        for j in range(i + 1, n_samples):
-            # 转换为概率分布
-            probs_i = torch.softmax(moe_subset[i].float(), dim=-1)
-            probs_j = torch.softmax(moe_subset[j].float(), dim=-1)
+    # 尝试使用GPU加速计算
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
+    if device.type == "cuda":
+        print("使用GPU加速计算...")
+        # 转换为概率并移至GPU
+        moe_probs = torch.softmax(moe_subset.float(), dim=-1).to(device)
+        
+        # 批量计算距离矩阵
+        gpu_distance_matrix = compute_batch_wasserstein_distance_gpu(moe_probs, moe_probs)
+        distance_matrix = gpu_distance_matrix.cpu().numpy()
+        
+        print(f"✓ GPU计算完成")
+    else:
+        print("使用CPU计算...")
+        for i in range(n_samples):
+            for j in range(i + 1, n_samples):
+                # 转换为概率分布
+                probs_i = torch.softmax(moe_subset[i].float(), dim=-1)
+                probs_j = torch.softmax(moe_subset[j].float(), dim=-1)
 
-            # 计算总距离
-            total_dist = 0
-            for layer_idx in range(probs_i.shape[0]):
-                prob1 = probs_i[layer_idx].numpy()
-                prob2 = probs_j[layer_idx].numpy()
-                expert_indices = np.arange(len(prob1))
-                layer_dist = wasserstein_distance(expert_indices, expert_indices, prob1, prob2)
-                total_dist += layer_dist
+                # 计算总距离
+                total_dist = 0
+                for layer_idx in range(probs_i.shape[0]):
+                    prob1 = probs_i[layer_idx].numpy()
+                    prob2 = probs_j[layer_idx].numpy()
+                    expert_indices = np.arange(len(prob1))
+                    layer_dist = wasserstein_distance(expert_indices, expert_indices, prob1, prob2)
+                    total_dist += layer_dist
 
-            distance_matrix[i, j] = total_dist
-            distance_matrix[j, i] = total_dist
+                distance_matrix[i, j] = total_dist
+                distance_matrix[j, i] = total_dist
 
     # 创建热力图
     plt.figure(figsize=(12, 10))
 
     # 简化样本ID显示
-    short_ids = [id.split("_")[1] if "_" in id else id for id in ids_subset]
+    short_ids = [sample_id.split("_")[1] if "_" in sample_id else sample_id for sample_id in ids_subset]
 
     mask = np.triu(np.ones_like(distance_matrix, dtype=bool), k=1)
     sns.heatmap(
@@ -253,7 +290,7 @@ def create_distance_heatmap(router_data_path, max_samples=20):
     )
 
     plt.title(
-        f"样本间Wasserstein距离热力图\n({router_data['dataset_name']}数据集，{n_samples}个样本)",
+        f"样本间Wasserstein距离热力图 - {router_data['dataset_name']}\n({n_samples}个样本)",
         fontsize=14,
         pad=20,
     )
@@ -273,35 +310,14 @@ def create_distance_heatmap(router_data_path, max_samples=20):
     return plt.gcf(), distance_matrix
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Wasserstein距离计算和可视化")
-    parser.add_argument("router_data_path", help="路由数据文件路径(.pt格式)")
-    parser.add_argument("--sample1-idx", type=int, default=0, help="第一个样本的索引 (默认: 0)")
-    parser.add_argument("--sample2-idx", type=int, default=1, help="第二个样本的索引 (默认: 1)")
-    parser.add_argument("--layer-idx", type=int, default=0, help="要详细分析的层索引 (默认: 0)")
-    parser.add_argument("--save-plots", action="store_true", help="保存图片到文件")
-    parser.add_argument(
-        "--output-dir",
-        default="./outputs/visual_figs/wasserstein_plots",
-        help="图片保存目录",
-    )
-
-    args = parser.parse_args()
-
-    # 创建输出目录
-    if args.save_plots:
-        os.makedirs(args.output_dir, exist_ok=True)
-
-    print("Wasserstein距离计算可视化演示")
-    print("=" * 70)
-
-    # 1. 加载数据
-    print(f"加载路由数据: {args.router_data_path}")
-    router_data = load_router_data(args.router_data_path)
-
+def analyze_single_dataset_wasserstein(dataset_name, router_data, args):
+    """分析单个数据集的Wasserstein距离"""
+    print(f"\n{'=' * 80}")
+    print(f"Wasserstein距离分析 - 数据集: {dataset_name}")
+    print(f"{'=' * 80}")
+    
     moe_logits = router_data["moe_logits"]  # [N, L, E]
     sample_ids = router_data["sample_ids"]
-    dataset_name = router_data["dataset_name"]
 
     print(f"数据集: {dataset_name}")
     print(f"样本数: {len(sample_ids)}")
@@ -333,17 +349,15 @@ def main():
 
     # 4. 可视化特定层的分布
     layer_idx = min(args.layer_idx, probs1.shape[0] - 1)
-    title_suffix = f" (样本{sample1_idx} vs 样本{sample2_idx})"
+    title_suffix = f" ({dataset_name} - 样本{sample1_idx} vs 样本{sample2_idx})"
 
     fig1, layer_wasserstein = visualize_probability_distributions(probs1, probs2, layer_idx, title_suffix)
 
     if args.save_plots:
-        fig1.savefig(
-            os.path.join(args.output_dir, f"layer_{layer_idx}_comparison.png"),
-            dpi=300,
-            bbox_inches="tight",
-        )
-        print(f"✓ 已保存层分析图: {args.output_dir}/layer_{layer_idx}_comparison.png")
+        safe_dataset_name = dataset_name.replace('/', '_').replace('\\', '_')
+        save_path = os.path.join(args.output_dir, f"layer_{layer_idx}_comparison_{safe_dataset_name}.png")
+        fig1.savefig(save_path, dpi=300, bbox_inches="tight")
+        print(f"✓ 已保存层分析图: {save_path}")
 
     plt.show()
 
@@ -351,15 +365,13 @@ def main():
     demonstrate_gpu_computation(probs1, probs2)
 
     # 6. 创建距离热力图
-    fig2, dist_matrix = create_distance_heatmap(args.router_data_path, max_samples=15)
+    fig2, dist_matrix = create_distance_heatmap(router_data, max_samples=15)
 
     if args.save_plots:
-        fig2.savefig(
-            os.path.join(args.output_dir, "distance_heatmap.png"),
-            dpi=300,
-            bbox_inches="tight",
-        )
-        print(f"✓ 已保存距离热力图: {args.output_dir}/distance_heatmap.png")
+        safe_dataset_name = dataset_name.replace('/', '_').replace('\\', '_')
+        save_path = os.path.join(args.output_dir, f"distance_heatmap_{safe_dataset_name}.png")
+        fig2.savefig(save_path, dpi=300, bbox_inches="tight")
+        print(f"✓ 已保存距离热力图: {save_path}")
 
     plt.show()
 
@@ -369,7 +381,7 @@ def main():
     plt.plot(layers, layer_distances, "o-", linewidth=2, markersize=6)
     plt.xlabel("层索引")
     plt.ylabel("Wasserstein距离")
-    plt.title(f"各层Wasserstein距离分布\n总距离: {total_distance:.4f}")
+    plt.title(f"{dataset_name} - 各层Wasserstein距离分布\n总距离: {total_distance:.4f}")
     plt.grid(True, alpha=0.3)
 
     # 标注最大和最小的几个点
@@ -398,24 +410,98 @@ def main():
     plt.tight_layout()
 
     if args.save_plots:
-        plt.savefig(
-            os.path.join(args.output_dir, "layer_distances.png"),
-            dpi=300,
-            bbox_inches="tight",
-        )
-        print(f"✓ 已保存层级距离图: {args.output_dir}/layer_distances.png")
+        safe_dataset_name = dataset_name.replace('/', '_').replace('\\', '_')
+        save_path = os.path.join(args.output_dir, f"layer_distances_{safe_dataset_name}.png")
+        plt.savefig(save_path, dpi=300, bbox_inches="tight")
+        print(f"✓ 已保存层级距离图: {save_path}")
 
     plt.show()
+    
+    return {
+        'dataset_name': dataset_name,
+        'total_distance': total_distance,
+        'layer_distances': layer_distances,
+        'average_distance': dist_matrix[dist_matrix > 0].mean() if dist_matrix[dist_matrix > 0].size > 0 else 0
+    }
 
+
+def main():
+    parser = argparse.ArgumentParser(description="Wasserstein距离计算和可视化")
+    parser.add_argument("router_data_path", help="路由数据文件路径(.pt格式)或包含多个router_data文件的目录")
+    parser.add_argument("--sample1-idx", type=int, default=0, help="第一个样本的索引 (默认: 0)")
+    parser.add_argument("--sample2-idx", type=int, default=1, help="第二个样本的索引 (默认: 1)")
+    parser.add_argument("--layer-idx", type=int, default=0, help="要详细分析的层索引 (默认: 0)")
+    parser.add_argument("--save-plots", action="store_true", help="保存图片到文件")
+    parser.add_argument("--output-dir", default="./outputs/visual_figs/wasserstein_plots", help="图片保存目录")
+    parser.add_argument("--dataset-filter", help="只分析匹配此模式的数据集 (支持通配符)")
+    parser.add_argument("--disable-gpu", action="store_true", help="禁用GPU加速，强制使用CPU计算")
+
+    args = parser.parse_args()
+
+    # 创建输出目录
+    if args.save_plots:
+        os.makedirs(args.output_dir, exist_ok=True)
+
+    print("Wasserstein距离计算可视化演示")
     print("=" * 70)
-    print("可视化完成！")
-    print()
+
+    # 1. 加载数据
+    print(f"加载路由数据: {args.router_data_path}")
+    all_router_data = load_all_router_data_files(args.router_data_path)
+    
+    # 过滤数据集
+    if args.dataset_filter:
+        import fnmatch
+        filtered_data = {}
+        for dataset_name in all_router_data:
+            if fnmatch.fnmatch(dataset_name, args.dataset_filter):
+                filtered_data[dataset_name] = all_router_data[dataset_name]
+        all_router_data = filtered_data
+        print(f"应用过滤器 '{args.dataset_filter}', 匹配到 {len(all_router_data)} 个数据集")
+    
+    print(f"将分析 {len(all_router_data)} 个数据集: {list(all_router_data.keys())}")
+    
+    # 分析每个数据集
+    all_results = []
+    for dataset_name, router_data in all_router_data.items():
+        result = analyze_single_dataset_wasserstein(dataset_name, router_data, args)
+        all_results.append(result)
+    
+    # 生成总体分析报告
+    if len(all_results) > 1:
+        print(f"\n{'=' * 80}")
+        print("总体Wasserstein距离分析报告")
+        print(f"{'=' * 80}")
+        
+        avg_total_distances = [r['total_distance'] for r in all_results]
+        avg_distances = [r['average_distance'] for r in all_results]
+        
+        print(f"分析了 {len(all_results)} 个数据集")
+        print(f"总距离范围: {min(avg_total_distances):.4f} - {max(avg_total_distances):.4f}")
+        print(f"平均样本间距离范围: {min(avg_distances):.4f} - {max(avg_distances):.4f}")
+        print()
+        
+        # 按数据集展示统计信息
+        print("各数据集Wasserstein距离统计:")
+        print(f"{'数据集':<15} {'样本总距离':<12} {'平均层距离':<12} {'最大层距离':<12} {'样本平均距离':<15}")
+        print("-" * 75)
+        for result in all_results:
+            avg_layer_distance = np.mean(result['layer_distances'])
+            max_layer_distance = np.max(result['layer_distances'])
+            print(f"{result['dataset_name']:<15} {result['total_distance']:<12.4f} "
+                  f"{avg_layer_distance:<12.4f} {max_layer_distance:<12.4f} {result['average_distance']:<15.4f}")
+
+    print("\n" + "=" * 70)
     print("关键概念解释：")
     print("1. Wasserstein距离衡量两个概率分布之间的差异")
     print("2. 在MoE模型中，每层每个token都会产生专家选择概率")
     print("3. 我们对每个样本在每层的专家概率进行平均，得到该样本该层的代表性分布")
     print("4. 通过计算所有层的Wasserstein距离总和，得到两个样本的总体差异")
     print("5. 距离越大的样本在多样性选择中优先级越高")
+    print("6. GPU加速支持：使用批量计算法显著提升大规模数据的计算效率")
+    
+    print("=" * 70)
+    print("可视化完成！")
 
 
 if __name__ == "__main__":

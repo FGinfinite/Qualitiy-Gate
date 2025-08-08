@@ -90,3 +90,11 @@ Lora：r=128, alpha=512, dropout=0.1, attention的所有参数，
 使用超参数控制损失
 
 在一个batch内计算的约束损失是否会影响效果？
+
+
+CUDA_VISIBLE_DEVICES=2 back scripts/run_stage_1.sh -m training.learning_rate=1e-3,3e-4
+CUDA_VISIBLE_DEVICES=6 back scripts/run_stage_1.sh -m training.learning_rate=1e-4,3e-5
+
+CUDA_VISIBLE_DEVICES=6 back scripts/run_stage_2.sh model_checkpoint_path=\"outputs/stage_1_pretrain/2025-08-07/02-23-47-batch\=4,lr\=0.0003/full_rank_weights.pt\" tag=\"lr\=3e-4\"
+CUDA_VISIBLE_DEVICES=2 back scripts/run_stage_2.sh model_checkpoint_path=\"outputs/stage_1_pretrain/2025-08-07/02-15-08-batch\=4,lr\=0.001/full_rank_weights.pt\" tag=\"lr\=1e-3\"
+CUDA_VISIBLE_DEVICES=2 uv run scripts/continue_selection.py     --router_data_dir outputs/stage_2_selection/2025-08-08/18-30-20-lr=1e-3/router_data     --output_path outputs/stage_2_selection/2025-08-08/18-30-20-lr=1e-3/selected_data.jsonl     --selection_percentage 0.05     --importance_selection_percentage 0.1
