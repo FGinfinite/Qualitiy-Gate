@@ -21,12 +21,20 @@ echo "Found $NUM_GPUS GPUs. Launching Llama-2-7B LoRA fine-tuning..."
 MAIN_PORT=$((RANDOM % 100 + 29500))
 echo "Using port $MAIN_PORT"
 
-# Launch the training process using Accelerate with FSDP configuration.
+# Launch the training process using Accelerate with appropriate configuration.
 # The --num_processes argument is now set dynamically based on CUDA_VISIBLE_DEVICES.
-# Using FSDP configuration optimized for Llama-2-7B fine-tuning.
+# Use different configurations for single GPU vs multi-GPU setups.
+
+if [ $NUM_GPUS -eq 1 ]; then
+  echo "Using single GPU configuration (no FSDP)"
+  CONFIG_FILE="configs/accelerate_config_single_gpu.yaml"
+else
+  echo "Using multi-GPU FSDP configuration"
+  CONFIG_FILE="configs/accelerate_config_fsdp_finetune.yaml"
+fi
 
 .venv/bin/accelerate launch \
-  --config_file configs/accelerate_config_fsdp_finetune.yaml \
+  --config_file $CONFIG_FILE \
   --num_processes=$NUM_GPUS \
   --main_process_port=$MAIN_PORT \
   src/main.py --config-name=stage_3_finetune "$@"

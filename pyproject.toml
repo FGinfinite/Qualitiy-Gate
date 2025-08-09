@@ -7,7 +7,7 @@ requires-python = ">=3.12"
 dependencies = [
     "hydra-core",
     "torch==2.6.0",
-    "transformers",
+    "transformers==4.53.2",
     "peft",
     "accelerate",
     "lm-eval",

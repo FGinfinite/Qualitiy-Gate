@@ -256,17 +256,26 @@ def create_comprehensive_visualization(
     moe_logits = router_data["moe_logits"]
     quality_logits = router_data["quality_logits"]
 
-    fig = plt.figure(figsize=(20, 16))
+    # 使用GridSpec创建2x3的布局
+    fig = plt.figure(figsize=(24, 14))
+    gs = fig.add_gridspec(2, 3, hspace=0.3, wspace=0.25)
 
-    # 1. 质量分数分布 (2x4 grid, position 1-2)
-    ax1 = plt.subplot(4, 4, 1)
+    # --- 创建6个子图 ---
+    ax1 = fig.add_subplot(gs[0, 0])  # 质量分数分布
+    ax2 = fig.add_subplot(gs[0, 1])  # 各层质量分数
+    ax3 = fig.add_subplot(gs[0, 2])  # 专家使用率
+    ax4 = fig.add_subplot(gs[1, 0])  # 路由多样性
+    ax5 = fig.add_subplot(gs[1, 1])  # 距离矩阵热力图
+    ax6 = fig.add_subplot(gs[1, 2])  # 样本2D投影分布
+
+    # 1. 质量分数分布
     ax1.hist(quality_scores, bins=30, alpha=0.7, color="skyblue", edgecolor="black")
     ax1.set_xlabel("质量分数")
     ax1.set_ylabel("样本数量")
-    ax1.set_title("样本质量分数分布")
+    ax1.set_title(f"样本质量分数分布 ({len(quality_scores)}条)")
     ax1.grid(True, alpha=0.3)
 
-    ax2 = plt.subplot(4, 4, 2)
+    # 2. 各层质量分数
     quality_by_layer = torch.softmax(quality_logits.float(), dim=-1)[:, :, 0]  # [N, L]
     layer_avg_quality = quality_by_layer.mean(dim=0).numpy()  # [L]
     ax2.plot(range(len(layer_avg_quality)), layer_avg_quality, "o-", linewidth=2)
@@ -275,120 +284,64 @@ def create_comprehensive_visualization(
     ax2.set_title("各层质量分数分布")
     ax2.grid(True, alpha=0.3)
 
-    # 2. MoE专家使用分析 (position 3-4)
-    ax3 = plt.subplot(4, 4, 3)
+    # 3. MoE专家使用分析
     ax3.bar(range(len(expert_usage)), expert_usage, alpha=0.7, color="lightgreen")
     ax3.set_xlabel("专家索引")
     ax3.set_ylabel("平均使用率")
     ax3.set_title("专家使用率分布")
     ax3.grid(True, alpha=0.3)
 
-    ax4 = plt.subplot(4, 4, 4)
+    # 4. 样本路由多样性
     ax4.hist(sample_entropy, bins=30, alpha=0.7, color="orange", edgecolor="black")
     ax4.set_xlabel("路由熵")
     ax4.set_ylabel("样本数量")
     ax4.set_title("样本路由多样性分布")
     ax4.grid(True, alpha=0.3)
 
-    # 3. 距离矩阵热力图 (position 5-8, span 2x2)
-    ax5 = plt.subplot(4, 4, (5, 8))
-    # 只显示距离矩阵的上三角部分
+    # 5. 距离矩阵热力图
     mask = np.triu(np.ones_like(distance_matrix, dtype=bool), k=1)
     sns.heatmap(distance_matrix, mask=~mask, cmap="viridis", square=True, cbar_kws={"label": "Wasserstein距离"}, ax=ax5)
     ax5.set_title(f"样本间Wasserstein距离矩阵\n({len(demo_indices)}个样本)")
 
-    # 4. 2D投影和选择结果 (position 9-12, span 2x2)
-    ax6 = plt.subplot(4, 4, (9, 12))
-
-    # 使用MDS进行2D投影
+    # 6. 样本2D投影分布
     mds = MDS(n_components=2, dissimilarity="precomputed", random_state=42, max_iter=3000, eps=1e-9)
     coords_2d = mds.fit_transform(distance_matrix)
-
-    # 绘制所有点
-    ax6.scatter(coords_2d[:, 0], coords_2d[:, 1], c="lightgray", s=50, alpha=0.6, label="未选择")
-
-    # 绘制不同策略选择的点
-    colors = {"Quality": "red", "Diversity": "blue", "Random": "green"}
-    markers = {"Quality": "s", "Diversity": "*", "Random": "^"}
-
-    for strategy_name, (local_indices, _) in strategies.items():
-        selected_coords = coords_2d[local_indices]
-        ax6.scatter(
-            selected_coords[:, 0],
-            selected_coords[:, 1],
-            c=colors[strategy_name],
-            marker=markers[strategy_name],
-            s=120,
-            label=f"{strategy_name}选择",
-            alpha=0.8,
-            edgecolors="black",
-        )
-
+    
+    # 根据质量分数给样本着色
+    quality_subset = quality_scores[demo_indices]
+    scatter = ax6.scatter(coords_2d[:, 0], coords_2d[:, 1], c=quality_subset, 
+                         cmap='viridis', s=60, alpha=0.7, edgecolors='black', linewidth=0.5)
+    
+    # 添加颜色条
+    cbar = plt.colorbar(scatter, ax=ax6)
+    cbar.set_label('质量分数', rotation=270, labelpad=15)
+    
+    # 突出显示多样性选择的结果
+    diversity_local_indices, _ = strategies["Diversity"]
+    selected_coords = coords_2d[diversity_local_indices]
+    ax6.scatter(selected_coords[:, 0], selected_coords[:, 1], 
+               marker='*', s=200, c='red', alpha=0.9, 
+               edgecolors='white', linewidth=2, label='多样性选择 (FPS)')
+    
     ax6.set_xlabel("第一主成分")
     ax6.set_ylabel("第二主成分")
-    ax6.set_title("样本2D投影与选择结果对比")
+    ax6.set_title("样本2D投影分布与多样性选择结果")
     ax6.legend()
     ax6.grid(True, alpha=0.3)
 
-    # 5. 选择策略对比表格 (position 13-16)
-    ax7 = plt.subplot(4, 4, (13, 16))
-    ax7.axis("off")
+    # 构建标题信息
+    title_info = f"Select-MoE数据选择综合分析 - {router_data['dataset_name']}"
+    subtitle_info = f"总样本: {len(sample_ids)}, 分析样本: {len(demo_indices)}"
 
-    # 计算统计数据
-    stats_data = []
-    for strategy_name, (local_indices, global_indices) in strategies.items():
-        quality_subset = quality_scores[demo_indices]
-        selected_quality = quality_subset[local_indices]
-
-        # 多样性统计
-        selected_distances = []
-        for i in range(len(local_indices)):
-            for j in range(i + 1, len(local_indices)):
-                selected_distances.append(distance_matrix[local_indices[i], local_indices[j]])
-
-        avg_diversity = np.mean(selected_distances) if selected_distances else 0
-        min_diversity = min(selected_distances) if selected_distances else 0
-        max_diversity = max(selected_distances) if selected_distances else 0
-
-        stats_data.append(
-            {
-                "Strategy": strategy_name,
-                "Avg Quality": f"{selected_quality.mean():.4f}",
-                "Quality Std": f"{selected_quality.std():.4f}",
-                "Avg Distance": f"{avg_diversity:.4f}",
-                "Min Distance": f"{min_diversity:.4f}",
-                "Max Distance": f"{max_diversity:.4f}",
-            }
-        )
-
-    # 创建表格
-    df_stats = pd.DataFrame(stats_data)
-    table = ax7.table(
-        cellText=df_stats.values, colLabels=df_stats.columns, cellLoc="center", loc="center", bbox=[0, 0, 1, 1]
-    )
-    table.auto_set_font_size(False)
-    table.set_fontsize(10)
-    table.scale(1, 2)
-
-    # 设置表格样式
-    for i in range(len(df_stats.columns)):
-        table[(0, i)].set_facecolor("#4CAF50")
-        table[(0, i)].set_text_props(weight="bold", color="white")
-
-    for i in range(1, len(df_stats) + 1):
-        for j in range(len(df_stats.columns)):
-            if i == 1:  # Quality row
-                table[(i, j)].set_facecolor("#FFCDD2")
-            elif i == 2:  # Diversity row
-                table[(i, j)].set_facecolor("#BBDEFB")
-            else:  # Random row
-                table[(i, j)].set_facecolor("#C8E6C9")
-
-    ax7.set_title("选择策略性能对比", fontsize=14, pad=20)
+    # 如果是聚合数据集，添加数据集构成信息
+    if "source_datasets" in router_data:
+        datasets_info = ", ".join(router_data["source_datasets"])
+        if len(datasets_info) > 80:  # 如果太长则截断
+            datasets_info = datasets_info[:77] + "..."
+        subtitle_info += f"\n包含数据集: {datasets_info}"
 
     plt.suptitle(
-        f"Select-MoE数据选择综合分析 - {router_data['dataset_name']}\n"
-        f"总样本: {len(sample_ids)}, 分析样本: {len(demo_indices)}",
+        title_info + "\n" + subtitle_info,
         fontsize=16,
         y=0.98,
     )
@@ -403,24 +356,105 @@ def create_comprehensive_visualization(
 
 def load_all_router_data_files(router_data_path):
     """加载router_data文件或目录中的所有router_data文件"""
-    if os.path.isfile(router_data_path) and router_data_path.endswith('.pt'):
+    if os.path.isfile(router_data_path) and router_data_path.endswith(".pt"):
         # 单个文件
-        return {os.path.basename(router_data_path).replace('_router_data.pt', ''): load_router_data(router_data_path)}
+        return {os.path.basename(router_data_path).replace("_router_data.pt", ""): load_router_data(router_data_path)}
     elif os.path.isdir(router_data_path):
         # 目录，查找所有_router_data.pt文件
-        router_data_files = glob.glob(os.path.join(router_data_path, '*_router_data.pt'))
+        router_data_files = glob.glob(os.path.join(router_data_path, "*_router_data.pt"))
         if not router_data_files:
             raise ValueError(f"在目录 {router_data_path} 中未找到任何_router_data.pt文件")
-        
+
         all_router_data = {}
         for file_path in sorted(router_data_files):
-            dataset_name = os.path.basename(file_path).replace('_router_data.pt', '')
+            dataset_name = os.path.basename(file_path).replace("_router_data.pt", "")
             print(f"加载数据集: {dataset_name} - {file_path}")
             all_router_data[dataset_name] = load_router_data(file_path)
-        
+
         return all_router_data
     else:
         raise ValueError(f"路径不是有效的.pt文件或目录: {router_data_path}")
+
+
+def aggregate_router_data(all_router_data):
+    """将多个数据集的router_data合并为一个整体数据集"""
+    if len(all_router_data) == 1:
+        # 只有一个数据集，直接返回
+        dataset_name, router_data = next(iter(all_router_data.items()))
+        router_data["dataset_name"] = f"{dataset_name} (单一数据集)"
+        return router_data
+
+    print("=" * 70)
+    print("聚合多个数据集的router数据...")
+    print("=" * 70)
+
+    # 收集所有数据
+    all_quality_logits = []
+    all_moe_logits = []
+    all_sample_ids = []
+
+    dataset_names = list(all_router_data.keys())
+    sample_counts = []
+
+    # 验证张量形状兼容性
+    reference_quality_shape = None
+    reference_moe_shape = None
+
+    for dataset_name, router_data in all_router_data.items():
+        quality_logits = router_data["quality_logits"]  # [N, L, 2]
+        moe_logits = router_data["moe_logits"]  # [N, L, E]
+
+        # 检查形状兼容性
+        if reference_quality_shape is None:
+            reference_quality_shape = quality_logits.shape[1:]  # [L, 2]
+            reference_moe_shape = moe_logits.shape[1:]  # [L, E]
+        else:
+            if quality_logits.shape[1:] != reference_quality_shape:
+                raise ValueError(
+                    f"数据集 {dataset_name} 的quality_logits形状 {quality_logits.shape[1:]} "
+                    f"与参考形状 {reference_quality_shape} 不兼容"
+                )
+            if moe_logits.shape[1:] != reference_moe_shape:
+                raise ValueError(
+                    f"数据集 {dataset_name} 的moe_logits形状 {moe_logits.shape[1:]} "
+                    f"与参考形状 {reference_moe_shape} 不兼容"
+                )
+
+        sample_count = len(router_data["sample_ids"])
+        sample_counts.append(sample_count)
+
+        # 添加数据集前缀到sample_ids以避免冲突
+        prefixed_sample_ids = [f"{dataset_name}_{sid}" for sid in router_data["sample_ids"]]
+
+        all_quality_logits.append(quality_logits)
+        all_moe_logits.append(moe_logits)
+        all_sample_ids.extend(prefixed_sample_ids)
+
+        print(f"  {dataset_name}: {sample_count} 样本, 形状 {quality_logits.shape}")
+
+    # 合并张量
+    aggregated_quality_logits = torch.cat(all_quality_logits, dim=0)
+    aggregated_moe_logits = torch.cat(all_moe_logits, dim=0)
+
+    total_samples = sum(sample_counts)
+    print("\n合并完成:")
+    print(f"  总样本数: {total_samples}")
+    print(f"  质量logits形状: {aggregated_quality_logits.shape}")
+    print(f"  MoE logits形状: {aggregated_moe_logits.shape}")
+    print(f"  包含数据集: {', '.join(dataset_names)}")
+    print()
+
+    # 构建聚合后的router_data
+    aggregated_data = {
+        "quality_logits": aggregated_quality_logits,
+        "moe_logits": aggregated_moe_logits,
+        "sample_ids": all_sample_ids,
+        "dataset_name": f"所有数据集聚合 ({len(dataset_names)}个数据集)",
+        "source_datasets": dataset_names,
+        "dataset_sample_counts": dict(zip(dataset_names, sample_counts, strict=True)),
+    }
+
+    return aggregated_data
 
 
 def analyze_single_dataset(dataset_name, router_data, args):
@@ -428,7 +462,7 @@ def analyze_single_dataset(dataset_name, router_data, args):
     print(f"\n{'=' * 80}")
     print(f"分析数据集: {dataset_name}")
     print(f"{'=' * 80}")
-    
+
     print(f"总样本数: {len(router_data['sample_ids'])}")
     print(f"模型层数: {router_data['moe_logits'].shape[1]}")
     print(f"专家数量: {router_data['moe_logits'].shape[2]}")
@@ -455,9 +489,14 @@ def analyze_single_dataset(dataset_name, router_data, args):
 
     save_path = None
     if args.save_plots:
-        safe_dataset_name = dataset_name.replace('/', '_').replace('\\', '_')
+        if dataset_name == "聚合数据集" and "source_datasets" in router_data:
+            # 聚合数据集使用特殊命名
+            safe_dataset_name = f"aggregated_{'_'.join(router_data['source_datasets'])}"
+            safe_dataset_name = safe_dataset_name.replace("/", "_").replace("\\", "_")
+        else:
+            safe_dataset_name = dataset_name.replace("/", "_").replace("\\", "_")
         save_path = os.path.join(args.output_dir, f"comprehensive_analysis_{safe_dataset_name}.png")
-    
+
     fig = create_comprehensive_visualization(
         router_data, distance_matrix, demo_indices, quality_scores, expert_usage, sample_entropy, strategies, save_path
     )
@@ -512,12 +551,12 @@ def analyze_single_dataset(dataset_name, router_data, args):
         print(f"  {strategy_name:>10}: 质量={selected_quality.mean():.4f}, 多样性={avg_diversity:.4f}")
 
     return {
-        'dataset_name': dataset_name,
-        'quality_scores': quality_scores,
-        'expert_usage': expert_usage,
-        'sample_entropy': sample_entropy,
-        'strategies': strategies,
-        'n_total': n_total
+        "dataset_name": dataset_name,
+        "quality_scores": quality_scores,
+        "expert_usage": expert_usage,
+        "sample_entropy": sample_entropy,
+        "strategies": strategies,
+        "n_total": n_total,
     }
 
 
@@ -529,6 +568,9 @@ def main():
     parser.add_argument("--save-plots", action="store_true", help="保存图片到文件")
     parser.add_argument("--output-dir", default="./outputs/visual_figs/comprehensive_analysis", help="图片保存目录")
     parser.add_argument("--dataset-filter", help="只分析匹配此模式的数据集 (支持通配符)")
+    parser.add_argument(
+        "--aggregate-datasets", action="store_true", help="将多个数据集聚合为一个整体进行分析，而不是分别分析每个数据集"
+    )
 
     args = parser.parse_args()
 
@@ -542,49 +584,74 @@ def main():
     # 1. 加载数据
     print(f"加载路由数据: {args.router_data_path}")
     all_router_data = load_all_router_data_files(args.router_data_path)
-    
+
     # 过滤数据集
     if args.dataset_filter:
         import fnmatch
+
         filtered_data = {}
         for dataset_name in all_router_data:
             if fnmatch.fnmatch(dataset_name, args.dataset_filter):
                 filtered_data[dataset_name] = all_router_data[dataset_name]
         all_router_data = filtered_data
         print(f"应用过滤器 '{args.dataset_filter}', 匹配到 {len(all_router_data)} 个数据集")
-    
+
     print(f"将分析 {len(all_router_data)} 个数据集: {list(all_router_data.keys())}")
-    
-    # 分析每个数据集
+
+    # 根据是否聚合模式决定分析方式
     all_results = []
-    for dataset_name, router_data in all_router_data.items():
-        result = analyze_single_dataset(dataset_name, router_data, args)
+
+    if args.aggregate_datasets and len(all_router_data) > 1:
+        # 聚合模式：合并所有数据集后统一分析
+        print("\n启用聚合分析模式 - 将所有数据集合并为一个整体")
+        aggregated_data = aggregate_router_data(all_router_data)
+        result = analyze_single_dataset("聚合数据集", aggregated_data, args)
         all_results.append(result)
-    
-    # 生成总体分析报告
-    if len(all_results) > 1:
+
+        # 为聚合模式添加额外的数据集构成信息
+        print(f"\n{'=' * 70}")
+        print("聚合数据集构成详情")
+        print("=" * 70)
+        for dataset_name, count in aggregated_data["dataset_sample_counts"].items():
+            percentage = count / len(aggregated_data["sample_ids"]) * 100
+            print(f"  {dataset_name}: {count} 样本 ({percentage:.1f}%)")
+        print()
+
+    else:
+        # 原有模式：分别分析每个数据集
+        if args.aggregate_datasets:
+            print("只有一个数据集，聚合模式无效，使用标准分析模式")
+
+        for dataset_name, router_data in all_router_data.items():
+            result = analyze_single_dataset(dataset_name, router_data, args)
+            all_results.append(result)
+
+    # 生成总体分析报告 (仅在非聚合模式下有多个数据集时)
+    if not args.aggregate_datasets and len(all_results) > 1:
         print(f"\n{'=' * 80}")
         print("总体分析报告")
-        print(f"{'=' * 80}")
-        
-        total_samples = sum(r['n_total'] for r in all_results)
-        avg_quality_scores = [r['quality_scores'].mean() for r in all_results]
-        avg_entropy_scores = [r['sample_entropy'].mean() for r in all_results]
-        
+        print("=" * 80)
+
+        total_samples = sum(r["n_total"] for r in all_results)
+        avg_quality_scores = [r["quality_scores"].mean() for r in all_results]
+        avg_entropy_scores = [r["sample_entropy"].mean() for r in all_results]
+
         print(f"分析了 {len(all_results)} 个数据集，共 {total_samples} 个样本")
         print(f"平均质量分数范围: {min(avg_quality_scores):.4f} - {max(avg_quality_scores):.4f}")
         print(f"平均路由熵范围: {min(avg_entropy_scores):.4f} - {max(avg_entropy_scores):.4f}")
         print()
-        
+
         # 按数据集展示统计信息
         print("各数据集统计:")
         print(f"{'数据集':<15} {'样本数':<8} {'平均质量':<10} {'平均熵':<10} {'专家平衡度':<12}")
         print("-" * 65)
         for result in all_results:
-            balance = 1 - result['expert_usage'].std() * len(result['expert_usage'])
-            print(f"{result['dataset_name']:<15} {result['n_total']:<8} {result['quality_scores'].mean():<10.4f} "
-                  f"{result['sample_entropy'].mean():<10.4f} {balance:<12.4f}")
-    
+            balance = 1 - result["expert_usage"].std() * len(result["expert_usage"])
+            print(
+                f"{result['dataset_name']:<15} {result['n_total']:<8} {result['quality_scores'].mean():<10.4f} "
+                f"{result['sample_entropy'].mean():<10.4f} {balance:<12.4f}"
+            )
+
     print("\n" + "=" * 70)
     print("关键洞察:")
     print("1. 质量选择优化数据质量，但可能选择相似样本")

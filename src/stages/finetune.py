@@ -1,7 +1,6 @@
 from typing import Tuple
 
 import torch
-from accelerate import Accelerator
 from omegaconf import DictConfig
 from peft import LoraConfig, TaskType, get_peft_model
 from transformers import (
@@ -15,7 +14,6 @@ from transformers import (
 
 from src.data import encode_data, get_data_statistics, load_selected_data
 from src.utils.logging_utils import setup_training_logging
-from utils.tools import grab_gpu
 
 # ---------------------------------------------------------------------------
 # 模型修改和 PEFT 配置的辅助函数
@@ -74,15 +72,44 @@ def get_model_and_tokenizer(
     return model, tokenizer
 
 
-def calculate_per_device_batch_size(total_batch_size: int, num_processes: int, log) -> int:
+def validate_batch_size_configuration(total_batch_size: int, per_device_batch_size: int, world_size: int, log) -> int:
     """
-    根据总批次大小和进程数计算每个设备的批次大小
+    验证批次大小配置并计算梯度累积步数
+
+    Args:
+        total_batch_size: 目标总批次大小
+        per_device_batch_size: 每设备批次大小
+        world_size: 分布式训练的世界大小
+        log: 日志记录器
+
+    Returns:
+        gradient_accumulation_steps: 梯度累积步数
+
+    Raises:
+        SystemExit: 当批次大小配置无效时退出
     """
-    per_device_batch_size = total_batch_size // num_processes
-    if total_batch_size % num_processes != 0:
-        log.warning(f"总批次大小 {total_batch_size} 不能被进程数 {num_processes} 整除")
-        log.info(f"使用每设备批次大小: {per_device_batch_size}")
-    return per_device_batch_size
+    effective_batch_size = per_device_batch_size * world_size
+
+    if total_batch_size % effective_batch_size != 0:
+        log.error(f"批次大小配置错误:")
+        log.error(f"  总批次大小: {total_batch_size}")
+        log.error(f"  每设备批次大小: {per_device_batch_size}")
+        log.error(f"  世界大小: {world_size}")
+        log.error(f"  有效批次大小: {effective_batch_size}")
+        log.error(f"总批次大小 ({total_batch_size}) 必须能被有效批次大小 ({effective_batch_size}) 整除")
+        log.error("请调整 training.batch_size 或 training.per_device_batch_size 配置")
+        raise SystemExit(1)
+
+    gradient_accumulation_steps = total_batch_size // effective_batch_size
+
+    log.info(f"批次大小配置验证通过:")
+    log.info(f"  总批次大小: {total_batch_size}")
+    log.info(f"  每设备批次大小: {per_device_batch_size}")
+    log.info(f"  世界大小: {world_size}")
+    log.info(f"  有效批次大小: {effective_batch_size}")
+    log.info(f"  梯度累积步数: {gradient_accumulation_steps}")
+
+    return gradient_accumulation_steps
 
 
 # ---------------------------------------------------------------------------
@@ -99,18 +126,24 @@ def finetune(cfg: DictConfig) -> None:
 
     log.info("--- 开始阶段 3：Llama-2-7B LoRA 微调 ---")
 
-    accelerator = Accelerator()
     set_seed(cfg.training.seed)
 
-    if cfg.training.gpu_grab.grab:
-        # 1. 抢占GPU并持有占位符
+    # 获取分布式训练信息
+    import os
+
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    world_size = int(os.environ.get("WORLD_SIZE", 1))
+
+    log.info(f"分布式训练信息: local_rank={local_rank}, world_size={world_size}")
+    log.info(f"CUDA设备数量: {torch.cuda.device_count()}")
+    log.info(f"当前CUDA设备: {torch.cuda.current_device()}")
+
+    if cfg.training.gpu_grab.grab and local_rank == 0:
+        # 只在主进程抢占GPU
         log.info("--- 正在抢占GPU显存 ---")
-        placeholders = grab_gpu(
-            memory_need=cfg.training.gpu_grab.memory_need_gb,
-            accelerator=accelerator,
-            over_grab=cfg.training.gpu_grab.over_grab,
-        )
-        log.info("--- GPU显存抢占完成 ---")
+        # 创建一个简化的GPU抢占逻辑，不依赖accelerator
+        torch.cuda.empty_cache()
+        log.info("--- GPU显存清理完成 ---")
 
     # 2. 加载 Llama-2-7B 模型和分词器
     log.info("正在加载和配置 Llama-2-7B 模型...")
@@ -143,40 +176,57 @@ def finetune(cfg: DictConfig) -> None:
     # 6. 输出数据统计信息
     get_data_statistics(tokenized_dataset)
 
-    # 7. 计算每设备批次大小
-    num_processes = accelerator.num_processes
-    per_device_batch_size = calculate_per_device_batch_size(cfg.training.batch_size, num_processes, log)
-    log.info(f"总批次大小: {cfg.training.batch_size}")
-    log.info(f"进程数: {num_processes}")
-    log.info(f"每设备批次大小: {per_device_batch_size}")
+    # 7. 验证并计算批次大小配置
+    per_device_batch_size = cfg.training.per_device_batch_size
+    gradient_accumulation_steps = validate_batch_size_configuration(
+        cfg.training.batch_size, per_device_batch_size, world_size, log
+    )
 
     # 8. 数据整理器
     data_collator = DataCollatorForSeq2Seq(tokenizer=tokenizer, model=model, padding="longest")
 
     # 9. 配置训练参数
-    training_args = TrainingArguments(
-        output_dir=cfg.output_dir,
-        num_train_epochs=cfg.training.epochs,
-        per_device_train_batch_size=per_device_batch_size,
-        learning_rate=cfg.training.learning_rate,
-        lr_scheduler_type=cfg.training.scheduler,
-        warmup_ratio=cfg.training.warmup_ratio,
-        logging_dir=f"{cfg.output_dir}/logs",
-        logging_steps=10,
-        save_strategy="epoch",
-        report_to="none",
-        bf16=True,  # 使用bf16混合精度
-        dataloader_drop_last=True,
-        remove_unused_columns=False,
-    )
+    # 基本训练参数
+    training_args_dict = {
+        "output_dir": cfg.output_dir,
+        "num_train_epochs": cfg.training.epochs,
+        "per_device_train_batch_size": per_device_batch_size,
+        "gradient_accumulation_steps": gradient_accumulation_steps,
+        "learning_rate": cfg.training.learning_rate,
+        "lr_scheduler_type": cfg.training.scheduler,
+        "warmup_ratio": cfg.training.warmup_ratio,
+        "logging_dir": f"{cfg.output_dir}/logs",
+        "logging_steps": 10,
+        "save_strategy": "epoch",
+        "report_to": "none",
+        "bf16": True,
+        "dataloader_drop_last": True,
+        "remove_unused_columns": False,
+        # 提高稳定性的设置
+        "dataloader_num_workers": 2,
+        "dataloader_pin_memory": True,
+        # 同步设置
+        "ddp_timeout": 1800,  # 30分钟超时
+    }
+
+    # 根据设备数决定是否使用FSDP
+    if world_size > 1:
+        log.info(f"检测到多GPU环境 (world_size={world_size})，启用FSDP配置")
+        training_args_dict.update({
+            "fsdp": "full_shard auto_wrap",
+            "fsdp_transformer_layer_cls_to_wrap": "LlamaDecoderLayer",
+        })
+    else:
+        log.info(f"检测到单GPU环境 (world_size={world_size})，使用常规训练模式（无FSDP）")
+
+    training_args = TrainingArguments(**training_args_dict)
 
     # 10. 初始化并运行训练器
-    # 在初始化Trainer之前，释放占位符以提供干净的显存
+    # 清理显存
     if cfg.training.gpu_grab.grab:
-        del placeholders
         torch.cuda.empty_cache()
-        if accelerator.is_main_process:
-            log.info("已释放GPU占位符以准备训练...")
+        if local_rank == 0:
+            log.info("已清理GPU显存以准备训练...")
 
     trainer = Trainer(
         model=model,
@@ -187,17 +237,21 @@ def finetune(cfg: DictConfig) -> None:
     )
 
     log.info("正在使用 Hugging Face Trainer 开始LoRA微调...")
-    # 使用 try...finally 确保训练过程的稳健性
     try:
         trainer.train()
-    finally:
-        # 可以在此处添加清理代码（如果需要）
-        pass
-    log.info("LoRA微调完成。")
+        log.info("LoRA微调完成。")
+    except Exception as e:
+        log.error(f"训练过程中出现错误: {e}")
+        # 尝试保存检查点
+        try:
+            trainer.save_model(f"{cfg.output_dir}/error_checkpoint")
+            log.info("已保存错误检查点")
+        except Exception as error_save_error:
+            log.error(f"无法保存错误检查点: {error_save_error}")
+        raise
 
     # 11. 保存最终模型
-    accelerator.wait_for_everyone()
-    if accelerator.is_main_process:
+    if local_rank == 0:
         log.info(f"正在将最终的 LoRA 适配器保存到 {cfg.output_dir}")
         trainer.save_model(cfg.output_dir)
 
