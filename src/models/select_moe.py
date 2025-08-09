@@ -10,7 +10,6 @@ from typing import List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from transformers import (
     AutoConfig,
     AutoModel,
@@ -41,7 +40,7 @@ class SelectMoeConfig(OlmoeConfig):
         # Select-MoE specific parameters
         quality_gate_init_mean: float = 0.0,
         quality_gate_init_std: float = 0.02,
-        quality_loss_weight: float = 0.01,
+        quality_loss_weight: float = 0.5,
         trash_expert_mode: str = "zero",  # "zero", "noise", "custom"
         enable_load_balancing: bool = False,
         **kwargs,
@@ -63,13 +62,13 @@ class SelectMoeConfig(OlmoeConfig):
 class QualityGate(nn.Module):
     """
     质量分类的第一层路由网络。
-    执行二分类来判断数据质量（好vs坏）。
+    输出单个分数，通过sigmoid得到good_ratio。
     """
 
     def __init__(self, config: SelectMoeConfig):
         super().__init__()
         self.hidden_size = config.hidden_size
-        self.gate = nn.Linear(config.hidden_size, 2, bias=False)
+        self.gate = nn.Linear(config.hidden_size, 1, bias=False)
 
         # 初始化门控权重
         nn.init.normal_(
@@ -86,23 +85,23 @@ class QualityGate(nn.Module):
             hidden_states: 输入张量，形状为(batch_size, seq_len, hidden_size)
 
         Returns:
-            quality_logits: 质量分类的原始logits (batch_size, seq_len, 2)
-            quality_probs: 归一化概率[good_ratio, bad_ratio] (batch_size, seq_len, 2)
+            quality_score: 质量分数的原始值 (batch_size, seq_len, 1)
+            good_ratio: sigmoid后的good比率 (batch_size, seq_len, 1)
         """
         batch_size, seq_len, hidden_dim = hidden_states.shape
         hidden_states_reshaped = hidden_states.view(-1, hidden_dim)
 
-        # 获取质量分类logits
-        quality_logits = self.gate(hidden_states_reshaped)  # (batch_size * seq_len, 2)
+        # 获取质量分数 (单个值)
+        quality_score = self.gate(hidden_states_reshaped)  # (batch_size * seq_len, 1)
 
-        # 转换为概率
-        quality_probs = F.softmax(quality_logits, dim=-1)  # (batch_size * seq_len, 2)
+        # 通过sigmoid得到good_ratio
+        good_ratio = torch.sigmoid(quality_score)  # (batch_size * seq_len, 1)
 
         # 重新整形回原始批次结构
-        quality_logits = quality_logits.view(batch_size, seq_len, 2)
-        quality_probs = quality_probs.view(batch_size, seq_len, 2)
+        quality_score = quality_score.view(batch_size, seq_len, 1)
+        good_ratio = good_ratio.view(batch_size, seq_len, 1)
 
-        return quality_logits, quality_probs
+        return quality_score, good_ratio
 
 
 class TrashExpert(nn.Module):
@@ -205,9 +204,8 @@ class SelectMoeDecoderLayer(OlmoeDecoderLayer):
         hidden_states = self.post_attention_layernorm(hidden_states)
 
         # 第一层路由：质量分类
-        quality_logits, quality_probs = self.quality_gate(hidden_states)
-        good_ratio = quality_probs[..., 0:1]  # 形状: (batch_size, seq_len, 1)
-        bad_ratio = quality_probs[..., 1:2]  # 形状: (batch_size, seq_len, 1)
+        quality_score, good_ratio = self.quality_gate(hidden_states)
+        bad_ratio = 1.0 - good_ratio  # 形状: (batch_size, seq_len, 1)
 
         # 第二层路由：正常MoE处理
         y_normal, moe_router_logits = self.normal_moe(hidden_states)
@@ -228,8 +226,8 @@ class SelectMoeDecoderLayer(OlmoeDecoderLayer):
             outputs += (present_key_value,)
 
         if output_router_logits:
-            # 返回质量logits和MoE路由器logits
-            router_logits = {"quality_logits": quality_logits, "moe_logits": moe_router_logits}
+            # 返回质量分数和MoE路由器logits
+            router_logits = {"quality_score": quality_score, "moe_logits": moe_router_logits}
             outputs += (router_logits,)
 
         return outputs
@@ -420,15 +418,25 @@ class SelectMoeModel(SelectMoePreTrainedModel):
         return None
 
 
-def quality_classification_loss(router_logits: List[dict], config: SelectMoeConfig, debug: bool = False) -> torch.Tensor:
+def quality_classification_loss(
+    router_logits: List[dict],
+    config: SelectMoeConfig,
+    attention_mask: Optional[torch.Tensor] = None,
+    loss_type: str = "sigmoid",
+    custom_loss_fn: Optional[callable] = None,
+    debug: bool = False,
+) -> torch.Tensor:
     """
-    使用sigmoid(good_ratio)计算质量分类损失。
+    使用可扩展的损失函数计算质量分类损失。
 
-    该损失鼓励模型降低good_ratio值，强迫其学习区分好质量和坏质量数据。
+    该损失支持多种计算方式，并正确处理padding tokens。
 
     Args:
-        router_logits: 包含每层'quality_logits'和'moe_logits'的字典列表
+        router_logits: 包含每层'quality_score'和'moe_logits'的字典列表
         config: 模型配置
+        attention_mask: 注意力掩码，用于排除padding tokens (batch_size, seq_len)
+        loss_type: 损失类型 ("sigmoid", "mse", "custom")
+        custom_loss_fn: 自定义损失函数，接受(good_ratio, attention_mask)返回loss
         debug: 是否打印调试信息
 
     Returns:
@@ -438,6 +446,7 @@ def quality_classification_loss(router_logits: List[dict], config: SelectMoeConf
         print("\n=== 质量分类损失调试 ===")
         print(f"router_logits类型: {type(router_logits)}")
         print(f"层数量 (len(router_logits)): {len(router_logits)}")
+        print(f"loss_type: {loss_type}")
 
     if len(router_logits) == 0:
         return torch.tensor(0.0, device="cpu")
@@ -446,27 +455,69 @@ def quality_classification_loss(router_logits: List[dict], config: SelectMoeConf
     num_layers = 0
 
     for layer_idx, layer_router_logits in enumerate(router_logits):
-        if layer_router_logits is None or "quality_logits" not in layer_router_logits:
+        if layer_router_logits is None or "quality_score" not in layer_router_logits:
             continue
 
-        quality_logits = layer_router_logits["quality_logits"]  # Shape: (batch_size, seq_len, 2)
+        quality_score = layer_router_logits["quality_score"]  # Shape: (batch_size, seq_len, 1)
 
         if debug:
             print(f"\n--- 第{layer_idx}层 ---")
-            print(f"quality_logits形状: {quality_logits.shape}")
-            print(f"quality_logits设备: {quality_logits.device}")
+            print(f"quality_score形状: {quality_score.shape}")
+            print(f"quality_score设备: {quality_score.device}")
 
-        # 获取质量概率
-        quality_probs = F.softmax(quality_logits, dim=-1)  # 形状: (batch_size, seq_len, 2)
-        good_ratio = quality_probs[..., 0]  # 形状: (batch_size, seq_len)
+        # 计算good_ratio
+        good_ratio = torch.sigmoid(quality_score)  # 形状: (batch_size, seq_len, 1)
 
         if debug:
             print(f"good_ratio形状: {good_ratio.shape}")
             print(f"good_ratio 最小/最大/均值: {good_ratio.min().item():.4f}/{good_ratio.max().item():.4f}/{good_ratio.mean().item():.4f}")
 
-        # 对good_ratio应用sigmoid并用作损失
-        # 这鼓励模型降低good_ratio（即，将更多数据分类为坏质量）
-        layer_loss = torch.sigmoid(good_ratio).mean()
+        # 计算层损失
+        if loss_type == "sigmoid":
+            # 直接使用good_ratio作为损失，鼓励降低good_ratio
+            layer_loss_raw = good_ratio.squeeze(-1)  # (batch_size, seq_len)
+        elif loss_type == "mse":
+            # MSE损失，目标是将good_ratio推向0
+            target = torch.zeros_like(good_ratio.squeeze(-1))
+            layer_loss_raw = (good_ratio.squeeze(-1) - target) ** 2
+        elif loss_type == "custom" and custom_loss_fn is not None:
+            # 使用自定义损失函数
+            layer_loss_raw = custom_loss_fn(good_ratio, attention_mask)
+            if layer_loss_raw.dim() > 2:
+                layer_loss_raw = layer_loss_raw.squeeze(-1)
+        else:
+            # 默认回退到sigmoid
+            layer_loss_raw = good_ratio.squeeze(-1)
+
+        # 应用attention mask排除padding tokens
+        if attention_mask is not None:
+            # 确保attention_mask形状匹配
+            if attention_mask.shape != layer_loss_raw.shape:
+                if debug:
+                    print(f"注意: attention_mask形状 {attention_mask.shape} != loss形状 {layer_loss_raw.shape}")
+                # 如果形状不匹配，广播或调整
+                attention_mask_expanded = attention_mask
+                if attention_mask.dim() == 2 and layer_loss_raw.dim() == 2:
+                    attention_mask_expanded = attention_mask
+                elif attention_mask.dim() == 2 and layer_loss_raw.dim() == 3:
+                    attention_mask_expanded = attention_mask.unsqueeze(-1)
+            else:
+                attention_mask_expanded = attention_mask
+
+            # 只计算有效token的损失
+            masked_loss = layer_loss_raw * attention_mask_expanded.float()
+            valid_tokens = attention_mask_expanded.sum()
+
+            if valid_tokens > 0:
+                layer_loss = masked_loss.sum() / valid_tokens
+            else:
+                layer_loss = torch.tensor(0.0, device=quality_score.device)
+
+            if debug:
+                print(f"有效token数量: {valid_tokens.item()}")
+        else:
+            # 没有attention_mask时，对所有位置求平均
+            layer_loss = layer_loss_raw.mean()
 
         if debug:
             print(f"层损失: {layer_loss.item():.6f}")
@@ -595,7 +646,7 @@ class SelectMoeForCausalLM(SelectMoePreTrainedModel):
                 aux_loss = torch.tensor(0.0, device=hidden_states.device)
 
             # Quality classification loss (always computed)
-            quality_loss = quality_classification_loss(outputs.router_logits if return_dict else outputs[-1], self.config)
+            quality_loss = quality_classification_loss(outputs.router_logits if return_dict else outputs[-1], self.config, attention_mask=attention_mask)
             # print(f"Quality Loss: {quality_loss.item()}")
             aux_loss += self.config.quality_loss_weight * quality_loss
 

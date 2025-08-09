@@ -11,13 +11,30 @@
 
 ## ✨ 核心创新
 
-### Select-MoE 架构特性
+### Select-MoE 架构特性 - **最新更新**
 - **两层路由架构**: 实现质量门 + MoE + 垃圾专家的并行处理结构
-- **质量门机制**: 一级路由进行二元分类，判断数据质量（好 vs 坏）
+- **简化质量门 (NEW)**: 一级路由输出单个质量分数，通过sigmoid得到good_ratio
+  - **架构简化**: 从2类分类改为单分数输出，`good_ratio = sigmoid(quality_score)`
+  - **更好梯度流**: 直接对原始分数应用sigmoid，避免softmax的数值问题
+  - **动态比例**: `bad_ratio = 1 - good_ratio`，确保完美互补
 - **标准MoE集成**: 使用标准OlmoeSparseMoeBlock进行专家路由，保持原始权重不变
 - **可配置垃圾专家**: 支持多种输出模式（零值、噪声、自定义）处理低质量数据
-- **质量分类损失**: 使用sigmoid(good_ratio)损失函数替代Beta分布约束
+- **增强损失函数 (NEW)**: 
+  - **可扩展框架**: 支持多种损失类型 (sigmoid, MSE, custom)
+  - **填充令牌处理**: 正确处理attention_mask，排除padding tokens
+  - **自定义损失**: 支持实验性损失函数，便于调试和优化
 - **HuggingFace 兼容**: 支持标准的 `from_pretrained()` 加载和生态工具
+
+### 架构对比
+
+| 特性 | 原始版本 | 最新版本 (当前) |
+|------|----------|----------------|
+| 质量门输出 | 2类logits | 单个原始分数 |
+| 概率计算 | softmax归一化 | sigmoid激活 |
+| 损失函数 | sigmoid(softmax_prob) | 直接sigmoid(raw_score) |
+| 填充处理 | 无特殊处理 | attention_mask排除padding |
+| 损失扩展性 | 固定函数 | 支持自定义损失函数 |
+| 调试支持 | 基本 | 丰富的实验框架 |
 
 ### 模型对比
 
@@ -189,14 +206,35 @@ outputs = model(
     output_router_logits=True  # 重要：训练时必须为True
 )
 
-# 新架构返回字典格式的路由输出
+# 新架构返回字典格式的路由输出 (更新后的格式)
 for layer_output in outputs.router_logits:
-    quality_logits = layer_output["quality_logits"]  # 形状: [batch, seq_len, 2]
-    moe_logits = layer_output["moe_logits"]          # 形状: [batch*seq_len, num_experts]
+    quality_score = layer_output["quality_score"]   # 形状: [batch, seq_len, 1] - 原始分数
+    moe_logits = layer_output["moe_logits"]         # 形状: [batch*seq_len, num_experts]
+    
+    # 手动计算质量比例 (如果需要)
+    good_ratio = torch.sigmoid(quality_score)       # 形状: [batch, seq_len, 1]
+    bad_ratio = 1.0 - good_ratio                    # 形状: [batch, seq_len, 1]
 
 # 损失包含语言建模 + 负载均衡 + 质量分类损失
+# 新版本自动处理padding tokens
 total_loss = outputs.loss
+
+# 自定义损失函数示例 (实验性功能)
+def my_custom_loss(good_ratio, attention_mask):
+    # 你的自定义损失逻辑
+    # 返回形状为 (batch_size, seq_len) 的张量
+    return torch.pow(good_ratio.squeeze(-1), 2)  # 示例：平方损失
+
+# 可以通过修改 quality_classification_loss 调用来使用自定义损失
 ```
+
+### 架构变更说明
+
+**重要变更 (2025年最新)**:
+- **Router输出格式**: `quality_logits` → `quality_score` (形状从 [batch, seq_len, 2] 变为 [batch, seq_len, 1])
+- **损失函数增强**: 支持多种损失类型和自定义损失函数
+- **Padding处理**: 自动排除填充token，提高训练质量
+- **调试友好**: 丰富的实验框架支持，便于损失函数调试
 
 ### 参数覆写机制
 
@@ -283,17 +321,40 @@ y = good_ratio * y_normal + bad_ratio * y_trash
 - **垃圾路径**: 通过垃圾专家处理，可配置输出模式
 - **加权组合**: 基于质量门输出动态组合两路结果
 
-### 质量分类损失
+### 质量分类损失 - **更新架构**
 
-新架构使用简洁的质量分类损失：
-```
-L_quality = sigmoid(good_ratio).mean()
+新架构采用更简洁直接的质量分类损失：
+
+**单分数架构** (当前版本):
+```python
+# 质量门输出单个原始分数
+quality_score = quality_gate(hidden_states)  # 形状: [batch, seq_len, 1]
+
+# 直接应用sigmoid得到good_ratio
+good_ratio = torch.sigmoid(quality_score)    # 形状: [batch, seq_len, 1]
+bad_ratio = 1.0 - good_ratio                 # 形状: [batch, seq_len, 1]
+
+# 质量损失：直接对good_ratio计算
+L_quality = good_ratio.mean()  # 鼓励降低good_ratio
 ```
 
 **损失特性**：
-- **计算粒度**: 对每个token在每个层分别计算
-- **优化目标**: 鼓励模型学习区分数据质量
-- **数值稳定**: 使用sigmoid激活，避免数值问题
+- **简化计算**: 单分数 → sigmoid，避免softmax的复杂性
+- **更好梯度**: 直接在原始分数上应用sigmoid，梯度更清晰
+- **填充处理**: 自动排除padding tokens，只对有效token计算损失
+- **可扩展性**: 支持多种损失类型 (sigmoid, MSE, 自定义函数)
+
+**损失类型对比**：
+```python
+# sigmoid损失 (默认)
+loss = good_ratio  # 鼓励降低good_ratio
+
+# MSE损失
+loss = (good_ratio - 0.0) ** 2  # 明确推向0
+
+# 自定义损失
+loss = custom_loss_fn(good_ratio, attention_mask)  # 用户定义
+```
 
 **总损失构成**：
 ```

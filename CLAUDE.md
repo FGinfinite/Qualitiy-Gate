@@ -13,13 +13,20 @@ Select-MoE is a novel data selection framework using Mixture-of-Experts (MoE) mo
 
 ## Key Architecture Components
 
-### Select-MoE Model (`src/models/select_moe.py`)
+### Select-MoE Model (`src/models/select_moe.py`) - **UPDATED ARCHITECTURE**
 - **Two-tier Routing Architecture**: Implements quality gate + MoE + trash expert parallel processing
-- **Quality Gate**: First-tier binary classifier for data quality assessment (good vs bad)
+- **Quality Gate (SIMPLIFIED)**: First-tier single-score quality assessment
+  - **NEW**: Outputs single raw score instead of 2-class logits
+  - **NEW**: `good_ratio = sigmoid(quality_score)`, `bad_ratio = 1 - good_ratio`
+  - **BENEFIT**: Simpler architecture with better gradient flow
 - **MoE Integration**: Uses standard OlmoeSparseMoeBlock for expert routing
 - **Trash Expert**: Configurable output modes (zero, noise, custom) for low-quality data
-- **Quality Classification Loss**: Uses sigmoid(good_ratio) loss instead of Beta distribution constraint
-- **Router Output Format**: Returns dictionary with both quality_logits and moe_logits for data selection
+- **Quality Classification Loss (ENHANCED)**: 
+  - **NEW**: Extensible loss function framework supporting multiple loss types
+  - **NEW**: Proper padding token handling with attention_mask
+  - **NEW**: Custom loss function support for experimentation
+  - **IMPROVED**: Direct sigmoid on raw score instead of sigmoid on softmax probability
+- **Router Output Format**: Returns dictionary with `quality_score` and `moe_logits` for data selection
 
 ### Core Pipeline (`src/main.py`)
 - Hydra-based configuration management with stage-specific configs
@@ -29,6 +36,18 @@ Select-MoE is a novel data selection framework using Mixture-of-Experts (MoE) mo
 ### Data Processing (`src/data/`)
 - Dataset loaders for training and evaluation data
 - Support for multiple datasets: CoT, Dolly, FLAN-v2, OASST1
+
+## Code Quality Instructions
+
+**IMPORTANT**: When checking syntax or formatting code, Claude must ALWAYS use:
+```bash
+# Check code syntax and style issues
+ruff check
+
+# Format code automatically
+ruff format
+```
+Never rely on manual inspection for code formatting - always use these tools.
 
 ## Development Commands
 
@@ -42,6 +61,21 @@ source .venv/bin/activate
 
 # Install tools (optional)
 ./tools/install.sh
+```
+
+### Code Quality Checks
+```bash
+# Check code syntax and style issues
+ruff check
+
+# Auto-format all code
+ruff format
+
+# Check specific file
+ruff check src/models/select_moe.py
+
+# Format specific file
+ruff format src/models/select_moe.py
 ```
 
 ### Model Conversion
@@ -146,6 +180,25 @@ Ensure correct path dependencies between stages:
 
 Always verify output paths before proceeding to the next stage.
 
+## Recent Changes (Latest Updates)
+
+### Architecture Improvements
+1. **Simplified Quality Gate**: Changed from 2-class logits to single score output
+2. **Enhanced Loss Function**: Added extensible loss framework with padding token handling
+3. **Better Gradient Flow**: Direct sigmoid on raw score instead of softmax probability
+4. **Debugging Support**: Framework supports testing different auxiliary loss variants
+
+### Updated Router Output Format
+```python
+# OLD FORMAT (deprecated)
+quality_logits = layer_output["quality_logits"]  # Shape: [batch, seq_len, 2]
+
+# NEW FORMAT (current)
+quality_score = layer_output["quality_score"]    # Shape: [batch, seq_len, 1]
+good_ratio = torch.sigmoid(quality_score)        # Shape: [batch, seq_len, 1]
+bad_ratio = 1.0 - good_ratio                     # Shape: [batch, seq_len, 1]
+```
+
 ## Programmatic Usage
 
 ```python
@@ -160,11 +213,28 @@ model = SelectMoeForCausalLM.from_pretrained("./converted_models/select_moe_conv
 # Training mode (enable router logits)
 outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels, output_router_logits=True)
 
-# New architecture returns dictionary format router logits
+# NEW architecture returns dictionary format router logits
 for layer_output in outputs.router_logits:
-    quality_logits = layer_output["quality_logits"]  # Shape: [batch, seq_len, 2]
-    moe_logits = layer_output["moe_logits"]          # Shape: [batch*seq_len, num_experts]
+    quality_score = layer_output["quality_score"]   # Shape: [batch, seq_len, 1] - Raw score
+    moe_logits = layer_output["moe_logits"]         # Shape: [batch*seq_len, num_experts]
+    
+    # Compute good/bad ratios manually if needed
+    good_ratio = torch.sigmoid(quality_score)       # Shape: [batch, seq_len, 1]
+    bad_ratio = 1.0 - good_ratio                    # Shape: [batch, seq_len, 1]
 
-# Total loss includes language modeling + load balancing + quality classification loss
+# Quality loss now supports extensible loss types and padding handling
+# Loss function automatically handles padding tokens when attention_mask is provided
 total_loss = outputs.loss
+
+# Custom loss experimentation example
+def custom_quality_loss(good_ratio, attention_mask):
+    # Your custom loss logic here
+    # Return tensor with shape (batch_size, seq_len)
+    return your_custom_loss_tensor
+
+# Use custom loss (modify quality_classification_loss call)
+# quality_loss = quality_classification_loss(
+#     router_logits, config, attention_mask, 
+#     loss_type="custom", custom_loss_fn=custom_quality_loss
+# )
 ```

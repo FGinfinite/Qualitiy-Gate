@@ -52,7 +52,7 @@ def convert_and_save_model(
     device="cpu",
     quality_gate_init_mean=0.0,
     quality_gate_init_std=0.02,
-    quality_loss_weight=0.01,
+    quality_loss_weight=0.5,
     trash_expert_mode="zero",
     enable_load_balancing=False,
     freeze_non_routing=False,  # New parameter
@@ -201,17 +201,17 @@ def convert_and_save_model(
         first_layer_router = outputs.router_logits[0]
         if isinstance(first_layer_router, dict):
             print("✓ Two-tier routing output format verified!")
-            print(f"  - Quality logits shape: {first_layer_router['quality_logits'].shape}")
+            print(f"  - Quality score shape: {first_layer_router['quality_score'].shape}")
             print(f"  - MoE logits shape: {first_layer_router['moe_logits'].shape}")
 
             # Verify dimensions
-            expected_quality_dims = (batch_size, seq_len, 2)  # [good, bad]
+            expected_quality_dims = (batch_size, seq_len, 1)  # Single score output
             expected_moe_dims = (batch_size * seq_len, select_moe_config.num_experts)
 
-            actual_quality_dims = first_layer_router["quality_logits"].shape
+            actual_quality_dims = first_layer_router["quality_score"].shape
             actual_moe_dims = first_layer_router["moe_logits"].shape
 
-            assert actual_quality_dims == expected_quality_dims, f"Quality logits shape mismatch: {actual_quality_dims} != {expected_quality_dims}"
+            assert actual_quality_dims == expected_quality_dims, f"Quality score shape mismatch: {actual_quality_dims} != {expected_quality_dims}"
             assert actual_moe_dims == expected_moe_dims, f"MoE logits shape mismatch: {actual_moe_dims} != {expected_moe_dims}"
 
             print("✓ Router logits dimensions verification passed!")
@@ -262,7 +262,7 @@ def convert_and_save_model(
         loaded_first_layer_router = test_outputs.router_logits[0]
         if isinstance(loaded_first_layer_router, dict):
             print("✓ Loaded model two-tier routing format verified!")
-            print(f"  - Quality logits shape: {loaded_first_layer_router['quality_logits'].shape}")
+            print(f"  - Quality score shape: {loaded_first_layer_router['quality_score'].shape}")
             print(f"  - MoE logits shape: {loaded_first_layer_router['moe_logits'].shape}")
         else:
             raise ValueError("Loaded model router output format incorrect")

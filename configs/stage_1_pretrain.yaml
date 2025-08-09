@@ -6,10 +6,10 @@ stage: pretrain
 # Hydra Configuration
 hydra:
   run:
-    dir: outputs/stage_1_pretrain/${now:%Y-%m-%d}/${now:%H-%M-%S}-batch=${training.batch_size},lr=${training.learning_rate}
+    dir: outputs/stage_1_pretrain/${now:%Y-%m-%d}/${now:%H-%M-%S}-batch=${training.batch_size}_lr=${training.learning_rate}_tag=${tag}
   sweep:
     dir: outputs/stage_1_pretrain
-    subdir: ${now:%Y-%m-%d}/${now:%H-%M-%S}-batch=${training.batch_size},lr=${training.learning_rate}
+    subdir: ${now:%Y-%m-%d}/${now:%H-%M-%S}-batch=${training.batch_size}_lr=${training.learning_rate}_tag=${tag}
   job:
     config:
       override_dirname:
@@ -19,6 +19,8 @@ hydra:
           - hydra.run.dir
           - hydra.sweep.dir
           - hydra.sweep.subdir
+
+tag: "none"
 
 # Model configuration
 selector_model:

@@ -95,7 +95,8 @@ Lora：r=128, alpha=512, dropout=0.1, attention的所有参数，
 CUDA_VISIBLE_DEVICES=2 back scripts/run_stage_1.sh -m training.learning_rate=1e-3,3e-4
 CUDA_VISIBLE_DEVICES=6 back scripts/run_stage_1.sh -m training.learning_rate=1e-4,3e-5
 
-
+预热训练
+CUDA_VISIBLE_DEVICES=2 scripts/run_stage_1.sh training.learning_rate=1e-3 dataset.subset_ratio=0.0001 tag="test"
 
 数据选择
 CUDA_VISIBLE_DEVICES=3 back scripts/run_stage_2.sh model_checkpoint_path=\"outputs/stage_1_pretrain/2025-08-09/02-46-05-batch=4,lr=0.0001/full_rank_weights.pt\" tag=\"lr=1e-4\" data_process.batch_size=16
