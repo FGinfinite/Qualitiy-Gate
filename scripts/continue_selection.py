@@ -27,9 +27,7 @@ from src.data.dataset_loader import load_local_datasets
 def setup_logging(verbose: bool = False):
     """设置日志配置"""
     level = logging.DEBUG if verbose else logging.INFO
-    logging.basicConfig(
-        level=level, format="[%(asctime)s][%(name)s][%(levelname)s] - %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
-    )
+    logging.basicConfig(level=level, format="[%(asctime)s][%(name)s][%(levelname)s] - %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
 
 
 def load_all_router_data(router_data_dir: str) -> Dict[str, Dict[str, Any]]:
@@ -117,7 +115,7 @@ def load_original_dataset_mapping(router_data_dir: str) -> Dict[str, Dict[str, A
             data_dir=dataset_dir,
             dataset_names=dataset_names,
             sample_percentage=1.0,  # 加载全部数据
-            seed=0
+            seed=0,
         )
 
         log.info(f"标准加载器成功加载 {len(combined_dataset)} 个样本")
@@ -179,9 +177,7 @@ def load_original_dataset_mapping(router_data_dir: str) -> Dict[str, Dict[str, A
         return dataset_mapping
 
 
-def rebuild_scored_data_with_messages(
-    all_router_data: Dict[str, Dict[str, Any]], dataset_mapping: Dict[str, Dict[str, Any]]
-) -> List[Dict[str, Any]]:
+def rebuild_scored_data_with_messages(all_router_data: Dict[str, Dict[str, Any]], dataset_mapping: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
     从router_data重建scored_data列表，包含完整的messages
 

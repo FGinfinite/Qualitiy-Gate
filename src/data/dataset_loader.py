@@ -157,9 +157,9 @@ def encode_with_messages_format(example: Dict, tokenizer: AutoTokenizer, max_seq
 
     attention_mask = torch.ones_like(input_ids)
     return {
-        "input_ids": input_ids.flatten(),
-        "labels": labels.flatten(),
-        "attention_mask": attention_mask.flatten(),
+        "input_ids": input_ids.flatten().numpy().astype(np.int64),
+        "labels": labels.flatten().numpy().astype(np.int64),
+        "attention_mask": attention_mask.flatten().numpy().astype(np.int64),
     }
 
 
@@ -221,7 +221,13 @@ def encode_data(
         desc="对数据进行分词和格式化",
         remove_columns=raw_datasets.column_names,  # 移除所有原始列
     )
-    lm_datasets.set_format(type="pt")
+
+    # 显式设置为torch格式并指定数据类型
+    lm_datasets.set_format(
+        type="torch",
+        columns=["input_ids", "labels", "attention_mask"],
+        dtype={"input_ids": torch.long, "labels": torch.long, "attention_mask": torch.long},
+    )
 
     return lm_datasets
 

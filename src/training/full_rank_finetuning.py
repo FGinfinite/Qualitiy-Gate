@@ -43,9 +43,7 @@ def get_target_modules_names(model: torch.nn.Module, target_patterns: List[str])
     return target_modules
 
 
-def setup_full_rank_training(
-    model: torch.nn.Module, target_patterns: List[str], mode: str = "module"
-) -> Dict[str, torch.nn.Parameter]:
+def setup_full_rank_training(model: torch.nn.Module, target_patterns: List[str], mode: str = "module") -> Dict[str, torch.nn.Parameter]:
     """
     设置全秩微调，冻结除目标模块外的所有参数。
 
@@ -99,9 +97,7 @@ def setup_full_rank_training(
     return trainable_params
 
 
-def save_full_rank_weights(
-    model: torch.nn.Module, target_patterns: List[str], save_path: str, mode: str = "module"
-) -> None:
+def save_full_rank_weights(model: torch.nn.Module, target_patterns: List[str], save_path: str, mode: str = "module") -> None:
     """
     保存全秩微调的模块权重。
 
@@ -179,9 +175,7 @@ def load_full_rank_weights(model: torch.nn.Module, checkpoint_path: str) -> None
                 loaded_count += 1
             else:
                 log = logging.getLogger(__name__)
-                log.warning(
-                    f"参数 {param_name} 形状不匹配 - 模型: {model_state_dict[param_name].shape}, 检查点: {weight.shape}"
-                )
+                log.warning(f"参数 {param_name} 形状不匹配 - 模型: {model_state_dict[param_name].shape}, 检查点: {weight.shape}")
         else:
             missing_params.append(param_name)
 
@@ -214,14 +208,10 @@ def print_trainable_parameters(model: torch.nn.Module) -> None:
         if param.requires_grad:
             trainable_params += param.numel()
 
-    log.info(
-        f"trainable params: {trainable_params:,} || all params: {all_param:,} || trainable%: {100 * trainable_params / all_param:.4f}"
-    )
+    log.info(f"trainable params: {trainable_params:,} || all params: {all_param:,} || trainable%: {100 * trainable_params / all_param:.4f}")
 
 
-def load_trainer_checkpoint_full_rank(
-    model: torch.nn.Module, checkpoint_dir: str, target_patterns: List[str] = None
-) -> None:
+def load_trainer_checkpoint_full_rank(model: torch.nn.Module, checkpoint_dir: str, target_patterns: List[str] = None) -> None:
     """
     从Trainer保存的checkpoint加载全秩微调权重到预训练模型。
 
@@ -238,9 +228,7 @@ def load_trainer_checkpoint_full_rank(
     # 使用transformers加载完整的checkpoint
     log = logging.getLogger(__name__)
     log.info(f"正在从checkpoint加载模型: {checkpoint_dir}")
-    checkpoint_model = SelectMoeForCausalLM.from_pretrained(
-        checkpoint_dir, torch_dtype=torch.bfloat16, low_cpu_mem_usage=True
-    )
+    checkpoint_model = SelectMoeForCausalLM.from_pretrained(checkpoint_dir, torch_dtype=torch.bfloat16, low_cpu_mem_usage=True)
 
     if target_patterns is None:
         # 如果没有指定目标模块，加载所有权重

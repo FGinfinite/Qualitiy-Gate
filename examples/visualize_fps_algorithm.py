@@ -37,21 +37,21 @@ plt.rcParams["font.sans-serif"] = ["Maple Mono NF CN"]
 
 def load_all_router_data_files(router_data_path):
     """加载router_data文件或目录中的所有router_data文件"""
-    if os.path.isfile(router_data_path) and router_data_path.endswith('.pt'):
+    if os.path.isfile(router_data_path) and router_data_path.endswith(".pt"):
         # 单个文件
-        return {os.path.basename(router_data_path).replace('_router_data.pt', ''): load_router_data(router_data_path)}
+        return {os.path.basename(router_data_path).replace("_router_data.pt", ""): load_router_data(router_data_path)}
     elif os.path.isdir(router_data_path):
         # 目录，查找所有_router_data.pt文件
-        router_data_files = glob.glob(os.path.join(router_data_path, '*_router_data.pt'))
+        router_data_files = glob.glob(os.path.join(router_data_path, "*_router_data.pt"))
         if not router_data_files:
             raise ValueError(f"在目录 {router_data_path} 中未找到任何_router_data.pt文件")
-        
+
         all_router_data = {}
         for file_path in sorted(router_data_files):
-            dataset_name = os.path.basename(file_path).replace('_router_data.pt', '')
+            dataset_name = os.path.basename(file_path).replace("_router_data.pt", "")
             print(f"加载数据集: {dataset_name} - {file_path}")
             all_router_data[dataset_name] = load_router_data(file_path)
-        
+
         return all_router_data
     else:
         raise ValueError(f"路径不是有效的.pt文件或目录: {router_data_path}")
@@ -69,16 +69,16 @@ def compute_distance_matrix(moe_logits, max_samples=50, use_gpu=True):
 
     # 尝试使用GPU加速计算
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    
+
     if device.type == "cuda" and use_gpu:
         print("使用GPU加速计算...")
         # 转换为概率并移至GPU
         moe_probs = torch.softmax(moe_subset.float(), dim=-1).to(device)
-        
+
         # 批量计算距离矩阵
         gpu_distance_matrix = compute_batch_wasserstein_distance_gpu(moe_probs, moe_probs)
         distance_matrix = gpu_distance_matrix.cpu().numpy()
-        
+
         print(f"✓ GPU计算完成")
     else:
         print("使用CPU计算...")
@@ -108,7 +108,7 @@ def analyze_single_dataset(dataset_name, router_data, args):
     print(f"\n{'=' * 70}")
     print(f"FPS算法可视化 - 数据集: {dataset_name}")
     print(f"{'=' * 70}")
-    
+
     moe_logits = router_data["moe_logits"]  # [N, L, E]
     sample_ids = router_data["sample_ids"]
 
@@ -143,16 +143,16 @@ def analyze_single_dataset(dataset_name, router_data, args):
     print(f"创建{dataset_name}数据集静态可视化...")
     save_path_static = None
     if args.save_plots:
-        safe_dataset_name = dataset_name.replace('/', '_').replace('\\', '_')
+        safe_dataset_name = dataset_name.replace("/", "_").replace("\\", "_")
         save_path_static = os.path.join(args.output_dir, f"fps_static_visualization_{safe_dataset_name}.png")
-        
+
     fig_static = visualize_fps_static(distance_matrix, fps_selected, fps_steps, coords_2d, sample_ids, save_path_static)
     plt.show()
 
     # 6. 创建动画（可选）
     if args.save_animation:
         print(f"创建{dataset_name}数据集FPS算法动画...")
-        safe_dataset_name = dataset_name.replace('/', '_').replace('\\', '_')
+        safe_dataset_name = dataset_name.replace("/", "_").replace("\\", "_")
         save_path_anim = os.path.join(args.output_dir, f"fps_animation_{safe_dataset_name}.gif")
         fig_anim, anim = create_fps_animation(distance_matrix, fps_steps, coords_2d, save_path_anim)
         # 显示第一帧
@@ -173,11 +173,11 @@ def analyze_single_dataset(dataset_name, router_data, args):
         print(f"  参考实现: {reference_selected}")
 
     return {
-        'dataset_name': dataset_name,
-        'fps_selected': fps_selected,
-        'distance_matrix': distance_matrix,
-        'n_total': n_total,
-        'n_selected': n_select
+        "dataset_name": dataset_name,
+        "fps_selected": fps_selected,
+        "distance_matrix": distance_matrix,
+        "n_total": n_total,
+        "n_selected": n_select,
     }
 
 
@@ -224,9 +224,7 @@ def fps_step_by_step(distance_matrix, n_select, seed=42):
                 continue
 
             # 计算candidate到已选点集的最小距离
-            min_distance_to_selected = min(
-                distance_matrix[candidate, selected_idx] for selected_idx in selected_indices
-            )
+            min_distance_to_selected = min(distance_matrix[candidate, selected_idx] for selected_idx in selected_indices)
 
             # 更新全局最小距离记录
             min_distances[candidate] = min(min_distances[candidate], min_distance_to_selected)
@@ -436,7 +434,11 @@ def visualize_fps_static(distance_matrix, selected_indices, steps, coords_2d, sa
     )
     ax6.axis("off")
 
-    plt.suptitle(f"最远点采样(FPS)算法可视化 - {router_data.get('dataset_name', '未知数据集')} - 从{n_total}个样本中选择{n_select}个", fontsize=16, y=0.98)
+    plt.suptitle(
+        f"最远点采样(FPS)算法可视化 - {router_data.get('dataset_name', '未知数据集')} - 从{n_total}个样本中选择{n_select}个",
+        fontsize=16,
+        y=0.98,
+    )
     plt.tight_layout()
 
     plt.rcParams["font.sans-serif"] = ["Maple Mono NF CN"]
@@ -591,52 +593,52 @@ def main():
 
     print("最远点采样(FPS)算法可视化演示")
     print("=" * 70)
-    
+
     # 1. 加载数据
     print(f"加载路由数据: {args.router_data_path}")
     all_router_data = load_all_router_data_files(args.router_data_path)
-    
+
     # 过滤数据集
     if args.dataset_filter:
         import fnmatch
+
         filtered_data = {}
         for dataset_name in all_router_data:
             if fnmatch.fnmatch(dataset_name, args.dataset_filter):
                 filtered_data[dataset_name] = all_router_data[dataset_name]
         all_router_data = filtered_data
         print(f"应用过滤器 '{args.dataset_filter}', 匹配到 {len(all_router_data)} 个数据集")
-    
+
     print(f"将分析 {len(all_router_data)} 个数据集: {list(all_router_data.keys())}")
-    
+
     # 分析每个数据集
     all_results = []
     for dataset_name, router_data in all_router_data.items():
         result = analyze_single_dataset(dataset_name, router_data, args)
         all_results.append(result)
-    
+
     # 生成总体分析报告
     if len(all_results) > 1:
         print(f"\n{'=' * 80}")
         print("总体FPS分析报告")
         print(f"{'=' * 80}")
-        
-        total_samples = sum(r['n_total'] for r in all_results)
-        total_selected = sum(r['n_selected'] for r in all_results)
-        
+
+        total_samples = sum(r["n_total"] for r in all_results)
+        total_selected = sum(r["n_selected"] for r in all_results)
+
         print(f"分析了 {len(all_results)} 个数据集")
         print(f"总样本数: {total_samples}")
         print(f"总选择数: {total_selected}")
         print()
-        
+
         # 按数据集展示统计信息
         print("各数据集FPS选择统计:")
         print(f"{'数据集':<15} {'分析样本数':<12} {'选择样本数':<12} {'选择率':<8} {'平均距离':<12}")
         print("-" * 70)
         for result in all_results:
-            avg_distance = result['distance_matrix'][result['distance_matrix'] > 0].mean()
-            selection_rate = result['n_selected'] / result['n_total']
-            print(f"{result['dataset_name']:<15} {result['n_total']:<12} {result['n_selected']:<12} "
-                  f"{selection_rate:<8.2%} {avg_distance:<12.4f}")
+            avg_distance = result["distance_matrix"][result["distance_matrix"] > 0].mean()
+            selection_rate = result["n_selected"] / result["n_total"]
+            print(f"{result['dataset_name']:<15} {result['n_total']:<12} {result['n_selected']:<12} {selection_rate:<8.2%} {avg_distance:<12.4f}")
 
     print("\n" + "=" * 70)
     print("FPS算法关键概念：")
@@ -646,7 +648,7 @@ def main():
     print("4. 应用场景：在计算Wasserstein距离后，选择最多样化的数据子集")
     print("5. 优点：简单高效，能有效避免选择相似的样本")
     print("6. GPU加速：支持批量计算Wasserstein距离，显著提升大规模数据处理效率")
-    
+
     print("=" * 70)
     print("可视化完成！")
 

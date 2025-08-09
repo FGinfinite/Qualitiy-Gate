@@ -36,10 +36,7 @@ def grab_gpu(memory_need: float, accelerator: Accelerator | None = None, over_gr
 
     def _grab_single_gpu(device_index):
         """辅助函数，用于在单个GPU上抢占显存并返回占位符。"""
-        print(
-            f"进程 {accelerator.process_index if accelerator else 'main'}: "
-            f"开始在 GPU {device_index} 上等待并抢占 {memory_need} GB 显存..."
-        )
+        print(f"进程 {accelerator.process_index if accelerator else 'main'}: 开始在 GPU {device_index} 上等待并抢占 {memory_need} GB 显存...")
         last_log_time = time.time()
         while True:
             try:
@@ -59,10 +56,7 @@ def grab_gpu(memory_need: float, accelerator: Accelerator | None = None, over_gr
                         device=f"cuda:{device_index}",
                     )
                     allocated_gb = placeholder.nbytes / (1024**3)
-                    print(
-                        f"进程 {accelerator.process_index if accelerator else 'main'}: "
-                        f"成功在 GPU {device_index} 上分配了 {allocated_gb:.2f} GB 的占位符。"
-                    )
+                    print(f"进程 {accelerator.process_index if accelerator else 'main'}: 成功在 GPU {device_index} 上分配了 {allocated_gb:.2f} GB 的占位符。")
                     return placeholder
                 else:
                     current_time = time.time()
@@ -76,10 +70,7 @@ def grab_gpu(memory_need: float, accelerator: Accelerator | None = None, over_gr
                         )
                         last_log_time = current_time
             except Exception as e:
-                print(
-                    f"进程 {accelerator.process_index if accelerator else 'main'}: "
-                    f"尝试在 GPU {device_index} 上分配占位符时发生错误: {e}"
-                )
+                print(f"进程 {accelerator.process_index if accelerator else 'main'}: 尝试在 GPU {device_index} 上分配占位符时发生错误: {e}")
             time.sleep(1)
 
     if accelerator is not None:

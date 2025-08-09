@@ -178,9 +178,7 @@ def finetune(cfg: DictConfig) -> None:
 
     # 7. 验证并计算批次大小配置
     per_device_batch_size = cfg.training.per_device_batch_size
-    gradient_accumulation_steps = validate_batch_size_configuration(
-        cfg.training.batch_size, per_device_batch_size, world_size, log
-    )
+    gradient_accumulation_steps = validate_batch_size_configuration(cfg.training.batch_size, per_device_batch_size, world_size, log)
 
     # 8. 数据整理器
     data_collator = DataCollatorForSeq2Seq(tokenizer=tokenizer, model=model, padding="longest")
@@ -212,10 +210,12 @@ def finetune(cfg: DictConfig) -> None:
     # 根据设备数决定是否使用FSDP
     if world_size > 1:
         log.info(f"检测到多GPU环境 (world_size={world_size})，启用FSDP配置")
-        training_args_dict.update({
-            "fsdp": "full_shard auto_wrap",
-            "fsdp_transformer_layer_cls_to_wrap": "LlamaDecoderLayer",
-        })
+        training_args_dict.update(
+            {
+                "fsdp": "full_shard auto_wrap",
+                "fsdp_transformer_layer_cls_to_wrap": "LlamaDecoderLayer",
+            }
+        )
     else:
         log.info(f"检测到单GPU环境 (world_size={world_size})，使用常规训练模式（无FSDP）")
 

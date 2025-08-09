@@ -67,9 +67,7 @@ if __name__ == "__main__":
         analyze_router_data(router_data_path)
     else:
         print("用法: python analyze_router_data.py <router_data_path>")
-        print(
-            "例如: python analyze_router_data.py outputs/stage_2_selection/2024-12-07/10-30-45/router_data/oasst1_router_data.pt"
-        )
+        print("例如: python analyze_router_data.py outputs/stage_2_selection/2024-12-07/10-30-45/router_data/oasst1_router_data.pt")
         print("\n也可以通过样本ID查询特定样本:")
         print('python -c "')
         print("from src.stages.selection import load_router_data, get_sample_router_info")

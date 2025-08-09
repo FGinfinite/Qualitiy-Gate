@@ -86,9 +86,7 @@ def compare_state_dicts(original_dict, converted_dict, tolerance=1e-6):
                 if matches:
                     results["mapped_keys"].append(f"{orig_key} -> {conv_key}")
                 else:
-                    results["value_mismatch"].append(
-                        {"key": f"{orig_key} -> {conv_key}", "max_diff": max_diff, "shape": original_tensor.shape}
-                    )
+                    results["value_mismatch"].append({"key": f"{orig_key} -> {conv_key}", "max_diff": max_diff, "shape": original_tensor.shape})
                 continue
             else:
                 results["shape_mismatch"].append(
@@ -116,9 +114,7 @@ def compare_state_dicts(original_dict, converted_dict, tolerance=1e-6):
             results["identical_keys"].append(f"{orig_key} -> {conv_key}")
         else:
             max_diff = torch.max(torch.abs(original_tensor - converted_tensor)).item()
-            results["value_mismatch"].append(
-                {"key": f"{orig_key} -> {conv_key}", "max_diff": max_diff, "shape": original_tensor.shape}
-            )
+            results["value_mismatch"].append({"key": f"{orig_key} -> {conv_key}", "max_diff": max_diff, "shape": original_tensor.shape})
 
     # Check for extra keys in converted model (should be quality gates and trash experts)
     converted_only_keys = set(converted_dict.keys()) - set(key_mapping.values())
@@ -434,9 +430,7 @@ def compare_models(
 
             print(f"  Expected quality experts: {expected_quality_experts}")
             print(f"  Actual quality experts: {actual_quality_experts}")
-            print(
-                f"  Quality logits match expected: {'✓' if actual_quality_experts == expected_quality_experts else '❌'}"
-            )
+            print(f"  Quality logits match expected: {'✓' if actual_quality_experts == expected_quality_experts else '❌'}")
 
             print(f"  Expected MoE experts: {expected_moe_experts}")
             print(f"  Actual MoE experts: {actual_moe_experts}")
@@ -514,9 +508,7 @@ def main():
     """Run the model comparison."""
     parser = argparse.ArgumentParser(description="Compare original OLMoE model with converted Select-MoE model")
 
-    parser.add_argument(
-        "--original-model", type=str, default="allenai/OLMoE-1B-7B-0125", help="Original model name or path"
-    )
+    parser.add_argument("--original-model", type=str, default="allenai/OLMoE-1B-7B-0125", help="Original model name or path")
     parser.add_argument(
         "--converted-model",
         type=str,
@@ -531,9 +523,7 @@ def main():
         choices=["float32", "bfloat16", "float16"],
         help="Data type for model loading",
     )
-    parser.add_argument(
-        "--memory-efficient", action="store_true", help="Use memory efficient mode (load models sequentially)"
-    )
+    parser.add_argument("--memory-efficient", action="store_true", help="Use memory efficient mode (load models sequentially)")
 
     args = parser.parse_args()
 

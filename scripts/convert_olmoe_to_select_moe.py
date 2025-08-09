@@ -211,12 +211,8 @@ def convert_and_save_model(
             actual_quality_dims = first_layer_router["quality_logits"].shape
             actual_moe_dims = first_layer_router["moe_logits"].shape
 
-            assert actual_quality_dims == expected_quality_dims, (
-                f"Quality logits shape mismatch: {actual_quality_dims} != {expected_quality_dims}"
-            )
-            assert actual_moe_dims == expected_moe_dims, (
-                f"MoE logits shape mismatch: {actual_moe_dims} != {expected_moe_dims}"
-            )
+            assert actual_quality_dims == expected_quality_dims, f"Quality logits shape mismatch: {actual_quality_dims} != {expected_quality_dims}"
+            assert actual_moe_dims == expected_moe_dims, f"MoE logits shape mismatch: {actual_moe_dims} != {expected_moe_dims}"
 
             print("✓ Router logits dimensions verification passed!")
         else:

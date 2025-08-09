@@ -56,9 +56,7 @@ class ConstantExpert(torch.nn.Module):
         )
 
 
-def gating(
-    logits: Tensor, moe_use_mixtral_gating=False, moe_use_logits_norm=False, moe_gate_norm_std=1.0
-) -> Dict[int, List[Tuple[int, float]]]:
+def gating(logits: Tensor, moe_use_mixtral_gating=False, moe_use_logits_norm=False, moe_gate_norm_std=1.0) -> Dict[int, List[Tuple[int, float]]]:
     # gates shape [num_tokens, num_experts]
     num_experts = logits.size(1)
     if moe_use_mixtral_gating:
@@ -78,9 +76,7 @@ def gating(
         # gates shape [num_tokens, MOE_TOP_K]
         # indices shape [num_tokens, MOE_TOP_K]
         gates, indices = torch.topk(gates, k=MOE_TOP_K, dim=1)
-        gates = torch.where(
-            indices == (num_experts - 1), torch.zeros_like(gates).to(gates.dtype).to(gates.device), gates
-        )
+        gates = torch.where(indices == (num_experts - 1), torch.zeros_like(gates).to(gates.dtype).to(gates.device), gates)
         gates /= torch.sum(gates, dim=1, keepdim=True)
 
     expert_info = defaultdict(list)

@@ -248,9 +248,7 @@ def perform_selection_comparison(router_data, distance_matrix, demo_indices, qua
     return strategies
 
 
-def create_comprehensive_visualization(
-    router_data, distance_matrix, demo_indices, quality_scores, expert_usage, sample_entropy, strategies, save_path=None
-):
+def create_comprehensive_visualization(router_data, distance_matrix, demo_indices, quality_scores, expert_usage, sample_entropy, strategies, save_path=None):
     """创建综合可视化图表"""
     sample_ids = router_data["sample_ids"]
     moe_logits = router_data["moe_logits"]
@@ -306,23 +304,39 @@ def create_comprehensive_visualization(
     # 6. 样本2D投影分布
     mds = MDS(n_components=2, dissimilarity="precomputed", random_state=42, max_iter=3000, eps=1e-9)
     coords_2d = mds.fit_transform(distance_matrix)
-    
+
     # 根据质量分数给样本着色
     quality_subset = quality_scores[demo_indices]
-    scatter = ax6.scatter(coords_2d[:, 0], coords_2d[:, 1], c=quality_subset, 
-                         cmap='viridis', s=60, alpha=0.7, edgecolors='black', linewidth=0.5)
-    
+    scatter = ax6.scatter(
+        coords_2d[:, 0],
+        coords_2d[:, 1],
+        c=quality_subset,
+        cmap="viridis",
+        s=60,
+        alpha=0.7,
+        edgecolors="black",
+        linewidth=0.5,
+    )
+
     # 添加颜色条
     cbar = plt.colorbar(scatter, ax=ax6)
-    cbar.set_label('质量分数', rotation=270, labelpad=15)
-    
+    cbar.set_label("质量分数", rotation=270, labelpad=15)
+
     # 突出显示多样性选择的结果
     diversity_local_indices, _ = strategies["Diversity"]
     selected_coords = coords_2d[diversity_local_indices]
-    ax6.scatter(selected_coords[:, 0], selected_coords[:, 1], 
-               marker='*', s=200, c='red', alpha=0.9, 
-               edgecolors='white', linewidth=2, label='多样性选择 (FPS)')
-    
+    ax6.scatter(
+        selected_coords[:, 0],
+        selected_coords[:, 1],
+        marker="*",
+        s=200,
+        c="red",
+        alpha=0.9,
+        edgecolors="white",
+        linewidth=2,
+        label="多样性选择 (FPS)",
+    )
+
     ax6.set_xlabel("第一主成分")
     ax6.set_ylabel("第二主成分")
     ax6.set_title("样本2D投影分布与多样性选择结果")
@@ -410,15 +424,9 @@ def aggregate_router_data(all_router_data):
             reference_moe_shape = moe_logits.shape[1:]  # [L, E]
         else:
             if quality_logits.shape[1:] != reference_quality_shape:
-                raise ValueError(
-                    f"数据集 {dataset_name} 的quality_logits形状 {quality_logits.shape[1:]} "
-                    f"与参考形状 {reference_quality_shape} 不兼容"
-                )
+                raise ValueError(f"数据集 {dataset_name} 的quality_logits形状 {quality_logits.shape[1:]} 与参考形状 {reference_quality_shape} 不兼容")
             if moe_logits.shape[1:] != reference_moe_shape:
-                raise ValueError(
-                    f"数据集 {dataset_name} 的moe_logits形状 {moe_logits.shape[1:]} "
-                    f"与参考形状 {reference_moe_shape} 不兼容"
-                )
+                raise ValueError(f"数据集 {dataset_name} 的moe_logits形状 {moe_logits.shape[1:]} 与参考形状 {reference_moe_shape} 不兼容")
 
         sample_count = len(router_data["sample_ids"])
         sample_counts.append(sample_count)
@@ -478,9 +486,7 @@ def analyze_single_dataset(dataset_name, router_data, args):
     distance_matrix, demo_indices = compute_comprehensive_distances(router_data, args.max_samples)
 
     # 5. 对比选择策略
-    strategies = perform_selection_comparison(
-        router_data, distance_matrix, demo_indices, quality_scores, args.selection_ratio
-    )
+    strategies = perform_selection_comparison(router_data, distance_matrix, demo_indices, quality_scores, args.selection_ratio)
 
     # 6. 创建综合可视化
     print("=" * 70)
@@ -497,9 +503,7 @@ def analyze_single_dataset(dataset_name, router_data, args):
             safe_dataset_name = dataset_name.replace("/", "_").replace("\\", "_")
         save_path = os.path.join(args.output_dir, f"comprehensive_analysis_{safe_dataset_name}.png")
 
-    fig = create_comprehensive_visualization(
-        router_data, distance_matrix, demo_indices, quality_scores, expert_usage, sample_entropy, strategies, save_path
-    )
+    fig = create_comprehensive_visualization(router_data, distance_matrix, demo_indices, quality_scores, expert_usage, sample_entropy, strategies, save_path)
 
     plt.show()
 
@@ -568,9 +572,7 @@ def main():
     parser.add_argument("--save-plots", action="store_true", help="保存图片到文件")
     parser.add_argument("--output-dir", default="./outputs/visual_figs/comprehensive_analysis", help="图片保存目录")
     parser.add_argument("--dataset-filter", help="只分析匹配此模式的数据集 (支持通配符)")
-    parser.add_argument(
-        "--aggregate-datasets", action="store_true", help="将多个数据集聚合为一个整体进行分析，而不是分别分析每个数据集"
-    )
+    parser.add_argument("--aggregate-datasets", action="store_true", help="将多个数据集聚合为一个整体进行分析，而不是分别分析每个数据集")
 
     args = parser.parse_args()
 

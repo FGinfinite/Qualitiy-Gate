@@ -274,9 +274,7 @@ class SelectMoeModel(SelectMoePreTrainedModel):
         self.vocab_size = config.vocab_size
 
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
-        self.layers = nn.ModuleList(
-            [SelectMoeDecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
-        )
+        self.layers = nn.ModuleList([SelectMoeDecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)])
 
         # 导入并使用与OlmoeModel相同的组件
         from transformers.models.olmoe.modeling_olmoe import (
@@ -314,12 +312,8 @@ class SelectMoeModel(SelectMoePreTrainedModel):
     ) -> Union[Tuple, MoeModelOutputWithPast]:
         # 使用与OlmoeModel相同的实现，但使用我们的自定义层
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_router_logits = (
-            output_router_logits if output_router_logits is not None else self.config.output_router_logits
-        )
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        )
+        output_router_logits = output_router_logits if output_router_logits is not None else self.config.output_router_logits
+        output_hidden_states = output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         use_cache = use_cache if use_cache is not None else self.config.use_cache
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
@@ -327,9 +321,7 @@ class SelectMoeModel(SelectMoePreTrainedModel):
             raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
 
         if self.gradient_checkpointing and self.training and use_cache:
-            logger.warning_once(
-                "`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`."
-            )
+            logger.warning_once("`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`.")
             use_cache = False
 
         if inputs_embeds is None:
@@ -428,9 +420,7 @@ class SelectMoeModel(SelectMoePreTrainedModel):
         return None
 
 
-def quality_classification_loss(
-    router_logits: List[dict], config: SelectMoeConfig, debug: bool = False
-) -> torch.Tensor:
+def quality_classification_loss(router_logits: List[dict], config: SelectMoeConfig, debug: bool = False) -> torch.Tensor:
     """
     使用sigmoid(good_ratio)计算质量分类损失。
 
@@ -472,9 +462,7 @@ def quality_classification_loss(
 
         if debug:
             print(f"good_ratio形状: {good_ratio.shape}")
-            print(
-                f"good_ratio 最小/最大/均值: {good_ratio.min().item():.4f}/{good_ratio.max().item():.4f}/{good_ratio.mean().item():.4f}"
-            )
+            print(f"good_ratio 最小/最大/均值: {good_ratio.min().item():.4f}/{good_ratio.max().item():.4f}/{good_ratio.mean().item():.4f}")
 
         # 对good_ratio应用sigmoid并用作损失
         # 这鼓励模型降低good_ratio（即，将更多数据分类为坏质量）
@@ -553,12 +541,8 @@ class SelectMoeForCausalLM(SelectMoePreTrainedModel):
         #     print(f"[SelectMoeForCausalLM] seq_len: {inputs_embeds.shape[1]}")
 
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_router_logits = (
-            output_router_logits if output_router_logits is not None else self.config.output_router_logits
-        )
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        )
+        output_router_logits = output_router_logits if output_router_logits is not None else self.config.output_router_logits
+        output_hidden_states = output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
@@ -611,9 +595,7 @@ class SelectMoeForCausalLM(SelectMoePreTrainedModel):
                 aux_loss = torch.tensor(0.0, device=hidden_states.device)
 
             # Quality classification loss (always computed)
-            quality_loss = quality_classification_loss(
-                outputs.router_logits if return_dict else outputs[-1], self.config
-            )
+            quality_loss = quality_classification_loss(outputs.router_logits if return_dict else outputs[-1], self.config)
             # print(f"Quality Loss: {quality_loss.item()}")
             aux_loss += self.config.quality_loss_weight * quality_loss
 

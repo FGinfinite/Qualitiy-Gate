@@ -98,9 +98,7 @@ def calculate_quality_score_from_gates(
     return final_quality_score
 
 
-def compute_wasserstein_distance_matrix(
-    logits_tensors: List[torch.Tensor], device: torch.device, batch_size: int = 1000
-) -> torch.Tensor:
+def compute_wasserstein_distance_matrix(logits_tensors: List[torch.Tensor], device: torch.device, batch_size: int = 1000) -> torch.Tensor:
     """
     计算所有样本对之间的Wasserstein距离矩阵（GPU加速）
 
@@ -189,10 +187,12 @@ def compute_batch_wasserstein_distance_gpu(batch_probs_i: torch.Tensor, batch_pr
     return total_distances
 
 
-
-
 def farthest_point_sampling_gpu(
-    distance_matrix: torch.Tensor, n_samples: int, quality_scores: List[float] = None, seed: int = 42, log_interval: int = 100
+    distance_matrix: torch.Tensor,
+    n_samples: int,
+    quality_scores: List[float] = None,
+    seed: int = 42,
+    log_interval: int = 100,
 ) -> List[int]:
     """
     使用GPU加速的最远点采样(FPS)算法选择多样化样本
@@ -221,7 +221,7 @@ def farthest_point_sampling_gpu(
 
     # 初始化选择状态和距离向量
     selected = torch.zeros(n_total, dtype=torch.bool, device=device)
-    min_distances = torch.full((n_total,), float('inf'), device=device)
+    min_distances = torch.full((n_total,), float("inf"), device=device)
     selected_indices = []
 
     log.info(f"GPU FPS: 从 {n_total} 个样本中选择 {n_samples} 个")
@@ -236,7 +236,7 @@ def farthest_point_sampling_gpu(
         # 回退到随机选择
         first_idx = torch.randint(0, n_total, (1,), device=device).item()
         log.info(f"FPS初始点: {first_idx} (随机选择)")
-    
+
     selected[first_idx] = True
     selected_indices.append(first_idx)
 
@@ -299,9 +299,7 @@ def diversity_based_selection(
     n_select = int(total_samples * selection_percentage)
 
     # 检查是否需要两阶段选择策略
-    use_two_stage = (
-        importance_selection_percentage is not None and importance_selection_percentage > selection_percentage
-    )
+    use_two_stage = importance_selection_percentage is not None and importance_selection_percentage > selection_percentage
 
     if not enable_diversity:
         # 回退到原始的质量分数选择
@@ -363,9 +361,7 @@ def diversity_based_selection(
         log = logging.getLogger(__name__)
         log.info(f"启用单阶段多样性选择: 从 {total_samples} 个样本中选择 {n_select} 个")
 
-        selected_data = _perform_diversity_selection(
-            scored_data, all_logits_by_dataset, selection_percentage, device, distance_batch_size, fps_log_interval
-        )
+        selected_data = _perform_diversity_selection(scored_data, all_logits_by_dataset, selection_percentage, device, distance_batch_size, fps_log_interval)
 
         return selected_data
 
@@ -427,15 +423,11 @@ def _perform_diversity_selection(
     log.info(f"张量形状示例: {all_logits[0].shape} (应为 [L, E])")
 
     # 2. 计算Wasserstein距离矩阵
-    distance_matrix = compute_wasserstein_distance_matrix(
-        all_logits, device=device, batch_size=distance_batch_size
-    )
+    distance_matrix = compute_wasserstein_distance_matrix(all_logits, device=device, batch_size=distance_batch_size)
 
     # 3. 使用GPU FPS选择多样化样本，传递质量分数用于初始点选择
     sample_quality_scores = [item["scores"] for item in sample_to_data_mapping]
-    selected_indices = farthest_point_sampling_gpu(
-        distance_matrix, n_select, quality_scores=sample_quality_scores, log_interval=fps_log_interval
-    )
+    selected_indices = farthest_point_sampling_gpu(distance_matrix, n_select, quality_scores=sample_quality_scores, log_interval=fps_log_interval)
 
     # 4. 根据选择的索引返回对应的数据
     selected_data = [sample_to_data_mapping[idx] for idx in selected_indices]
@@ -786,7 +778,7 @@ def select(cfg: DictConfig) -> None:
             log.info(f"  - 质量门logits形状: {router_data_dict['quality_logits'].shape}")
             log.info(f"  - MoE路由logits形状: {router_data_dict['moe_logits'].shape}")
             log.info(f"  - 样本数: {router_data_dict['num_samples']}")
-            sample_ids_preview = dataset_router_data['sample_ids'][:3] if dataset_router_data['sample_ids'] else '无'
+            sample_ids_preview = dataset_router_data["sample_ids"][:3] if dataset_router_data["sample_ids"] else "无"
             log.info(f"  - 样本ID示例: {sample_ids_preview}")
 
         else:
@@ -830,11 +822,12 @@ def select(cfg: DictConfig) -> None:
         log.error(f"GPU内存不足，距离计算失败: {e}")
         log.error("但是，宝贵的logits张量已经安全保存！")
         log.info("您可以使用独立脚本继续数据选择过程:")
-        log.info(f"  python scripts/continue_selection.py --router_data_dir {router_data_dir} "
-                 f"--output_path {output_path} --selection_percentage {cfg.selection_percentage}")
+        log.info(
+            f"  python scripts/continue_selection.py --router_data_dir {router_data_dir} "
+            f"--output_path {output_path} --selection_percentage {cfg.selection_percentage}"
+        )
         if importance_selection_percentage:
-            log.info(f"  添加参数: --importance_selection_percentage "
-                     f"{importance_selection_percentage}")
+            log.info(f"  添加参数: --importance_selection_percentage {importance_selection_percentage}")
         if not enable_diversity:
             log.info("  添加参数: --disable_diversity")
         log.info(f"  添加参数: --distance_batch_size {distance_batch_size}")
@@ -843,8 +836,7 @@ def select(cfg: DictConfig) -> None:
         log.error(f"数据选择过程中发生错误: {e}")
         log.error("但是，宝贵的logits张量已经安全保存！")
         log.info("您可以使用独立脚本继续数据选择过程:")
-        log.info(f"  python scripts/continue_selection.py --router_data_dir {router_data_dir} "
-                 f"--output_path {output_path}")
+        log.info(f"  python scripts/continue_selection.py --router_data_dir {router_data_dir} --output_path {output_path}")
         raise
 
     log.info(f"选择了前 {len(selected_data)} 个样本 ({cfg.selection_percentage * 100:.2f}%)")
