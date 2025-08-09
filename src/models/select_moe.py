@@ -173,7 +173,7 @@ class SelectMoeDecoderLayer(OlmoeDecoderLayer):
 
         Args:
             hidden_states: 输入张量
-            ... (其他标凇transformer层参数)
+            ... (其他标准transformer层参数)
 
         Returns:
             包含以下内容的元组:

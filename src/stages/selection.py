@@ -98,21 +98,24 @@ def calculate_quality_score_from_gates(
     return final_quality_score
 
 
-def compute_wasserstein_distance_matrix(logits_tensors: List[torch.Tensor], device: torch.device, batch_size: int = 1000) -> torch.Tensor:
+def compute_cosine_distance_matrix(
+    logits_tensors: List[torch.Tensor], device: torch.device, batch_size: int = 1000, layer_weights: torch.Tensor = None
+) -> torch.Tensor:
     """
-    计算所有样本对之间的Wasserstein距离矩阵（GPU加速）
+    计算所有样本对之间基于逐层二级路由余弦相似度的距离矩阵（GPU加速）
 
     Args:
-        logits_tensors: 列表，每个元素为 [L, E] 形状的张量
+        logits_tensors: 列表，每个元素为 [L, E] 形状的张量（L=层数，E=专家数）
         device: GPU设备
         batch_size: 批处理大小，控制GPU内存使用
+        layer_weights: 可选的层权重张量 [L]，用于加权不同层的余弦相似度
 
     Returns:
-        距离矩阵: [N, N] 形状的GPU张量
+        距离矩阵: [N, N] 形状的GPU张量，基于余弦相似度计算的距离
     """
     n_samples = len(logits_tensors)
     log = logging.getLogger(__name__)
-    log.info(f"使用GPU加速计算 {n_samples} 个样本的Wasserstein距离矩阵...")
+    log.info(f"使用GPU加速计算 {n_samples} 个样本的逐层余弦相似度距离矩阵...")
 
     # 将所有logits转移到GPU并转换为概率分布
     prob_tensors = []
@@ -126,12 +129,16 @@ def compute_wasserstein_distance_matrix(logits_tensors: List[torch.Tensor], devi
     n_samples = all_probs.shape[0]
 
     log.info(f"概率张量形状: {all_probs.shape}")
+    if layer_weights is not None:
+        log.info(f"使用层权重: {layer_weights.shape}")
+    else:
+        log.info("使用等权重相加（所有层权重为1）")
 
     # 初始化距离矩阵
     distance_matrix = torch.zeros(n_samples, n_samples, device=device)
 
     # 分批处理以节省GPU内存
-    for start_i in tqdm(range(0, n_samples, batch_size), desc="GPU距离矩阵计算"):
+    for start_i in tqdm(range(0, n_samples, batch_size), desc="GPU余弦距离矩阵计算"):
         end_i = min(start_i + batch_size, n_samples)
         batch_probs_i = all_probs[start_i:end_i]  # [batch_i, L, E]
 
@@ -139,8 +146,8 @@ def compute_wasserstein_distance_matrix(logits_tensors: List[torch.Tensor], devi
             end_j = min(start_j + batch_size, n_samples)
             batch_probs_j = all_probs[start_j:end_j]  # [batch_j, L, E]
 
-            # 计算这个批次的距离
-            batch_distances = compute_batch_wasserstein_distance_gpu(batch_probs_i, batch_probs_j)
+            # 计算这个批次的余弦距离
+            batch_distances = compute_batch_cosine_distance_gpu(batch_probs_i, batch_probs_j, layer_weights)
 
             # 填充距离矩阵
             distance_matrix[start_i:end_i, start_j:end_j] = batch_distances
@@ -149,41 +156,59 @@ def compute_wasserstein_distance_matrix(logits_tensors: List[torch.Tensor], devi
             if start_i != start_j:
                 distance_matrix[start_j:end_j, start_i:end_i] = batch_distances.T
 
-    log.info(f"GPU距离矩阵计算完成，形状: {distance_matrix.shape}")
+    log.info(f"GPU余弦距离矩阵计算完成，形状: {distance_matrix.shape}")
     return distance_matrix
 
 
-def compute_batch_wasserstein_distance_gpu(batch_probs_i: torch.Tensor, batch_probs_j: torch.Tensor) -> torch.Tensor:
+def compute_batch_cosine_distance_gpu(batch_probs_i: torch.Tensor, batch_probs_j: torch.Tensor, layer_weights: torch.Tensor = None) -> torch.Tensor:
     """
-    GPU上计算批次间的Wasserstein距离
+    GPU上计算批次间基于逐层二级路由余弦相似度的距离
 
     Args:
-        batch_probs_i: [batch_i, L, E] 第一组样本的概率分布
+        batch_probs_i: [batch_i, L, E] 第一组样本的概率分布（L=层数，E=专家数）
         batch_probs_j: [batch_j, L, E] 第二组样本的概率分布
+        layer_weights: 可选的层权重张量 [L]，用于加权不同层的相似度
 
     Returns:
-        距离矩阵: [batch_i, batch_j]
+        距离矩阵: [batch_i, batch_j]，基于余弦相似度计算的距离
     """
-    # batch_i, n_layers, n_experts = batch_probs_i.shape  # 未使用，注释掉
+    batch_i, n_layers, n_experts = batch_probs_i.shape
+    # batch_j = batch_probs_j.shape[0]  # 注释未使用的变量
+
+    # 设置层权重（为未来扩展预留）
+    if layer_weights is None:
+        layer_weights = torch.ones(n_layers, device=batch_probs_i.device, dtype=batch_probs_i.dtype)
+    else:
+        assert layer_weights.shape[0] == n_layers, f"层权重长度({layer_weights.shape[0]})与层数({n_layers})不匹配"
+        layer_weights = layer_weights.to(batch_probs_i.device)
 
     # 扩展维度用于广播计算
     probs_i_expanded = batch_probs_i.unsqueeze(1)  # [batch_i, 1, L, E]
     probs_j_expanded = batch_probs_j.unsqueeze(0)  # [1, batch_j, L, E]
 
-    # 计算每层的累积分布函数 (CDF)
-    cdf_i = torch.cumsum(probs_i_expanded, dim=-1)  # [batch_i, 1, L, E]
-    cdf_j = torch.cumsum(probs_j_expanded, dim=-1)  # [1, batch_j, L, E]
+    # L2归一化，确保余弦相似度计算正确
+    probs_i_normalized = torch.nn.functional.normalize(probs_i_expanded, p=2, dim=-1)  # [batch_i, 1, L, E]
+    probs_j_normalized = torch.nn.functional.normalize(probs_j_expanded, p=2, dim=-1)  # [1, batch_j, L, E]
 
-    # 计算Wasserstein距离 = L1距离的CDF差值
-    # 对于离散分布，Wasserstein距离 = sum(|CDF_i - CDF_j|)
-    cdf_diff = torch.abs(cdf_i - cdf_j)  # [batch_i, batch_j, L, E]
+    # 计算每层的余弦相似度
+    # 使用点积计算余弦相似度（归一化后的向量点积就是余弦相似度）
+    layer_similarities = torch.sum(probs_i_normalized * probs_j_normalized, dim=-1)  # [batch_i, batch_j, L]
 
-    # 对expert维度求和（每层的Wasserstein距离）
-    layer_distances = torch.sum(cdf_diff, dim=-1)  # [batch_i, batch_j, L]
+    # 应用层权重并求和
+    weighted_similarities = layer_similarities * layer_weights.view(1, 1, -1)  # [batch_i, batch_j, L]
+    total_similarities = torch.sum(weighted_similarities, dim=-1)  # [batch_i, batch_j]
 
-    # 对layer维度求和（总Wasserstein距离）
-    total_distances = torch.sum(layer_distances, dim=-1)  # [batch_i, batch_j]
-
+    # 转换相似度为距离
+    # 每层余弦相似度范围[-1, 1]，16层总和范围[-16, 16]
+    # 为了得到非负距离，使用：距离 = 层数 - 相似度总和
+    # 这样相同向量的距离为0，完全相反向量的距离为2*层数
+    total_distances = n_layers - total_similarities
+    
+    # 添加调试信息（可选）
+    if torch.any(total_distances < 0):
+        print(f"警告：检测到负距离值，相似度范围: [{total_similarities.min():.4f}, {total_similarities.max():.4f}]")
+        total_distances = torch.clamp(total_distances, min=0.0)  # 确保非负
+    
     return total_distances
 
 
@@ -422,8 +447,8 @@ def _perform_diversity_selection(
     log.info(f"收集到 {len(all_logits)} 个logits张量")
     log.info(f"张量形状示例: {all_logits[0].shape} (应为 [L, E])")
 
-    # 2. 计算Wasserstein距离矩阵
-    distance_matrix = compute_wasserstein_distance_matrix(all_logits, device=device, batch_size=distance_batch_size)
+    # 2. 计算基于逐层二级路由余弦相似度的距离矩阵
+    distance_matrix = compute_cosine_distance_matrix(all_logits, device=device, batch_size=distance_batch_size)
 
     # 3. 使用GPU FPS选择多样化样本，传递质量分数用于初始点选择
     sample_quality_scores = [item["scores"] for item in sample_to_data_mapping]
@@ -724,9 +749,11 @@ def select(cfg: DictConfig) -> None:
 
                 # 显示质量门和MoE路由的详细信息
                 log.info(f"  - Quality Gate前3层的输出形状: {[ql.shape for ql in quality_logits_list[:3]]}")
-                log.info(
-                    f"  - MoE Logits前3层的输出形状: {[outputs.router_logits[i]['moe_logits'][j * sequence_length : (j + 1) * sequence_length].shape for i in range(min(3, len(outputs.router_logits)))]}"
-                )
+                moe_shapes = [
+                    outputs.router_logits[i]["moe_logits"][j * sequence_length : (j + 1) * sequence_length].shape
+                    for i in range(min(3, len(outputs.router_logits)))
+                ]
+                log.info(f"  - MoE Logits前3层的输出形状: {moe_shapes}")
 
                 log.info(f"  - 最终质量分数: {quality_score:.6f}")
                 log.info("=" * 80)

@@ -5,7 +5,7 @@ Select-MoE数据选择综合可视化分析脚本
 本脚本提供了对Select-MoE数据选择过程的全面分析和可视化，包括：
 1. 质量门分析：展示样本的质量分数分布
 2. MoE路由分析：分析专家选择模式
-3. Wasserstein距离计算：样本间相似性度量
+3. 逐层二级路由余弦相似度计算：样本间相似性度量
 4. FPS算法应用：多样性选择过程
 5. 选择结果对比：质量选择 vs 多样性选择
 
@@ -26,13 +26,12 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 import torch
-from scipy.stats import wasserstein_distance
 from sklearn.manifold import MDS
 from sklearn.preprocessing import StandardScaler
 
 from src.stages.selection import (
     calculate_quality_score_from_gates,
-    compute_batch_wasserstein_distance_gpu,
+    compute_batch_cosine_distance_gpu,
     farthest_point_sampling_gpu,
     load_router_data,
 )
@@ -128,7 +127,7 @@ def compute_comprehensive_distances(router_data, max_samples=50):
     distance_matrix = np.zeros((n_samples, n_samples))
 
     print("=" * 70)
-    print("Wasserstein距离计算")
+    print("逐层二级路由余弦相似度计算")
     print("=" * 70)
     print(f"计算{n_samples}个样本的距离矩阵...")
 
@@ -140,9 +139,18 @@ def compute_comprehensive_distances(router_data, max_samples=50):
         # 转换为概率并移至GPU
         moe_probs = torch.softmax(moe_subset.float(), dim=-1).to(device)
 
-        # 批量计算距离矩阵
-        gpu_distance_matrix = compute_batch_wasserstein_distance_gpu(moe_probs, moe_probs)
-        distance_matrix = gpu_distance_matrix.cpu().numpy()
+        # compute_batch_cosine_distance_gpu需要批次间比较，不能直接计算N×N矩阵
+        # 改用循环方式逐对计算距离
+        distance_matrix = torch.zeros(n_samples, n_samples, device=device)
+        for i in range(n_samples):
+            for j in range(i, n_samples):  # 只计算上三角矩阵
+                sample_i = moe_probs[i:i+1]  # [1, L, E]
+                sample_j = moe_probs[j:j+1]  # [1, L, E]
+                dist = compute_batch_cosine_distance_gpu(sample_i, sample_j)
+                distance_matrix[i, j] = dist[0, 0]  # 提取标量值
+                distance_matrix[j, i] = dist[0, 0]  # 对称填充
+        
+        distance_matrix = distance_matrix.cpu().numpy()
     else:
         print("使用CPU计算...")
         # CPU计算
@@ -152,21 +160,33 @@ def compute_comprehensive_distances(router_data, max_samples=50):
                 probs_i = torch.softmax(moe_subset[i].float(), dim=-1)
                 probs_j = torch.softmax(moe_subset[j].float(), dim=-1)
 
-                # 计算总Wasserstein距离
-                total_dist = 0
+                # 计算逐层余弦相似度距离
+                total_similarity = 0
                 for layer_idx in range(probs_i.shape[0]):
                     prob1 = probs_i[layer_idx].numpy()
                     prob2 = probs_j[layer_idx].numpy()
-                    expert_indices = np.arange(len(prob1))
-                    layer_dist = wasserstein_distance(expert_indices, expert_indices, prob1, prob2)
-                    total_dist += layer_dist
+
+                    # 计算余弦相似度
+                    dot_product = np.dot(prob1, prob2)
+                    norm1 = np.linalg.norm(prob1)
+                    norm2 = np.linalg.norm(prob2)
+                    cosine_sim = dot_product / (norm1 * norm2 + 1e-8)
+                    total_similarity += cosine_sim
+
+                # 转换为距离
+                total_dist = 1.0 - total_similarity
 
                 distance_matrix[i, j] = total_dist
                 distance_matrix[j, i] = total_dist
 
     print(f"✓ 距离矩阵计算完成")
-    print(f"  平均距离: {distance_matrix[distance_matrix > 0].mean():.4f}")
-    print(f"  距离标准差: {distance_matrix[distance_matrix > 0].std():.4f}")
+    # 过滤掉对角线上的0值和无效值
+    non_zero_distances = distance_matrix[distance_matrix > 0]
+    if len(non_zero_distances) > 0:
+        print(f"  平均距离: {non_zero_distances.mean():.4f}")
+        print(f"  距离标准差: {non_zero_distances.std():.4f}")
+    else:
+        print("  警告: 所有距离都为0或无效，可能计算出现问题")
     print()
 
     return distance_matrix, selected_indices
@@ -298,8 +318,8 @@ def create_comprehensive_visualization(router_data, distance_matrix, demo_indice
 
     # 5. 距离矩阵热力图
     mask = np.triu(np.ones_like(distance_matrix, dtype=bool), k=1)
-    sns.heatmap(distance_matrix, mask=~mask, cmap="viridis", square=True, cbar_kws={"label": "Wasserstein距离"}, ax=ax5)
-    ax5.set_title(f"样本间Wasserstein距离矩阵\n({len(demo_indices)}个样本)")
+    sns.heatmap(distance_matrix, mask=~mask, cmap="viridis", square=True, cbar_kws={"label": "余弦相似度距离"}, ax=ax5)
+    ax5.set_title(f"样本间余弦相似度距离矩阵\n({len(demo_indices)}个样本)")
 
     # 6. 样本2D投影分布
     mds = MDS(n_components=2, dissimilarity="precomputed", random_state=42, max_iter=3000, eps=1e-9)
@@ -536,8 +556,11 @@ def analyze_single_dataset(dataset_name, router_data, args):
 
     print(f"距离分析:")
     non_zero_distances = distance_matrix[distance_matrix > 0]
-    print(f"  平均样本距离: {non_zero_distances.mean():.4f} ± {non_zero_distances.std():.4f}")
-    print(f"  距离范围: [{non_zero_distances.min():.4f}, {non_zero_distances.max():.4f}]")
+    if len(non_zero_distances) > 0:
+        print(f"  平均样本距离: {non_zero_distances.mean():.4f} ± {non_zero_distances.std():.4f}")
+        print(f"  距离范围: [{non_zero_distances.min():.4f}, {non_zero_distances.max():.4f}]")
+    else:
+        print("  警告: 所有距离都为0或无效")
     print()
 
     print("选择策略效果:")
@@ -659,7 +682,7 @@ def main():
     print("1. 质量选择优化数据质量，但可能选择相似样本")
     print("2. 多样性选择确保样本覆盖面，但质量可能不是最高")
     print("3. Select-MoE结合两者优势，先质量筛选再多样性选择")
-    print("4. Wasserstein距离有效衡量MoE路由模式的差异")
+    print("4. 逐层余弦相似度有效衡量MoE路由模式的差异")
     print("5. FPS算法确保选择样本的最大化多样性分布")
 
     print("=" * 70)

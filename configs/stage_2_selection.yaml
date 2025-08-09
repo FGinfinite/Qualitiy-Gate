@@ -50,8 +50,8 @@ selection_percentage: 0.05
 # If importance_selection_percentage <= selection_percentage, skip quality pre-filtering
 importance_selection_percentage: 0.1
 
-# Enable diversity-based selection using Wasserstein distance + FPS
-# If true, uses Wasserstein distance + Farthest Point Sampling for diverse sample selection
+# Enable diversity-based selection using cosine similarity + FPS
+# If true, uses layer-wise cosine similarity + Farthest Point Sampling for diverse sample selection
 # If false, falls back to quality score ranking (original behavior)
 enable_diversity_selection: true
 

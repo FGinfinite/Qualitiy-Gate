@@ -1,15 +1,15 @@
 # Select-MoE 数据选择可视化脚本
 
-本目录包含三个可视化脚本，用于帮助理解Select-MoE数据选择过程中的关键概念：Wasserstein距离计算和FPS（最远点采样）算法。
+本目录包含三个可视化脚本，用于帮助理解Select-MoE数据选择过程中的关键概念：逐层二级路由余弦相似度计算和FPS（最远点采样）算法。
 
 ## 脚本概述
 
-### 1. `visualize_wasserstein_distance.py`
-**Wasserstein距离计算可视化**
+### 1. `visualize_cosine_similarity.py`
+**余弦相似度计算可视化**
 
-展示如何计算两个样本之间的Wasserstein距离，包括：
+展示如何计算两个样本之间基于逐层二级路由的余弦相似度，包括：
 - 样本间MoE路由概率分布对比
-- 累积分布函数（CDF）可视化
+- 逐层余弦相似度可视化
 - 逐层距离计算过程
 - GPU vs CPU计算性能对比
 - 样本间距离热力图
@@ -45,18 +45,18 @@ pip install matplotlib seaborn scikit-learn pandas torch
 
 ### 基本用法
 
-#### 1. Wasserstein距离可视化
+#### 1. 余弦相似度可视化
 ```bash
 # 基本用法
-python examples/visualize_wasserstein_distance.py outputs/stage_2_selection/2025-08-07/17-09-01/router_data/oasst1_router_data.pt
+python examples/visualize_cosine_similarity.py outputs/stage_2_selection/2025-08-07/17-09-01/router_data/oasst1_router_data.pt
 
 # 指定对比的样本和层
-python examples/visualize_wasserstein_distance.py outputs/stage_2_selection/2025-08-07/17-09-01/router_data/oasst1_router_data.pt \
+python examples/visualize_cosine_similarity.py outputs/stage_2_selection/2025-08-07/17-09-01/router_data/oasst1_router_data.pt \
     --sample1-idx 0 --sample2-idx 5 --layer-idx 2
 
 # 保存图片
-python examples/visualize_wasserstein_distance.py outputs/stage_2_selection/2025-08-07/17-09-01/router_data/oasst1_router_data.pt \
-    --save-plots --output-dir ./wasserstein_plots
+python examples/visualize_cosine_similarity.py outputs/stage_2_selection/2025-08-07/17-09-01/router_data/oasst1_router_data.pt \
+    --save-plots --output-dir ./cosine_plots
 ```
 
 #### 2. FPS算法可视化
@@ -92,14 +92,14 @@ python examples/comprehensive_analysis.py outputs/stage_2_selection/2025-08-07/1
 ### 可视化图表
 
 1. **概率分布对比图**: 展示两个样本在某一层的专家选择概率分布差异
-2. **距离热力图**: 显示多个样本间的Wasserstein距离矩阵
+2. **距离热力图**: 显示多个样本间的余弦相似度距离矩阵
 3. **FPS选择过程**: 2D投影空间中的样本分布和逐步选择过程
 4. **多样性分析**: 选择结果的质量和多样性指标对比
 5. **综合仪表板**: 包含质量门、MoE路由、距离计算和选择策略的全面分析
 
 ### 关键指标
 
-- **Wasserstein距离**: 衡量两个概率分布差异的度量
+- **余弦相似度距离**: 基于逐层二级路由向量余弦相似度的距离度量
 - **质量分数**: 基于质量门输出的样本质量评估  
 - **路由熵**: 样本在专家选择上的多样性指标
 - **负载平衡度**: MoE专家使用的均衡程度
@@ -107,11 +107,12 @@ python examples/comprehensive_analysis.py outputs/stage_2_selection/2025-08-07/1
 
 ## 算法原理
 
-### Wasserstein距离
-- 也称为Earth Mover's Distance (EMD)
-- 衡量将一个概率分布"移动"到另一个分布所需的最小成本
-- 在Select-MoE中用于计算样本间MoE路由模式的相似性
-- 计算公式: `W(P,Q) = Σ|CDF_P(x) - CDF_Q(x)|`
+### 逐层余弦相似度
+- 计算两个向量的方向相似性，范围为[-1, 1]
+- 在Select-MoE中用于衡量样本间二级路由概率分布的相似性
+- 逐层计算后求和：对每层的MoE路由向量计算余弦相似度，然后相加
+- 计算公式: `距离 = 1 - Σ(cosine_similarity(layer_i_prob_1, layer_i_prob_2))`
+- 支持层权重扩展：未来可为不同层分配不同权重
 
 ### FPS算法
 - 贪心策略：每次选择距离已选集合最远的点
@@ -122,7 +123,7 @@ python examples/comprehensive_analysis.py outputs/stage_2_selection/2025-08-07/1
 ### Select-MoE管道
 1. **质量评估**: 使用质量门评估样本质量
 2. **路由分析**: 分析MoE专家选择模式
-3. **距离计算**: 计算样本间Wasserstein距离
+3. **距离计算**: 计算样本间基于逐层余弦相似度的距离
 4. **多样性选择**: 使用FPS算法选择最多样化样本
 
 ## 常见参数说明
@@ -159,7 +160,7 @@ python examples/comprehensive_analysis.py outputs/stage_2_selection/2025-08-07/1
 
 ### 性能优化
 
-- 使用GPU加速Wasserstein距离计算
+- 使用GPU加速余弦相似度距离计算
 - 限制分析样本数量以提高运行速度
 - 选择合适的投影方法(MDS vs PCA)
 
