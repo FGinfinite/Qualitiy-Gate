@@ -95,6 +95,26 @@ def get_model_and_tokenizer(
     if hasattr(cfg.training, "output_router_logits"):
         model.config.output_router_logits = cfg.training.output_router_logits
 
+    # 新增的质量损失配置参数
+    if hasattr(cfg.training, "quality_loss_type"):
+        model.config.quality_loss_type = cfg.training.quality_loss_type
+    if hasattr(cfg.training, "quality_loss_debug"):
+        model.config.quality_loss_debug = cfg.training.quality_loss_debug
+
+    # Beta moment matching参数
+    if hasattr(cfg.training, "quality_loss_params"):
+        params = cfg.training.quality_loss_params
+        if hasattr(params, "beta_target_mean"):
+            model.config.beta_target_mean = params.beta_target_mean
+        if hasattr(params, "beta_target_var"):
+            model.config.beta_target_var = params.beta_target_var
+        if hasattr(params, "w_mean"):
+            model.config.w_mean = params.w_mean
+        if hasattr(params, "w_var"):
+            model.config.w_var = params.w_var
+        if hasattr(params, "lambda_var"):
+            model.config.lambda_var = params.lambda_var
+
     # 加载分词器（使用原始模型名称）
     tokenizer = AutoTokenizer.from_pretrained(cfg.selector_model.tokenizer_name)
     if tokenizer.pad_token is None:

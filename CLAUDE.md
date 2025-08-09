@@ -4,28 +4,28 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Select-MoE is a novel data selection framework using Mixture-of-Experts (MoE) models. The project implements a four-stage pipeline:
+Select-MoE is a data selection framework using Mixture-of-Experts (MoE) models. The project implements a four-stage pipeline:
 
-1. **Stage 1 (Pretrain)**: Warm up a Select-MoE router to learn data quality discrimination
+1. **Stage 1 (Pretrain)**: Train a Select-MoE router to learn data quality discrimination
 2. **Stage 2 (Selection)**: Use the trained router to score and filter training data
 3. **Stage 3 (Finetune)**: Fine-tune target models (Llama-2-7B) with selected data using LoRA
 4. **Stage 4 (Evaluate)**: Evaluate model performance using lm-eval
 
 ## Key Architecture Components
 
-### Select-MoE Model (`src/models/select_moe.py`) - **UPDATED ARCHITECTURE**
+### Select-MoE Model (`src/models/select_moe.py`)
 - **Two-tier Routing Architecture**: Implements quality gate + MoE + trash expert parallel processing
-- **Quality Gate (SIMPLIFIED)**: First-tier single-score quality assessment
-  - **NEW**: Outputs single raw score instead of 2-class logits
-  - **NEW**: `good_ratio = sigmoid(quality_score)`, `bad_ratio = 1 - good_ratio`
-  - **BENEFIT**: Simpler architecture with better gradient flow
+- **Quality Gate**: Single-score quality assessment
+  - Outputs single raw score instead of 2-class logits
+  - `good_ratio = sigmoid(quality_score)`, `bad_ratio = 1 - good_ratio`
+  - Simpler architecture with better gradient flow
 - **MoE Integration**: Uses standard OlmoeSparseMoeBlock for expert routing
 - **Trash Expert**: Configurable output modes (zero, noise, custom) for low-quality data
-- **Quality Classification Loss (ENHANCED)**: 
-  - **NEW**: Extensible loss function framework supporting multiple loss types
-  - **NEW**: Proper padding token handling with attention_mask
-  - **NEW**: Custom loss function support for experimentation
-  - **IMPROVED**: Direct sigmoid on raw score instead of sigmoid on softmax probability
+- **Quality Classification Loss**: 
+  - Extensible loss function framework supporting multiple loss types
+  - Proper padding token handling with attention_mask
+  - Custom loss function support for experimentation
+  - Direct sigmoid on raw score for better optimization
 - **Router Output Format**: Returns dictionary with `quality_score` and `moe_logits` for data selection
 
 ### Core Pipeline (`src/main.py`)
@@ -108,6 +108,12 @@ All stages support Hydra parameter overrides:
 # Override learning rate and batch size
 bash scripts/run_stage_1.sh training.learning_rate=5e-5 training.batch_size=8
 
+# Override quality loss configuration
+bash scripts/run_stage_1.sh training.quality_loss_type=beta_moment_matching training.quality_loss_debug=true
+
+# Override custom loss parameters
+bash scripts/run_stage_1.sh training.quality_loss_type=mean_variance_regularization training.quality_loss_params.lambda_var=0.2
+
 # Override selection percentage
 bash scripts/run_stage_2.sh selection_percentage=0.1
 
@@ -119,14 +125,14 @@ bash scripts/run_stage_3.sh training.lora.r=64 training.lora.lora_alpha=128
 ```bash
 # MMLU evaluation using lm-eval
 accelerate launch -m lm_eval --model hf \
-    --model_args pretrained=meta-llama/Llama-2-7b-hf,peft=outputs/stage_3_finetune/YYYY-MM-DD/HH-MM-SS/checkpoint-XXXX \
+    --model_args "pretrained=meta-llama/Llama-2-7b-hf,peft=outputs/stage_3_finetune/YYYY-MM-DD/HH-MM-SS/checkpoint-XXXX" \
     --tasks mmlu \
     --batch_size auto \
     --output_path outputs/stage_4_eval
 
 # Multi-task evaluation
 accelerate launch -m lm_eval --model hf \
-    --model_args pretrained=meta-llama/Llama-2-7b-hf,peft=outputs/stage_3_finetune/YYYY-MM-DD/HH-MM-SS/checkpoint-XXXX \
+    --model_args "pretrained=meta-llama/Llama-2-7b-hf,peft=outputs/stage_3_finetune/YYYY-MM-DD/HH-MM-SS/checkpoint-XXXX" \
     --tasks mmlu,hellaswag,arc_easy,arc_challenge \
     --batch_size auto \
     --output_path outputs/stage_4_eval
@@ -144,14 +150,30 @@ accelerate launch -m lm_eval --model hf \
 
 ### Stage 1 (Pretrain)
 - `training.peft_mode`: Training mode (`lora` or `full_rank`)
-  - `lora`: 低秩微调，使用LoRA适配器训练指定模块
-  - `full_rank`: 路由参数全秩微调，只训练质量门和MoE门参数
+  - `lora`: Low-rank adaptation using LoRA adapters for specified modules
+  - `full_rank`: Full-rank training of router parameters (quality gate and MoE gate only)
 - `training.learning_rate`: Learning rate (default: 1e-4)
 - `dataset.subset_ratio`: Training data proportion (default: 0.05)
 - `training.quality_loss_weight`: Weight for quality classification loss (default: 0.01)
 - `training.quality_gate_init_mean/std`: Quality gate initialization parameters
 - `training.trash_expert_mode`: Trash expert behavior ("zero", "noise", "custom")
 - `training.enable_load_balancing`: Enable MoE load balancing loss
+
+#### Quality Loss Configuration
+- `training.quality_loss_type`: Loss function type (default: "sigmoid")
+  - `"sigmoid"`: Direct sigmoid loss
+  - `"beta_moment_matching"`: Moment matching with target Beta distribution
+  - `"mean_variance_regularization"`: Mean centering with variance regularization
+  - `"mse"`: Mean squared error loss
+- `training.quality_loss_debug`: Enable debug output (default: false)
+- `training.quality_loss_params`: Parameters for custom loss functions
+  - **Beta Moment Matching**:
+    - `beta_target_mean`: Target mean (default: 0.5)
+    - `beta_target_var`: Target variance (default: 0.05)  
+    - `w_mean`: Weight for mean loss (default: 1.0)
+    - `w_var`: Weight for variance loss (default: 1.0)
+  - **Mean-Variance Regularization**:
+    - `lambda_var`: Variance regularization weight (default: 0.1)
 
 ### Stage 2 (Selection)
 - `selection_percentage`: Data selection ratio (default: 0.05)
@@ -165,8 +187,8 @@ accelerate launch -m lm_eval --model hf \
 ## Memory Requirements
 
 - **Stage 1**: 
-  - `lora` mode: LoRA微调需要 ~8GB GPU memory
-  - `full_rank` mode: 路由参数全秩微调需要 ~16GB GPU memory
+  - `lora` mode: LoRA fine-tuning requires ~8GB GPU memory
+  - `full_rank` mode: Full-rank router training requires ~16GB GPU memory
 - **Stage 2**: Data selection inference has minimal memory requirements
 - **Stage 3**: Llama-2-7B LoRA training requires ~24GB GPU memory
 - **Multi-GPU**: Use FSDP configurations for distributed training
@@ -180,21 +202,21 @@ Ensure correct path dependencies between stages:
 
 Always verify output paths before proceeding to the next stage.
 
-## Recent Changes (Latest Updates)
+## Architecture Overview
 
-### Architecture Improvements
-1. **Simplified Quality Gate**: Changed from 2-class logits to single score output
-2. **Enhanced Loss Function**: Added extensible loss framework with padding token handling
-3. **Better Gradient Flow**: Direct sigmoid on raw score instead of softmax probability
-4. **Debugging Support**: Framework supports testing different auxiliary loss variants
+### Core Components
+- **Two-tier Routing**: Quality gate assessment followed by MoE expert routing
+- **Quality Gate**: Outputs single quality score with sigmoid transformation to good/bad ratios
+- **Trash Expert**: Handles low-quality data with configurable output modes
+- **Loss Framework**: Extensible loss functions with proper padding token handling
 
-### Updated Router Output Format
+### Router Output Format
 ```python
-# OLD FORMAT (deprecated)
-quality_logits = layer_output["quality_logits"]  # Shape: [batch, seq_len, 2]
-
-# NEW FORMAT (current)
+# Current format
 quality_score = layer_output["quality_score"]    # Shape: [batch, seq_len, 1]
+moe_logits = layer_output["moe_logits"]          # Shape: [batch*seq_len, num_experts]
+
+# Compute ratios
 good_ratio = torch.sigmoid(quality_score)        # Shape: [batch, seq_len, 1]
 bad_ratio = 1.0 - good_ratio                     # Shape: [batch, seq_len, 1]
 ```
@@ -213,28 +235,22 @@ model = SelectMoeForCausalLM.from_pretrained("./converted_models/select_moe_conv
 # Training mode (enable router logits)
 outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels, output_router_logits=True)
 
-# NEW architecture returns dictionary format router logits
+# Process router logits
 for layer_output in outputs.router_logits:
-    quality_score = layer_output["quality_score"]   # Shape: [batch, seq_len, 1] - Raw score
+    quality_score = layer_output["quality_score"]   # Shape: [batch, seq_len, 1]
     moe_logits = layer_output["moe_logits"]         # Shape: [batch*seq_len, num_experts]
-    
-    # Compute good/bad ratios manually if needed
+    # Compute good/bad ratios
     good_ratio = torch.sigmoid(quality_score)       # Shape: [batch, seq_len, 1]
     bad_ratio = 1.0 - good_ratio                    # Shape: [batch, seq_len, 1]
 
-# Quality loss now supports extensible loss types and padding handling
-# Loss function automatically handles padding tokens when attention_mask is provided
-total_loss = outputs.loss
+# Configure quality loss type
+model.config.quality_loss_type = "beta_moment_matching"
+model.config.quality_loss_debug = True
 
-# Custom loss experimentation example
-def custom_quality_loss(good_ratio, attention_mask):
-    # Your custom loss logic here
-    # Return tensor with shape (batch_size, seq_len)
-    return your_custom_loss_tensor
-
-# Use custom loss (modify quality_classification_loss call)
-# quality_loss = quality_classification_loss(
-#     router_logits, config, attention_mask, 
-#     loss_type="custom", custom_loss_fn=custom_quality_loss
-# )
+# Configure loss parameters
+model.config.beta_target_mean = 0.5
+model.config.beta_target_var = 0.05
+model.config.w_mean = 1.0
+model.config.w_var = 1.0
+model.config.lambda_var = 0.1
 ```

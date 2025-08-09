@@ -144,12 +144,12 @@ def compute_comprehensive_distances(router_data, max_samples=50):
         distance_matrix = torch.zeros(n_samples, n_samples, device=device)
         for i in range(n_samples):
             for j in range(i, n_samples):  # 只计算上三角矩阵
-                sample_i = moe_probs[i:i+1]  # [1, L, E]
-                sample_j = moe_probs[j:j+1]  # [1, L, E]
+                sample_i = moe_probs[i : i + 1]  # [1, L, E]
+                sample_j = moe_probs[j : j + 1]  # [1, L, E]
                 dist = compute_batch_cosine_distance_gpu(sample_i, sample_j)
                 distance_matrix[i, j] = dist[0, 0]  # 提取标量值
                 distance_matrix[j, i] = dist[0, 0]  # 对称填充
-        
+
         distance_matrix = distance_matrix.cpu().numpy()
     else:
         print("使用CPU计算...")

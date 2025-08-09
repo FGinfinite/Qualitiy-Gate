@@ -43,6 +43,17 @@ class SelectMoeConfig(OlmoeConfig):
         quality_loss_weight: float = 0.5,
         trash_expert_mode: str = "zero",  # "zero", "noise", "custom"
         enable_load_balancing: bool = False,
+        # Quality loss configuration
+        quality_loss_type: str = "sigmoid",  # "sigmoid", "beta_moment_matching", "mean_variance_regularization"
+        # Beta moment matching parameters
+        beta_target_mean: float = 0.5,
+        beta_target_var: float = 0.05,
+        w_mean: float = 1.0,
+        w_var: float = 1.0,
+        # Mean-variance regularization parameters
+        lambda_var: float = 0.1,
+        # Debug configuration
+        quality_loss_debug: bool = False,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -53,6 +64,15 @@ class SelectMoeConfig(OlmoeConfig):
         self.quality_loss_weight = quality_loss_weight
         self.trash_expert_mode = trash_expert_mode
         self.enable_load_balancing = enable_load_balancing
+
+        # Quality loss configuration
+        self.quality_loss_type = quality_loss_type
+        self.beta_target_mean = beta_target_mean
+        self.beta_target_var = beta_target_var
+        self.w_mean = w_mean
+        self.w_var = w_var
+        self.lambda_var = lambda_var
+        self.quality_loss_debug = quality_loss_debug
 
         # 确保默认输出router logits用于MoE训练
         if not hasattr(self, "output_router_logits") or self.output_router_logits is None:
@@ -418,6 +438,90 @@ class SelectMoeModel(SelectMoePreTrainedModel):
         return None
 
 
+def beta_moment_matching_loss(
+    good_ratio: torch.Tensor,
+    attention_mask: torch.Tensor,
+    target_mean: float = 0.5,
+    target_var: float = 0.05,
+    w_mean: float = 1.0,
+    w_var: float = 1.0,
+) -> torch.Tensor:
+    """
+    方案一：矩匹配损失 (基于Beta分布)
+    将good_ratio分布的矩与目标Beta分布的矩进行匹配。
+
+    Args:
+        good_ratio: Good ratio tensor, shape (batch_size, seq_len, 1)
+        attention_mask: Attention mask for excluding padding tokens
+        target_mean: Target mean for Beta distribution
+        target_var: Target variance for Beta distribution
+        w_mean: Weight for mean loss component
+        w_var: Weight for variance loss component
+
+    Returns:
+        Loss tensor with same shape as good_ratio
+    """
+    good_ratio_squeezed = good_ratio.squeeze(-1)
+
+    if attention_mask is not None:
+        if attention_mask.shape != good_ratio_squeezed.shape:
+            attention_mask = attention_mask.expand_as(good_ratio_squeezed)
+        valid_ratios = torch.masked_select(good_ratio_squeezed, attention_mask.bool())
+        if valid_ratios.numel() == 0:
+            return torch.zeros_like(good_ratio_squeezed)
+    else:
+        valid_ratios = good_ratio_squeezed.flatten()
+
+    batch_mean = valid_ratios.mean()
+    batch_var = valid_ratios.var()
+
+    loss_mean = (batch_mean - target_mean) ** 2
+    loss_var = (batch_var - target_var) ** 2
+
+    batch_loss = w_mean * loss_mean + w_var * loss_var
+
+    return torch.full_like(good_ratio_squeezed, batch_loss.item())
+
+
+def mean_variance_regularization_loss(
+    good_ratio: torch.Tensor,
+    attention_mask: torch.Tensor,
+    lambda_var: float = 0.1,
+) -> torch.Tensor:
+    """
+    方案二：均值-方差正则化
+    将均值拉向0.5并鼓励方差最大化。
+
+    Args:
+        good_ratio: Good ratio tensor, shape (batch_size, seq_len, 1)
+        attention_mask: Attention mask for excluding padding tokens
+        lambda_var: Weight for variance regularization term
+
+    Returns:
+        Loss tensor with same shape as good_ratio
+    """
+    good_ratio_squeezed = good_ratio.squeeze(-1)
+
+    if attention_mask is not None:
+        if attention_mask.shape != good_ratio_squeezed.shape:
+            attention_mask = attention_mask.expand_as(good_ratio_squeezed)
+        valid_ratios = torch.masked_select(good_ratio_squeezed, attention_mask.bool())
+        if valid_ratios.numel() == 0:
+            return torch.zeros_like(good_ratio_squeezed)
+    else:
+        valid_ratios = good_ratio_squeezed.flatten()
+
+    batch_mean = valid_ratios.mean()
+    batch_var = valid_ratios.var()
+
+    loss_mean = (batch_mean - 0.5) ** 2
+    loss_var = -lambda_var * batch_var
+
+    batch_loss = loss_mean + loss_var
+
+    return torch.full_like(good_ratio_squeezed, batch_loss.item())
+
+
 def quality_classification_loss(
     router_logits: List[dict],
     config: SelectMoeConfig,
@@ -460,7 +564,7 @@ def quality_classification_loss(
 
         quality_score = layer_router_logits["quality_score"]  # Shape: (batch_size, seq_len, 1)
 
-        if debug:
+        if debug and layer_idx % 5 == 0:
             print(f"\n--- 第{layer_idx}层 ---")
             print(f"quality_score形状: {quality_score.shape}")
             print(f"quality_score设备: {quality_score.device}")
@@ -480,6 +584,14 @@ def quality_classification_loss(
             # MSE损失，目标是将good_ratio推向0
             target = torch.zeros_like(good_ratio.squeeze(-1))
             layer_loss_raw = (good_ratio.squeeze(-1) - target) ** 2
+        elif loss_type == "beta_moment_matching":
+            # 使用矩匹配损失 (方案一)
+            layer_loss_raw = beta_moment_matching_loss(
+                good_ratio, attention_mask, target_mean=config.beta_target_mean, target_var=config.beta_target_var, w_mean=config.w_mean, w_var=config.w_var
+            )
+        elif loss_type == "mean_variance_regularization":
+            # 使用均值-方差正则化损失 (方案二)
+            layer_loss_raw = mean_variance_regularization_loss(good_ratio, attention_mask, lambda_var=config.lambda_var)
         elif loss_type == "custom" and custom_loss_fn is not None:
             # 使用自定义损失函数
             layer_loss_raw = custom_loss_fn(good_ratio, attention_mask)
@@ -646,8 +758,16 @@ class SelectMoeForCausalLM(SelectMoePreTrainedModel):
                 aux_loss = torch.tensor(0.0, device=hidden_states.device)
 
             # Quality classification loss (always computed)
-            quality_loss = quality_classification_loss(outputs.router_logits if return_dict else outputs[-1], self.config, attention_mask=attention_mask)
-            # print(f"Quality Loss: {quality_loss.item()}")
+            quality_loss = quality_classification_loss(
+                outputs.router_logits if return_dict else outputs[-1],
+                self.config,
+                attention_mask=attention_mask,
+                loss_type=self.config.quality_loss_type,
+                debug=self.config.quality_loss_debug,
+            )
+
+            if self.config.quality_loss_debug:
+                print(f"Quality Loss: {quality_loss.item()}")
             aux_loss += self.config.quality_loss_weight * quality_loss
 
             if labels is not None:
@@ -659,8 +779,9 @@ class SelectMoeForCausalLM(SelectMoePreTrainedModel):
                 output = (aux_loss,) + output
             return (loss,) + output if loss is not None else output
 
-        # print(f"Router Aux Loss: {aux_loss.item() if aux_loss is not None else 'N/A'}")
-        # print(f"Total Loss: {loss.item() if loss is not None else 'N/A'}")
+        if self.config.quality_loss_debug:
+            print(f"Router Aux Loss: {aux_loss.item() if aux_loss is not None else 'N/A'}")
+            print(f"Total Loss: {loss.item() if loss is not None else 'N/A'}")
 
         return MoeCausalLMOutputWithPast(
             loss=loss,

@@ -6,10 +6,10 @@ stage: pretrain
 # Hydra Configuration
 hydra:
   run:
-    dir: outputs/stage_1_pretrain/${now:%Y-%m-%d}/${now:%H-%M-%S}-batch=${training.batch_size}_lr=${training.learning_rate}_tag=${tag}
+    dir: outputs/stage_1_pretrain/${now:%Y-%m-%d}/${now:%H-%M-%S}-batch=${training.batch_size}_lr=${training.learning_rate}_loss=${training.quality_loss_type}_tag=${tag}
   sweep:
     dir: outputs/stage_1_pretrain
-    subdir: ${now:%Y-%m-%d}/${now:%H-%M-%S}-batch=${training.batch_size}_lr=${training.learning_rate}_tag=${tag}
+    subdir: ${now:%Y-%m-%d}/${now:%H-%M-%S}-batch=${training.batch_size}_lr=${training.learning_rate}_loss=${training.quality_loss_type}_tag=${tag}
   job:
     config:
       override_dirname:
@@ -45,8 +45,8 @@ dataset:
 
 # Training configuration
 training:
-  batch_size: 4
-  learning_rate: 1e-3
+  batch_size: 8
+  learning_rate: 3e-4
   epochs: 4
   optimizer: "AdamW"
   scheduler: "linear"
@@ -62,10 +62,21 @@ training:
     memory_need_gb: 24
     over_grab: false
   # New two-tier routing architecture parameters
-  quality_loss_weight: 0.5
+  quality_loss_weight: 1
   quality_gate_init_mean: 0.0
   quality_gate_init_std: 0.02
   trash_expert_mode: "zero"  # Options: "zero", "noise", "custom"
   enable_load_balancing: false
   output_router_logits: true
+  # Quality loss configuration
+  quality_loss_type: "sigmoid"  # Options: "sigmoid", "beta_moment_matching", "mean_variance_regularization", "mse"
+  quality_loss_debug: false  # Enable debug output for quality loss computation
+  quality_loss_params:
+    # Beta moment matching parameters (方案一)
+    beta_target_mean: 0.5
+    beta_target_var: 0.05
+    w_mean: 1.0
+    w_var: 1.0
+    # Mean-variance regularization parameters (方案二)
+    lambda_var: 0.1
 

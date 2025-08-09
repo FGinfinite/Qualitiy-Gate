@@ -203,12 +203,12 @@ def compute_batch_cosine_distance_gpu(batch_probs_i: torch.Tensor, batch_probs_j
     # 为了得到非负距离，使用：距离 = 层数 - 相似度总和
     # 这样相同向量的距离为0，完全相反向量的距离为2*层数
     total_distances = n_layers - total_similarities
-    
+
     # 添加调试信息（可选）
     if torch.any(total_distances < 0):
         print(f"警告：检测到负距离值，相似度范围: [{total_similarities.min():.4f}, {total_similarities.max():.4f}]")
         total_distances = torch.clamp(total_distances, min=0.0)  # 确保非负
-    
+
     return total_distances
 
 

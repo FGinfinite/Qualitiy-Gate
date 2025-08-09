@@ -23,6 +23,8 @@
   - **可扩展框架**: 支持多种损失类型 (sigmoid, MSE, custom)
   - **填充令牌处理**: 正确处理attention_mask，排除padding tokens
   - **自定义损失**: 支持实验性损失函数，便于调试和优化
+  - **NEW: 方案一 & 方案二**: 实现了Beta矩匹配和均值-方差正则化两种高级损失函数
+  - **可配置调试**: `quality_loss_debug`参数支持详细的损失计算调试输出
 - **HuggingFace 兼容**: 支持标准的 `from_pretrained()` 加载和生态工具
 
 ### 架构对比
@@ -35,6 +37,8 @@
 | 填充处理 | 无特殊处理 | attention_mask排除padding |
 | 损失扩展性 | 固定函数 | 支持自定义损失函数 |
 | 调试支持 | 基本 | 丰富的实验框架 |
+| 高级损失 | 无 | Beta矩匹配 & 均值-方差正则化 |
+| 配置化调试 | 无 | quality_loss_debug参数 |
 
 ### 模型对比
 
@@ -219,7 +223,22 @@ for layer_output in outputs.router_logits:
 # 新版本自动处理padding tokens
 total_loss = outputs.loss
 
-# 自定义损失函数示例 (实验性功能)
+# **NEW**: 配置质量损失类型和调试
+model.config.quality_loss_type = "beta_moment_matching"  # 方案一: Beta矩匹配
+# model.config.quality_loss_type = "mean_variance_regularization"  # 方案二: 均值-方差正则化
+model.config.quality_loss_debug = True  # 启用调试输出
+
+# **NEW**: 配置自定义损失参数
+# 方案一参数 (Beta矩匹配)
+model.config.beta_target_mean = 0.5
+model.config.beta_target_var = 0.05
+model.config.w_mean = 1.0
+model.config.w_var = 1.0
+
+# 方案二参数 (均值-方差正则化)
+model.config.lambda_var = 0.1
+
+# 自定义损失函数示例 (实验性功能，仍然支持)
 def my_custom_loss(good_ratio, attention_mask):
     # 你的自定义损失逻辑
     # 返回形状为 (batch_size, seq_len) 的张量
@@ -235,6 +254,9 @@ def my_custom_loss(good_ratio, attention_mask):
 - **损失函数增强**: 支持多种损失类型和自定义损失函数
 - **Padding处理**: 自动排除填充token，提高训练质量
 - **调试友好**: 丰富的实验框架支持，便于损失函数调试
+- **NEW: 高级损失函数**: 实现方案一(Beta矩匹配)和方案二(均值-方差正则化)
+- **NEW: 可配置调试**: `quality_loss_debug` 参数支持详细的损失计算调试输出
+- **NEW: 参数同步**: 所有训练阶段完全同步新的配置参数
 
 ### 参数覆写机制
 
