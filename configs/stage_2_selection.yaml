@@ -12,10 +12,22 @@ selector_model:
 # Hydra settings to create a timestamped output directory, similar to stage 1
 hydra:
   run:
-    dir: outputs/stage_2_selection/${now:%Y-%m-%d}/${now:%H-%M-%S}-${tag}
+    dir: outputs/stage_2_selection/${now:%Y-%m-%d}/${now:%H-%M-%S}-${extract_config:${model_checkpoint_path}}
+  sweep:
+    dir: outputs/stage_2_pretrain
+    subdir: ${now:%Y-%m-%d}/${now:%H-%M-%S}-${extract_config:${model_checkpoint_path}}
+  job:
+    config:
+      override_dirname:
+        kv_sep: "="
+        item_sep: ","
+        exclude_keys:
+          - hydra.run.dir
+          - hydra.sweep.dir
+          - hydra.sweep.subdir
 
 # Path to the full rank weights from stage 1
-model_checkpoint_path: "outputs/stage_1_pretrain/2025-08-07/02-15-08-batch=4,lr=0.001/full_rank_weights.pt"
+model_checkpoint_path: "outputs/stage_1_pretrain/2025-08-10/03-42-54-batch=8_lr=0.001_loss=beta_moment_matching_tag=none/full_rank_weights.pt"
 
 # The final output path for the selected data.
 # It uses the Hydra-generated run directory.
@@ -54,6 +66,12 @@ importance_selection_percentage: 0.1
 # If true, uses layer-wise cosine similarity + Farthest Point Sampling for diverse sample selection
 # If false, falls back to quality score ranking (original behavior)
 enable_diversity_selection: true
+
+# Skip data selection process after obtaining router logits
+# If true, only performs model inference to collect router logits and saves them to router_data/
+# Data selection can then be performed separately using different algorithms/scripts
+# If false, performs data selection after inference (default behavior)
+skip_data_selection: true
 
 # Data processing settings
 data_process:

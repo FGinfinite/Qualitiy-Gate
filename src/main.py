@@ -9,7 +9,11 @@ project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)  # 将项目根目录添加到sys.path的最前面
 
-from src.stages import pretrain, selection, finetune
+from src.stages import finetune, pretrain, selection  # noqa: E402
+from src.utils.hydra_resolvers import register_custom_resolvers  # noqa: E402
+
+# Register custom Hydra resolvers before @hydra.main
+register_custom_resolvers()
 
 
 @hydra.main(config_path="../configs", config_name="stage_1_pretrain", version_base=None)

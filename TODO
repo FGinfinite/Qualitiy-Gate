@@ -105,9 +105,22 @@ CUDA_VISIBLE_DEVICES=5 back scripts/run_stage_1.sh -m training.learning_rate=1e-
 CUDA_VISIBLE_DEVICES=7 back scripts/run_stage_1.sh -m training.learning_rate=1e-3,3e-4,1e-4 training.quality_loss_type="mean_variance_regularization"
 
 
+CUDA_VISIBLE_DEVICES=2 back scripts/run_stage_1.sh training.learning_rate=1e-3 training.quality_loss_type="mse"
+CUDA_VISIBLE_DEVICES=5 back scripts/run_stage_1.sh training.learning_rate=3e-4 training.quality_loss_type="mse"
+CUDA_VISIBLE_DEVICES=7 back scripts/run_stage_1.sh training.learning_rate=1e-4 training.quality_loss_type="mse"
+
+
  
 数据选择
 CUDA_VISIBLE_DEVICES=3 back scripts/run_stage_2.sh model_checkpoint_path=\"outputs/stage_1_pretrain/2025-08-09/02-46-05-batch=4,lr=0.0001/full_rank_weights.pt\" tag=\"lr=1e-4\" data_process.batch_size=16
+
+CUDA_VISIBLE_DEVICES=2 back scripts/run_stage_2.sh model_checkpoint_path=\"outputs/stage_1_pretrain/2025-08-10/03-42-54-batch=8_lr=0.001_loss=beta_moment_matching_tag=none/full_rank_weights.pt\" tag=\"loss=beta_lr=1e-3\" data_process.batch_size=32
+
+CUDA_VISIBLE_DEVICES=2 back scripts/run_stage_2.sh -m data_process.batch_size=32 model_checkpoint_path=\"outputs/stage_1_pretrain/2025-08-10/03-42-54-batch=8_lr=0.001_loss=beta_moment_matching_tag=none/full_rank_weights.pt\",\"outputs/stage_1_pretrain/2025-08-10/03-42-54-batch=8_lr=0.0001_loss=beta_moment_matching_tag=none/full_rank_weights.pt\",\"outputs/stage_1_pretrain/2025-08-10/03-42-54-batch=8_lr=0.001_loss=mean_variance_regularization_tag=none/full_rank_weights.pt\",\"outputs/stage_1_pretrain/2025-08-10/03-42-54-batch=8_lr=0.0001_loss=mean_variance_regularization_tag=none/full_rank_weights.pt\"
+
+CUDA_VISIBLE_DEVICES=5 back scripts/run_stage_2.sh -m data_process.batch_size=32 model_checkpoint_path=\"outputs/stage_1_pretrain/2025-08-10/03-42-54-batch=8_lr=0.001_loss=sigmoid_tag=none/full_rank_weights.pt\",\"outputs/stage_1_pretrain/2025-08-10/03-42-54-batch=8_lr=0.0001_loss=sigmoid_tag=none/full_rank_weights.pt\",\"outputs/stage_1_pretrain/2025-08-10/03-42-54-batch=8_lr=0.0003_loss=beta_moment_matching_tag=none/full_rank_weights.pt\",\"outputs/stage_1_pretrain/2025-08-10/03-42-54-batch=8_lr=0.0003_loss=mean_variance_regularization_tag=none/full_rank_weights.pt\"
+
+CUDA_VISIBLE_DEVICES=7 back scripts/run_stage_2.sh -m data_process.batch_size=32 model_checkpoint_path=\"outputs/stage_1_pretrain/2025-08-10/03-42-54-batch=8_lr=0.0003_loss=sigmoid_tag=none/full_rank_weights.pt\",\"outputs/stage_1_pretrain/2025-08-10/14-24-36-batch=8_lr=0.001_loss=mse_tag=none/full_rank_weights.pt\",\"outputs/stage_1_pretrain/2025-08-10/14-24-36-batch=8_lr=0.0001_loss=mse_tag=none/full_rank_weights.pt\",\"outputs/stage_1_pretrain/2025-08-10/14-24-36-batch=8_lr=0.0003_loss=mse_tag=none/full_rank_weights.pt\"
 
 
 可视化数据
@@ -130,4 +143,8 @@ pretrain过程中mean要考虑有效token
 
 
 优化方案：
-1. 自定义损失的计算方案：
+阶段一：
+1. 自定义损失的计算方案：MSE, sigmoid, BEATA, VAR, 
+2. 是否要除以seq_len以达到数据层面的幅度相同？（现在为是）
+阶段二：
+1. 查看数据分布的特征
