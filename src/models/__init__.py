@@ -5,8 +5,8 @@
 
 from .select_moe import (
     SelectMoeConfig,
-    SelectMoeModel,
     SelectMoeForCausalLM,
+    SelectMoeModel,
     register_select_moe,
 )
 

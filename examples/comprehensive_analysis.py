@@ -23,14 +23,11 @@ import glob
 
 import matplotlib.pyplot as plt
 import numpy as np
-import pandas as pd
 import seaborn as sns
 import torch
 from sklearn.manifold import MDS
-from sklearn.preprocessing import StandardScaler
 
 from src.stages.selection import (
-    calculate_quality_score_from_gates,
     compute_batch_cosine_distance_gpu,
     farthest_point_sampling_gpu,
     load_router_data,
@@ -55,7 +52,7 @@ def analyze_quality_gates(router_data, top_k=10):
     # 每个样本在所有层的平均good概率作为质量分数
     sample_quality_scores = good_probs.mean(dim=1).numpy()  # [N]
 
-    print(f"质量分数统计:")
+    print("质量分数统计:")
     print(f"  平均值: {sample_quality_scores.mean():.4f}")
     print(f"  标准差: {sample_quality_scores.std():.4f}")
     print(f"  最小值: {sample_quality_scores.min():.4f}")
@@ -94,7 +91,7 @@ def analyze_moe_routing(router_data):
     # 计算专家使用统计
     expert_usage = moe_probs.mean(dim=(0, 1)).numpy()  # [E] - 每个专家的平均使用率
 
-    print(f"专家使用统计:")
+    print("专家使用统计:")
     print(f"  专家数量: {len(expert_usage)}")
     print(f"  平均使用率: {expert_usage.mean():.4f}")
     print(f"  使用率标准差: {expert_usage.std():.4f}")
@@ -106,7 +103,7 @@ def analyze_moe_routing(router_data):
     entropy_per_layer = -torch.sum(moe_probs * torch.log(moe_probs + 1e-8), dim=-1)  # [N, L]
     sample_avg_entropy = entropy_per_layer.mean(dim=1).numpy()  # [N]
 
-    print(f"路由多样性统计（熵）:")
+    print("路由多样性统计（熵）:")
     print(f"  平均熵: {sample_avg_entropy.mean():.4f}")
     print(f"  熵标准差: {sample_avg_entropy.std():.4f}")
     print(f"  最大可能熵: {np.log(len(expert_usage)):.4f}")
@@ -179,7 +176,7 @@ def compute_comprehensive_distances(router_data, max_samples=50):
                 distance_matrix[i, j] = total_dist
                 distance_matrix[j, i] = total_dist
 
-    print(f"✓ 距离矩阵计算完成")
+    print("✓ 距离矩阵计算完成")
     # 过滤掉对角线上的0值和无效值
     non_zero_distances = distance_matrix[distance_matrix > 0]
     if len(non_zero_distances) > 0:
@@ -208,7 +205,7 @@ def perform_selection_comparison(router_data, distance_matrix, demo_indices, qua
     quality_selected_local = np.argsort(quality_subset)[-n_select:]  # 本地索引
     quality_selected_global = demo_indices[quality_selected_local]  # 全局索引
 
-    print(f"1. 质量选择（选择质量分数最高的样本）:")
+    print("1. 质量选择（选择质量分数最高的样本）:")
     for i, global_idx in enumerate(quality_selected_global):
         local_idx = quality_selected_local[i]
         print(f"   样本{global_idx} (本地{local_idx}): 质量分数 {quality_subset[local_idx]:.4f}")
@@ -221,7 +218,7 @@ def perform_selection_comparison(router_data, distance_matrix, demo_indices, qua
     fps_selected_local = farthest_point_sampling_gpu(distance_tensor, n_select, seed=42)
     fps_selected_global = demo_indices[fps_selected_local]
 
-    print(f"2. 多样性选择（FPS算法）:")
+    print("2. 多样性选择（FPS算法）:")
     for i, local_idx in enumerate(fps_selected_local):
         global_idx = fps_selected_global[i]
         print(f"   样本{global_idx} (本地{local_idx}): 质量分数 {quality_subset[local_idx]:.4f}")
@@ -232,7 +229,7 @@ def perform_selection_comparison(router_data, distance_matrix, demo_indices, qua
     random_selected_local = np.random.choice(n_total, n_select, replace=False)
     random_selected_global = demo_indices[random_selected_local]
 
-    print(f"3. 随机选择（基准）:")
+    print("3. 随机选择（基准）:")
     for i, local_idx in enumerate(random_selected_local):
         global_idx = random_selected_global[i]
         print(f"   样本{global_idx} (本地{local_idx}): 质量分数 {quality_subset[local_idx]:.4f}")
@@ -543,18 +540,18 @@ def analyze_single_dataset(dataset_name, router_data, args):
     print(f"选择样本数量: {n_selected} (选择率: {args.selection_ratio:.1%})")
     print()
 
-    print(f"质量分析:")
+    print("质量分析:")
     print(f"  平均质量分数: {quality_scores.mean():.4f} ± {quality_scores.std():.4f}")
     print(f"  质量分数范围: [{quality_scores.min():.4f}, {quality_scores.max():.4f}]")
     print()
 
-    print(f"路由分析:")
+    print("路由分析:")
     print(f"  专家负载平衡度: {1 - expert_usage.std() * len(expert_usage):.4f}")
     print(f"  平均路由熵: {sample_entropy.mean():.4f} ± {sample_entropy.std():.4f}")
     print(f"  最大可能熵: {np.log(len(expert_usage)):.4f}")
     print()
 
-    print(f"距离分析:")
+    print("距离分析:")
     non_zero_distances = distance_matrix[distance_matrix > 0]
     if len(non_zero_distances) > 0:
         print(f"  平均样本距离: {non_zero_distances.mean():.4f} ± {non_zero_distances.std():.4f}")

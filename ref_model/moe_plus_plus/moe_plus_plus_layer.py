@@ -1,14 +1,11 @@
-import typing
-from collections.abc import Callable
+import copy
 from collections import defaultdict
-from typing import Any, Dict, TYPE_CHECKING, Optional, Tuple, List
+from typing import TYPE_CHECKING, Any, Dict, List, Tuple
 
 import torch
-import copy
-
+import torch.nn.functional as F
 from torch import Tensor
 from torch.nn import Module
-import torch.nn.functional as F
 
 if TYPE_CHECKING:
     Base = Module[Tensor]
@@ -119,12 +116,12 @@ class Router(Module):
         if isinstance(self.wg, torch.nn.Linear):
             if self.wg.weight.dtype != torch.float32:
                 self.wg = self.wg.float()
-                setattr(self.wg.weight, "router", True)
+                self.wg.weight.router = True
         else:
             if self.wg[0].weight.dtype != torch.float32:
                 self.wg = self.wg.float()
-                setattr(self.wg[0].weight, "router", True)
-                setattr(self.wg[2].weight, "router", True)
+                self.wg[0].weight.router = True
+                self.wg[2].weight.router = True
         input_fp32 = input.float()
         logits = self.wg(input_fp32)
 

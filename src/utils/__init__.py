@@ -8,12 +8,12 @@
 from .logging_utils import (
     HydraLoggingCallback,
     configure_transformers_logging,
-    get_logger,
-    setup_training_logging,
-    info,
-    warning,
-    error,
     debug,
+    error,
+    get_logger,
+    info,
+    setup_training_logging,
+    warning,
 )
 
 __all__ = [

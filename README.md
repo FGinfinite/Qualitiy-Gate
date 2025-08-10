@@ -5,7 +5,7 @@
 本项目是一个创新的数据选择实验，旨在探索一种利用混合专家模型（Mixture-of-Experts, MoE）进行高效数据筛选的方法。核心思想是：
 
 1. **预热阶段**: 对小型 Select-MoE 模型的 Router（路由器）进行预热微调，使其具备数据质量判别能力
-2. **选择阶段**: 利用预热的 Router 为大规模数据集打分，筛选高质量数据子集  
+2. **选择阶段**: 利用预热的 Router 为大规模数据集打分，通过GPU加速聚类算法筛选多样化高质量数据子集  
 3. **微调阶段**: 使用筛选的高质量数据微调大规模目标模型
 4. **评估阶段**: 评估数据选择策略的最终效果
 
@@ -25,6 +25,12 @@
   - **自定义损失**: 支持实验性损失函数，便于调试和优化
   - **NEW: 方案一 & 方案二**: 实现了Beta矩匹配和均值-方差正则化两种高级损失函数
   - **可配置调试**: `quality_loss_debug`参数支持详细的损失计算调试输出
+- **聚类选择算法 (NEW)**: GPU加速聚类实现多样化数据选择
+  - **K-Means + Elbow Method**: 自动k值选择，确保最优聚类数量
+  - **HDBSCAN聚类**: 无参数密度聚类，自适应发现簇结构
+  - **余弦距离**: 使用MoE logits的语义相似性进行聚类
+  - **轮选策略**: 从每个簇中轮流选择高质量数据，保证多样性
+  - **GPU加速**: 支持RAPIDS cuML和PyTorch GPU加速，处理大规模数据
 - **HuggingFace 兼容**: 支持标准的 `from_pretrained()` 加载和生态工具
 
 ### 架构对比
@@ -39,6 +45,9 @@
 | 调试支持 | 基本 | 丰富的实验框架 |
 | 高级损失 | 无 | Beta矩匹配 & 均值-方差正则化 |
 | 配置化调试 | 无 | quality_loss_debug参数 |
+| 数据选择 | 基础质量筛选 | 聚类+轮选多样化选择 |
+| 聚类算法 | 无 | K-Means + HDBSCAN |
+| GPU加速 | 无 | RAPIDS cuML + PyTorch |
 
 ### 模型对比
 
@@ -59,6 +68,8 @@
 - **分布式训练**: [`accelerate`](https://github.com/huggingface/accelerate) - 多GPU 训练支持
 - **配置管理**: [`hydra`](https://github.com/facebookresearch/hydra) - 灵活的配置系统
 - **模型评估**: [`lm-eval`](https://github.com/EleutherAI/lm-evaluation-harness) - 标准评测框架
+- **聚类算法**: [`scikit-learn`](https://scikit-learn.org/) - K-Means和HDBSCAN聚类算法
+- **GPU聚类**: [`RAPIDS cuML`](https://github.com/rapidsai/cuml) - GPU加速聚类 (可选)
 
 ## 🚀 快速开始
 
@@ -134,22 +145,37 @@ CUDA_VISIBLE_DEVICES=0 bash scripts/run_stage_1.sh \
 
 **输出**: 权重文件保存在 `outputs/stage_1_pretrain/YYYY-MM-DD/HH-MM-SS/full_rank_weights.pt`
 
-### 步骤 2: 数据选择
+### 步骤 2: 聚类数据选择
 
-使用预热的 Select-MoE 模型为训练数据打分并筛选：
+使用预热的 Select-MoE 模型为训练数据打分并通过聚类算法筛选多样化数据：
 
 ```bash
-# 使用阶段1的输出进行数据选择
+# 使用阶段1的输出进行聚类数据选择
 CUDA_VISIBLE_DEVICES=0 bash scripts/run_stage_2.sh \
     model_checkpoint_path=outputs/stage_1_pretrain/2025-07-16/01-57-27/full_rank_weights.pt
 
-# 调整选择比例（选择前10%的数据）
+# 调整选择比例和聚类方法
 CUDA_VISIBLE_DEVICES=0 bash scripts/run_stage_2.sh \
     model_checkpoint_path=outputs/stage_1_pretrain/2025-07-16/01-57-27/full_rank_weights.pt \
-    selection_percentage=0.1
+    selection_percentage=0.1 \
+    clustering_method=hdbscan
+
+# 自定义K-Means参数
+CUDA_VISIBLE_DEVICES=0 bash scripts/run_stage_2.sh \
+    model_checkpoint_path=outputs/stage_1_pretrain/2025-07-16/01-57-27/full_rank_weights.pt \
+    clustering_method=kmeans \
+    clustering_params.k_range="[20,80]" \
+    clustering_params.max_iters=500
+
+# 自定义HDBSCAN参数
+CUDA_VISIBLE_DEVICES=0 bash scripts/run_stage_2.sh \
+    model_checkpoint_path=outputs/stage_1_pretrain/2025-07-16/01-57-27/full_rank_weights.pt \
+    clustering_method=hdbscan \
+    clustering_params.min_cluster_size=150 \
+    clustering_params.auto_tune=true
 ```
 
-**输出**: 筛选数据保存在 `outputs/stage_2_selection/YYYY-MM-DD/HH-MM-SS/selected_data.jsonl`
+**输出**: 聚类筛选数据保存在 `outputs/stage_2_selection/YYYY-MM-DD/HH-MM-SS/selected_data.jsonl`
 
 ### 步骤 3: 目标模型微调
 
@@ -292,9 +318,13 @@ bash scripts/run_stage_3.sh training.lora.r=128 training.batch_size=64
 - `training.trash_expert_mode`: 垃圾专家模式 ("zero", "noise", "custom")
 - `training.enable_load_balancing`: 启用MoE负载均衡损失
 
-**阶段2 (数据选择)**:
+**阶段2 (聚类数据选择)**:
 - `selection_percentage`: 数据选择比例 (默认: 0.05)
 - `model_checkpoint_path`: 阶段1输出的权重路径
+- `clustering_method`: 聚类算法 ('kmeans' 或 'hdbscan', 默认: 'kmeans')
+- `clustering_params`: 聚类参数配置
+  - **K-Means参数**: `auto_k`, `k`, `k_range`, `max_iters`
+  - **HDBSCAN参数**: `min_cluster_size`, `min_samples`, `metric`, `use_gpu`, `auto_tune`
 
 **阶段3 (模型微调)**:
 - `training.lora.r`: LoRA 秩 (默认: 128)
@@ -311,7 +341,7 @@ export CUDA_VISIBLE_DEVICES=0,1,2,3  # 指定使用的GPU
 
 ### 内存需求
 - **阶段1**: Select-MoE 全参数训练，建议至少 16GB GPU 内存
-- **阶段2**: 数据选择推理，内存需求较小
+- **阶段2**: 聚类数据选择，建议 4-8GB GPU 内存（取决于数据集规模）
 - **阶段3**: Llama-2-7B LoRA 训练，建议 24GB 以上 GPU 内存
 
 ### 路径依赖
@@ -325,6 +355,39 @@ export CUDA_VISIBLE_DEVICES=0,1,2,3  # 指定使用的GPU
 更多详细的执行说明和参数配置，请参考 [`docs.md`](docs.md) 文件。
 
 ## 🔬 技术原理
+
+### 聚类-轮选数据选择策略
+
+Select-MoE 采用先进的聚类-轮选策略，确保选择数据的质量和多样性：
+
+**第一步：特征提取**
+- 使用预热的 Select-MoE Router 处理数据，获取 MoE logits 作为语义特征
+- 将每个样本的 `[序列长度, 专家数]` 特征展平为一维向量
+- 构建特征矩阵 `[样本数, 特征维度]` 用于聚类
+
+**第二步：GPU加速聚类**
+```python
+# K-Means + Elbow Method (自动k值选择)
+kmeans = GPUKMeansClustering(device='cuda')
+labels = kmeans.find_optimal_k_elbow(features, k_range=[10, 100])
+
+# HDBSCAN (无参数密度聚类)
+hdbscan = GPUHDBSCANClustering(device='cuda') 
+labels = hdbscan.fit_predict(features, metric='cosine')
+```
+
+**第三步：轮选高质量数据**
+- 将数据按聚类标签分组到各个簇中
+- 在每个簇内按质量分数降序排列
+- 轮流从各簇选择最高质量样本，直到达到目标数量
+- 确保最终数据集在保证高质量的同时具有语义多样性
+
+**算法优势**:
+1. **质量保证**: 基于Router质量评分，确保选择高质量数据
+2. **多样性保证**: 聚类确保覆盖不同语义区域
+3. **GPU加速**: 支持大规模数据处理（270k+样本）
+4. **自适应参数**: K-Means自动k值选择，HDBSCAN无需预设参数
+5. **语义聚类**: 使用余弦距离和MoE logits进行语义相似度聚类
 
 ### 两层路由架构设计
 
@@ -401,4 +464,6 @@ L_total = L_language_modeling + w_load_balancing * L_load_balancing + w_quality 
 2. **多任务适配**: 扩展支持更多下游任务的数据选择
 3. **效率优化**: 优化训练和推理效率，支持更大规模模型
 4. **评估扩展**: 增加更多评估指标和基准测试
+5. **聚类算法扩展**: 支持更多聚类算法(如Spectral Clustering, Gaussian Mixture Model)
+6. **分布式聚类**: 支持多GPU分布式聚类处理超大规模数据集
 

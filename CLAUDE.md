@@ -37,6 +37,13 @@ Select-MoE is a data selection framework using Mixture-of-Experts (MoE) models. 
 - Dataset loaders for training and evaluation data
 - Support for multiple datasets: CoT, Dolly, FLAN-v2, OASST1
 
+### Clustering-Based Selection (`src/clustering/`)
+- **GPU K-Means with Elbow Method**: Automatic k-value selection using GPU acceleration
+- **GPU HDBSCAN**: Parameter-free clustering with RAPIDS cuML support and CPU fallback
+- **Round-Robin Selection**: Selects high-quality data from each cluster using quality scores
+- **Cosine Distance Metric**: Uses cosine similarity for better semantic clustering of MoE logits
+- **ClusterBasedSelection**: Main selection class integrating both clustering algorithms
+
 ## Code Quality Instructions
 
 **IMPORTANT**: When checking syntax or formatting code, Claude must ALWAYS use:
@@ -92,7 +99,7 @@ python scripts/compare_converted_model.py --converted-model ./converted_models/s
 # Stage 1: Router pretraining (set CUDA_VISIBLE_DEVICES first)
 CUDA_VISIBLE_DEVICES=0,1,2,3 bash scripts/run_stage_1.sh
 
-# Stage 2: Data selection
+# Stage 2: Clustering-based data selection
 CUDA_VISIBLE_DEVICES=0 bash scripts/run_stage_2.sh model_checkpoint_path=outputs/stage_1_pretrain/YYYY-MM-DD/HH-MM-SS/full_rank_weights.pt
 
 # Stage 3: Target model fine-tuning
@@ -114,8 +121,14 @@ bash scripts/run_stage_1.sh training.quality_loss_type=beta_moment_matching trai
 # Override custom loss parameters
 bash scripts/run_stage_1.sh training.quality_loss_type=mean_variance_regularization training.quality_loss_params.lambda_var=0.2
 
-# Override selection percentage
-bash scripts/run_stage_2.sh selection_percentage=0.1
+# Override selection percentage and clustering method
+bash scripts/run_stage_2.sh selection_percentage=0.1 clustering_method=hdbscan
+
+# Override K-Means parameters
+bash scripts/run_stage_2.sh clustering_method=kmeans clustering_params.k=50 clustering_params.auto_k=false
+
+# Override HDBSCAN parameters
+bash scripts/run_stage_2.sh clustering_method=hdbscan clustering_params.min_cluster_size=100 clustering_params.auto_tune=true
 
 # Override LoRA parameters
 bash scripts/run_stage_3.sh training.lora.r=64 training.lora.lora_alpha=128
@@ -178,6 +191,19 @@ accelerate launch -m lm_eval --model hf \
 ### Stage 2 (Selection)
 - `selection_percentage`: Data selection ratio (default: 0.05)
 - `model_checkpoint_path`: Path to Stage 1 output weights
+- `clustering_method`: Clustering algorithm ('kmeans' or 'hdbscan', default: 'kmeans')
+- `clustering_params`: Clustering-specific parameters
+  - **K-Means Parameters**:
+    - `auto_k`: Auto k-value selection using Elbow Method (default: true)
+    - `k`: Manual k-value (only when auto_k=false)
+    - `k_range`: K-value search range for Elbow Method (default: [10, 100])
+    - `max_iters`: Maximum iterations (default: 300)
+  - **HDBSCAN Parameters**:
+    - `min_cluster_size`: Minimum cluster size (auto-estimated if not specified)
+    - `min_samples`: Minimum samples (auto-set if not specified)  
+    - `metric`: Distance metric (default: 'cosine')
+    - `use_gpu`: Enable GPU acceleration (default: true)
+    - `auto_tune`: Enable automatic parameter tuning (default: false)
 
 ### Stage 3 (Finetune)
 - `training.lora.r`: LoRA rank (default: 128)
@@ -189,7 +215,7 @@ accelerate launch -m lm_eval --model hf \
 - **Stage 1**: 
   - `lora` mode: LoRA fine-tuning requires ~8GB GPU memory
   - `full_rank` mode: Full-rank router training requires ~16GB GPU memory
-- **Stage 2**: Data selection inference has minimal memory requirements
+- **Stage 2**: Clustering-based data selection with GPU acceleration requires moderate GPU memory (~4-8GB depending on dataset size)
 - **Stage 3**: Llama-2-7B LoRA training requires ~24GB GPU memory
 - **Multi-GPU**: Use FSDP configurations for distributed training
 
@@ -209,6 +235,11 @@ Always verify output paths before proceeding to the next stage.
 - **Quality Gate**: Outputs single quality score with sigmoid transformation to good/bad ratios
 - **Trash Expert**: Handles low-quality data with configurable output modes
 - **Loss Framework**: Extensible loss functions with proper padding token handling
+- **Clustering-Based Selection**: GPU-accelerated clustering algorithms for data diversity
+  - **K-Means + Elbow Method**: Automatic optimal k-value selection
+  - **HDBSCAN**: Parameter-free density-based clustering
+  - **Round-Robin Selection**: Ensures balanced selection from all clusters
+  - **Cosine Distance**: Semantic clustering using MoE logits as features
 
 ### Router Output Format
 ```python

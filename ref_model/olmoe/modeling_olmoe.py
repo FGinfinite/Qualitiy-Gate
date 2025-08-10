@@ -31,7 +31,6 @@ from ...modeling_utils import PreTrainedModel
 from ...utils import auto_docstring, logging
 from .configuration_olmoe import OlmoeConfig
 
-
 if is_flash_attn_available():
     from ...modeling_flash_attention_utils import _flash_attention_forward
 

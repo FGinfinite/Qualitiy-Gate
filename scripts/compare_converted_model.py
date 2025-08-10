@@ -12,7 +12,6 @@ import os
 import sys
 
 import torch
-from transformers import AutoConfig, AutoModelForCausalLM
 from transformers.models.olmoe.modeling_olmoe import OlmoeForCausalLM
 
 # 获取当前脚本所在目录的父目录（即项目根目录）
@@ -20,7 +19,7 @@ project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)  # 将项目根目录添加到sys.path的最前面
 
-from src.models.select_moe import SelectMoeConfig, SelectMoeForCausalLM, register_select_moe
+from src.models.select_moe import SelectMoeForCausalLM, register_select_moe
 
 
 def compare_state_dicts(original_dict, converted_dict, tolerance=1e-6):
@@ -156,7 +155,7 @@ def compare_models(
     """
 
     print("=" * 80)
-    print(f"Comparing Original vs Converted Select-MoE Models")
+    print("Comparing Original vs Converted Select-MoE Models")
     print(f"Original: {original_model_name}")
     print(f"Converted: {converted_model_path}")
     print(f"Device: {device}")
@@ -181,10 +180,10 @@ def compare_models(
         # Estimate model memory usage
         model_memory_gb = 6.9 * (2 if dtype == "float32" else 1)  # Rough estimate
         if memory_efficient:
-            print(f"Memory efficient mode: Loading models sequentially")
+            print("Memory efficient mode: Loading models sequentially")
             print(f"Estimated memory per model: ~{model_memory_gb:.1f} GB")
         else:
-            print(f"Standard mode: Loading both models simultaneously")
+            print("Standard mode: Loading both models simultaneously")
             print(f"Estimated total memory needed: ~{model_memory_gb * 2:.1f} GB")
             if model_memory_gb * 2 > total_memory * 0.8:
                 print("⚠️  Warning: Estimated memory usage may exceed available GPU memory")
@@ -203,7 +202,7 @@ def compare_models(
         )
         original_config = original_model.config
 
-        print(f"✓ Original model loaded successfully!")
+        print("✓ Original model loaded successfully!")
         print(f"  - Model type: {type(original_model).__name__}")
         print(f"  - Number of experts: {original_config.num_experts}")
         print(f"  - Experts per token: {original_config.num_experts_per_tok}")
@@ -213,7 +212,7 @@ def compare_models(
         print(f"  - Total parameters: {sum(p.numel() for p in original_model.parameters()):,}")
 
         # Show original gate weights info
-        print(f"\nOriginal gate weights:")
+        print("\nOriginal gate weights:")
         gate_count = 0
         for name, param in original_model.named_parameters():
             if "gate.weight" in name:
@@ -228,13 +227,13 @@ def compare_models(
 
         # Get original state dict and optionally clear model from memory
         if memory_efficient:
-            print(f"\n📊 Memory efficient mode: Extracting state dict...")
+            print("\n📊 Memory efficient mode: Extracting state dict...")
             original_state_dict = original_model.state_dict()
             # Move to CPU to free GPU memory
             original_model = original_model.cpu()
             if device != "cpu":
                 torch.cuda.empty_cache()
-                print(f"   ✓ Original model moved to CPU, GPU cache cleared")
+                print("   ✓ Original model moved to CPU, GPU cache cleared")
         else:
             original_state_dict = original_model.state_dict()
 
@@ -252,16 +251,16 @@ def compare_models(
 
             converted_config = converted_model.config
 
-            print(f"✓ Converted model loaded successfully!")
+            print("✓ Converted model loaded successfully!")
             print(f"  - Model type: {type(converted_model).__name__}")
             print(f"  - Number of experts: {converted_config.num_experts}")
-            print(f"  - Two-tier routing: Quality Gate + MoE + Trash Expert")
+            print("  - Two-tier routing: Quality Gate + MoE + Trash Expert")
             print(f"  - Quality gate mode: {getattr(converted_config, 'trash_expert_mode', 'zero')}")
             print(f"  - Data type: {torch_dtype}")
             print(f"  - Total parameters: {sum(p.numel() for p in converted_model.parameters()):,}")
 
             # Show converted model structure info
-            print(f"\nConverted model structure:")
+            print("\nConverted model structure:")
             quality_gate_count = 0
             normal_gate_count = 0
             trash_expert_count = 0
@@ -288,11 +287,11 @@ def compare_models(
 
         except Exception as e:
             print(f"❌ Failed to load converted model: {e}")
-            print(f"   Make sure the path exists and Select-MoE is registered")
+            print("   Make sure the path exists and Select-MoE is registered")
             return False
 
         # 3. Compare state dictionaries
-        print(f"\n" + "=" * 60)
+        print("\n" + "=" * 60)
         print("WEIGHT COMPARISON RESULTS")
         print("=" * 60)
 
@@ -356,7 +355,7 @@ def compare_models(
                 print(f"  ... and {len(results['quality_gates']) - 2} more quality gates")
 
         # 4. Gate weight analysis
-        print(f"\n" + "=" * 60)
+        print("\n" + "=" * 60)
         print("GATE WEIGHT ANALYSIS")
         print("=" * 60)
 
@@ -389,7 +388,7 @@ def compare_models(
             print("No gate weights found - this might indicate an issue with the comparison.")
 
         # 5. Functionality test
-        print(f"\n" + "=" * 60)
+        print("\n" + "=" * 60)
         print("FUNCTIONALITY TEST")
         print("=" * 60)
 
@@ -444,7 +443,7 @@ def compare_models(
             print("✓ Models removed from GPU, cache cleared")
 
         # 6. Summary
-        print(f"\n" + "=" * 60)
+        print("\n" + "=" * 60)
         print("SUMMARY")
         print("=" * 60)
 
@@ -475,22 +474,22 @@ def compare_models(
         )
 
         if success:
-            print(f"\n🎉 SUCCESS: Model comparison passed all tests!")
+            print("\n🎉 SUCCESS: Model comparison passed all tests!")
             print(f"   ✓ All weights preserved: {total_identical} identical/mapped")
             print(f"   ✓ MLP weights correctly mapped to normal_moe: {len(results['mapped_keys'])}")
             print(f"   ✓ Quality gates properly added: {quality_gates_count}")
-            print(f"   ✓ Model functionality verified")
-            print(f"   ✓ Converted model is ready for use!")
+            print("   ✓ Model functionality verified")
+            print("   ✓ Converted model is ready for use!")
         else:
-            print(f"\n❌ FAILURE: Some tests failed")
+            print("\n❌ FAILURE: Some tests failed")
             if results["value_mismatch"]:
                 print(f"   - {len(results['value_mismatch'])} value mismatches")
             if results["shape_mismatch"]:
                 print(f"   - {len(results['shape_mismatch'])} shape mismatches")
             if any(not item["weights_match"] for item in results["gate_analysis"]):
-                print(f"   - Gate weight preservation failed")
+                print("   - Gate weight preservation failed")
             if results["missing_in_converted"]:
-                print(f"   - Missing weights in converted model")
+                print("   - Missing weights in converted model")
             if quality_gates_count != original_config.num_hidden_layers:
                 print(f"   - Expected {original_config.num_hidden_layers} quality gates, found {quality_gates_count}")
 
@@ -546,7 +545,7 @@ def main():
         print("⚠️  Warning: float16 may cause numerical issues on some GPUs")
         print("   Consider using bfloat16 instead for better stability")
 
-    print(f"Configuration:")
+    print("Configuration:")
     print(f"  Device: {args.device}")
     print(f"  Data type: {args.dtype}")
     print(f"  Memory efficient: {args.memory_efficient}")
@@ -557,7 +556,7 @@ def main():
 
         # Recommend memory efficient mode for limited memory
         if total_memory < 15 and not args.memory_efficient:
-            print(f"💡 Recommendation: Consider using --memory-efficient for GPU with <15GB memory")
+            print("💡 Recommendation: Consider using --memory-efficient for GPU with <15GB memory")
 
     try:
         success = compare_models(
@@ -570,7 +569,7 @@ def main():
         print(f"\nComparison {'PASSED' if success else 'FAILED'}")
         return success
     except KeyboardInterrupt:
-        print(f"\n⚠️  Comparison interrupted by user")
+        print("\n⚠️  Comparison interrupted by user")
         return False
     except Exception as e:
         print(f"\n❌ Comparison failed with unexpected error: {e}")

@@ -129,7 +129,7 @@ def convert_and_save_model(
         select_moe_config = SelectMoeConfig(**select_moe_config_dict)
 
         print("✓ Select-MoE config created!")
-        print(f"  - Two-tier routing: Quality Gate + MoE + Trash Expert")
+        print("  - Two-tier routing: Quality Gate + MoE + Trash Expert")
         print(f"  - Quality gate init: mean={quality_gate_init_mean}, std={quality_gate_init_std}")
         print(f"  - Quality loss weight: {quality_loss_weight}")
         print(f"  - Trash expert mode: {trash_expert_mode}")

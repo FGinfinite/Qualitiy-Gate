@@ -11,6 +11,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers import AutoTokenizer
 
+from src.clustering import ClusterBasedSelection
 from src.data import load_local_datasets
 from src.models.select_moe import SelectMoeForCausalLM, register_select_moe
 from src.training.full_rank_finetuning import load_full_rank_weights
@@ -26,7 +27,7 @@ def get_model_and_tokenizer(cfg: DictConfig) -> Tuple[SelectMoeForCausalLM, Auto
     model_kwargs = {
         "low_cpu_mem_usage": True,
         "torch_dtype": torch.bfloat16,
-        "device_map": "auto",  # 自动设备映射，有助于内存优化
+        "device_map": "auto",
     }
 
     # 加载预转换的Select-MoE模型
@@ -35,7 +36,6 @@ def get_model_and_tokenizer(cfg: DictConfig) -> Tuple[SelectMoeForCausalLM, Auto
     # 加载全秩微调权重
     load_full_rank_weights(model, cfg.model_checkpoint_path)
 
-    # device_map="auto" 已自动处理设备分配
     model.eval()
 
     # 加载分词器
@@ -52,7 +52,7 @@ def calculate_quality_score_from_gates(
     debug: bool = False,
 ) -> float:
     """
-    使用新架构中的质量门输出计算质量分数
+    使用质量门输出计算质量分数
 
     Args:
         quality_score_list: 各层质量门输出的分数列表
@@ -67,8 +67,8 @@ def calculate_quality_score_from_gates(
 
     if debug:
         log = logging.getLogger(__name__)
-        log.debug(f"    [函数内部] 质量门分数数量: {len(quality_score_list)}")
-        log.debug(f"    [函数内部] 实际token数量: {actual_length}")
+        log.debug(f"质量门分数数量: {len(quality_score_list)}")
+        log.debug(f"实际token数量: {actual_length}")
 
     if actual_length == 0:
         return 0.0
@@ -87,375 +87,57 @@ def calculate_quality_score_from_gates(
         layer_quality_scores.append(layer_avg_good_prob)
 
         if debug and layer_idx < 3:
-            log.debug(f"    [函数内部] 第{layer_idx + 1}层好数据概率: {layer_avg_good_prob:.6f}")
+            log.debug(f"第{layer_idx + 1}层好数据概率: {layer_avg_good_prob:.6f}")
 
     # 对所有层求平均
     final_quality_score = sum(layer_quality_scores) / len(layer_quality_scores)
 
     if debug:
-        log.debug(f"    [函数内部] 最终质量分数: {final_quality_score:.6f}")
+        log.debug(f"最终质量分数: {final_quality_score:.6f}")
 
     return final_quality_score
 
 
-def compute_cosine_distance_matrix(
-    logits_tensors: List[torch.Tensor], device: torch.device, batch_size: int = 1000, layer_weights: torch.Tensor = None
-) -> torch.Tensor:
-    """
-    计算所有样本对之间基于逐层二级路由余弦相似度的距离矩阵（GPU加速）
-
-    Args:
-        logits_tensors: 列表，每个元素为 [L, E] 形状的张量（L=层数，E=专家数）
-        device: GPU设备
-        batch_size: 批处理大小，控制GPU内存使用
-        layer_weights: 可选的层权重张量 [L]，用于加权不同层的余弦相似度
-
-    Returns:
-        距离矩阵: [N, N] 形状的GPU张量，基于余弦相似度计算的距离
-    """
-    n_samples = len(logits_tensors)
-    log = logging.getLogger(__name__)
-    log.info(f"使用GPU加速计算 {n_samples} 个样本的逐层余弦相似度距离矩阵...")
-
-    # 将所有logits转移到GPU并转换为概率分布
-    prob_tensors = []
-    for logits in logits_tensors:
-        # 转移到GPU并计算概率分布
-        probs = torch.softmax(logits.float().to(device), dim=-1)  # [L, E]
-        prob_tensors.append(probs)
-
-    # 堆叠成一个大张量 [N, L, E]
-    all_probs = torch.stack(prob_tensors)  # [N, L, E]
-    n_samples = all_probs.shape[0]
-
-    log.info(f"概率张量形状: {all_probs.shape}")
-    if layer_weights is not None:
-        log.info(f"使用层权重: {layer_weights.shape}")
-    else:
-        log.info("使用等权重相加（所有层权重为1）")
-
-    # 初始化距离矩阵
-    distance_matrix = torch.zeros(n_samples, n_samples, device=device)
-
-    # 分批处理以节省GPU内存
-    for start_i in tqdm(range(0, n_samples, batch_size), desc="GPU余弦距离矩阵计算"):
-        end_i = min(start_i + batch_size, n_samples)
-        batch_probs_i = all_probs[start_i:end_i]  # [batch_i, L, E]
-
-        for start_j in range(start_i, n_samples, batch_size):
-            end_j = min(start_j + batch_size, n_samples)
-            batch_probs_j = all_probs[start_j:end_j]  # [batch_j, L, E]
-
-            # 计算这个批次的余弦距离
-            batch_distances = compute_batch_cosine_distance_gpu(batch_probs_i, batch_probs_j, layer_weights)
-
-            # 填充距离矩阵
-            distance_matrix[start_i:end_i, start_j:end_j] = batch_distances
-
-            # 对称填充（如果不是对角块）
-            if start_i != start_j:
-                distance_matrix[start_j:end_j, start_i:end_i] = batch_distances.T
-
-    log.info(f"GPU余弦距离矩阵计算完成，形状: {distance_matrix.shape}")
-    return distance_matrix
-
-
-def compute_batch_cosine_distance_gpu(batch_probs_i: torch.Tensor, batch_probs_j: torch.Tensor, layer_weights: torch.Tensor = None) -> torch.Tensor:
-    """
-    GPU上计算批次间基于逐层二级路由余弦相似度的距离
-
-    Args:
-        batch_probs_i: [batch_i, L, E] 第一组样本的概率分布（L=层数，E=专家数）
-        batch_probs_j: [batch_j, L, E] 第二组样本的概率分布
-        layer_weights: 可选的层权重张量 [L]，用于加权不同层的相似度
-
-    Returns:
-        距离矩阵: [batch_i, batch_j]，基于余弦相似度计算的距离
-    """
-    batch_i, n_layers, n_experts = batch_probs_i.shape
-    # batch_j = batch_probs_j.shape[0]  # 注释未使用的变量
-
-    # 设置层权重（为未来扩展预留）
-    if layer_weights is None:
-        layer_weights = torch.ones(n_layers, device=batch_probs_i.device, dtype=batch_probs_i.dtype)
-    else:
-        assert layer_weights.shape[0] == n_layers, f"层权重长度({layer_weights.shape[0]})与层数({n_layers})不匹配"
-        layer_weights = layer_weights.to(batch_probs_i.device)
-
-    # 扩展维度用于广播计算
-    probs_i_expanded = batch_probs_i.unsqueeze(1)  # [batch_i, 1, L, E]
-    probs_j_expanded = batch_probs_j.unsqueeze(0)  # [1, batch_j, L, E]
-
-    # L2归一化，确保余弦相似度计算正确
-    probs_i_normalized = torch.nn.functional.normalize(probs_i_expanded, p=2, dim=-1)  # [batch_i, 1, L, E]
-    probs_j_normalized = torch.nn.functional.normalize(probs_j_expanded, p=2, dim=-1)  # [1, batch_j, L, E]
-
-    # 计算每层的余弦相似度
-    # 使用点积计算余弦相似度（归一化后的向量点积就是余弦相似度）
-    layer_similarities = torch.sum(probs_i_normalized * probs_j_normalized, dim=-1)  # [batch_i, batch_j, L]
-
-    # 应用层权重并求和
-    weighted_similarities = layer_similarities * layer_weights.view(1, 1, -1)  # [batch_i, batch_j, L]
-    total_similarities = torch.sum(weighted_similarities, dim=-1)  # [batch_i, batch_j]
-
-    # 转换相似度为距离
-    # 每层余弦相似度范围[-1, 1]，16层总和范围[-16, 16]
-    # 为了得到非负距离，使用：距离 = 层数 - 相似度总和
-    # 这样相同向量的距离为0，完全相反向量的距离为2*层数
-    total_distances = n_layers - total_similarities
-
-    # 添加调试信息（可选）
-    if torch.any(total_distances < 0):
-        print(f"警告：检测到负距离值，相似度范围: [{total_similarities.min():.4f}, {total_similarities.max():.4f}]")
-        total_distances = torch.clamp(total_distances, min=0.0)  # 确保非负
-
-    return total_distances
-
-
-def farthest_point_sampling_gpu(
-    distance_matrix: torch.Tensor,
-    n_samples: int,
-    quality_scores: List[float] = None,
-    seed: int = 42,
-    log_interval: int = 100,
-) -> List[int]:
-    """
-    使用GPU加速的最远点采样(FPS)算法选择多样化样本
-
-    Args:
-        distance_matrix: [N, N] GPU上的距离矩阵
-        n_samples: 要选择的样本数量
-        quality_scores: 质量分数列表，用于选择初始点（可选）
-        seed: 随机种子
-        log_interval: 日志输出间隔
-
-    Returns:
-        选中样本的索引列表
-    """
-    log = logging.getLogger(__name__)
-    device = distance_matrix.device
-    n_total = distance_matrix.shape[0]
-
-    if n_samples >= n_total:
-        return list(range(n_total))
-
-    # 设置随机种子
-    torch.manual_seed(seed)
-    if device.type == "cuda":
-        torch.cuda.manual_seed(seed)
-
-    # 初始化选择状态和距离向量
-    selected = torch.zeros(n_total, dtype=torch.bool, device=device)
-    min_distances = torch.full((n_total,), float("inf"), device=device)
-    selected_indices = []
-
-    log.info(f"GPU FPS: 从 {n_total} 个样本中选择 {n_samples} 个")
-
-    # 1. 选择初始点 - 优先使用质量分数最高的点
-    if quality_scores is not None and len(quality_scores) == n_total:
-        # 使用质量分数最高的点作为初始点
-        quality_tensor = torch.tensor(quality_scores, device=device)
-        first_idx = quality_tensor.argmax().item()
-        log.info(f"FPS初始点: {first_idx} (质量分数: {quality_scores[first_idx]:.6f})")
-    else:
-        # 回退到随机选择
-        first_idx = torch.randint(0, n_total, (1,), device=device).item()
-        log.info(f"FPS初始点: {first_idx} (随机选择)")
-
-    selected[first_idx] = True
-    selected_indices.append(first_idx)
-
-    # 更新到初始点的距离
-    min_distances = distance_matrix[first_idx].clone()
-    min_distances[first_idx] = 0  # 已选点距离设为0
-
-    # 2. 贪心选择剩余点
-    for step in range(1, n_samples):
-        # 在未选择的点中找到距离最大的点（向量化操作）
-        candidate_distances = min_distances.clone()
-        candidate_distances[selected] = -1  # 已选点设为负值，排除
-
-        next_idx = candidate_distances.argmax().item()
-        max_distance = candidate_distances[next_idx].item()
-
-        # 更新选择状态
-        selected[next_idx] = True
-        selected_indices.append(next_idx)
-
-        # 批量更新所有点到已选点集的最小距离（向量化操作）
-        new_distances = distance_matrix[next_idx]
-        min_distances = torch.min(min_distances, new_distances)
-        min_distances[selected] = 0  # 已选点距离保持为0
-
-        if step % log_interval == 0 or step < 10:
-            log.info(f"FPS第{step}步: 选择点{next_idx}, 最大最小距离={max_distance:.4f}")
-
-    log.info(f"GPU FPS完成，选择了{len(selected_indices)}个样本")
-    return selected_indices
-
-
-def diversity_based_selection(
+def cluster_based_selection(
     scored_data: List[dict],
     all_logits_by_dataset: dict,
     selection_percentage: float,
-    importance_selection_percentage: float = None,
-    enable_diversity: bool = True,
+    clustering_method: str = "kmeans",
+    clustering_params: dict = None,
     device: torch.device = None,
-    distance_batch_size: int = 1000,
-    fps_log_interval: int = 100,
 ) -> List[dict]:
     """
-    基于多样性的数据选择（支持两阶段选择策略）
+    基于聚类的数据选择策略
 
     Args:
         scored_data: 评分后的数据列表
         all_logits_by_dataset: 按数据集分组的logits张量
-        selection_percentage: 最终选择比例
-        importance_selection_percentage: 第一阶段质量筛选比例（可选）
-        enable_diversity: 是否启用多样性选择（False时回退到质量分数选择）
-        device: GPU设备
-        distance_batch_size: GPU批处理大小
-        fps_log_interval: FPS日志输出间隔
-
-    Returns:
-        选择后的数据列表
-    """
-    total_samples = len(scored_data)
-    n_select = int(total_samples * selection_percentage)
-
-    # 检查是否需要两阶段选择策略
-    use_two_stage = importance_selection_percentage is not None and importance_selection_percentage > selection_percentage
-
-    if not enable_diversity:
-        # 回退到原始的质量分数选择
-        scored_data.sort(key=lambda x: x["scores"], reverse=True)
-        return scored_data[:n_select]
-
-    if use_two_stage:
-        # 两阶段选择策略
-        log = logging.getLogger(__name__)
-        log.info("启用两阶段选择策略:")
-        log.info(f"  - 第一阶段: 基于质量分数选择前 {importance_selection_percentage * 100:.1f}% 数据")
-        log.info(f"  - 第二阶段: 基于多样性从高质量数据中选择 {selection_percentage * 100:.1f}% 数据")
-
-        # 第一阶段：基于质量分数预筛选
-        n_importance = int(total_samples * importance_selection_percentage)
-        scored_data.sort(key=lambda x: x["scores"], reverse=True)
-        high_quality_data = scored_data[:n_importance]
-
-        log.info(f"  - 第一阶段完成: 从 {total_samples} 个样本中选择了 {len(high_quality_data)} 个高质量样本")
-        log.info(f"  - 质量分数范围: {high_quality_data[0]['scores']:.6f} ~ {high_quality_data[-1]['scores']:.6f}")
-
-        # 调整logits数据对应关系
-        filtered_logits_by_dataset = {name: [] for name in all_logits_by_dataset.keys()}
-        dataset_logits_index = {name: 0 for name in all_logits_by_dataset.keys()}
-
-        # 重新映射高质量数据的logits
-        for original_idx, data_item in enumerate(scored_data):
-            if original_idx < n_importance:  # 在高质量数据范围内
-                dataset_name = data_item["dataset"]
-                current_idx = dataset_logits_index[dataset_name]
-
-                if current_idx < len(all_logits_by_dataset[dataset_name]):
-                    logits_tensor = all_logits_by_dataset[dataset_name][current_idx]
-                    filtered_logits_by_dataset[dataset_name].append(logits_tensor)
-
-                dataset_logits_index[dataset_name] += 1
-
-        # 第二阶段：从高质量数据中进行多样性选择
-        log.info(f"  - 第二阶段: 从 {len(high_quality_data)} 个高质量样本中进行多样性选择...")
-
-        # 计算第二阶段的实际选择比例
-        stage2_selection_ratio = n_select / len(high_quality_data)
-        log.info(f"  - 第二阶段选择比例: {stage2_selection_ratio * 100:.1f}% ({n_select}/{len(high_quality_data)})")
-
-        selected_data = _perform_diversity_selection(
-            high_quality_data,
-            filtered_logits_by_dataset,
-            stage2_selection_ratio,
-            device,
-            distance_batch_size,
-            fps_log_interval,
-        )
-
-        log.info(f"两阶段选择完成: 最终选择了 {len(selected_data)} 个样本")
-        return selected_data
-
-    else:
-        # 单阶段多样性选择（原始逻辑）
-        log = logging.getLogger(__name__)
-        log.info(f"启用单阶段多样性选择: 从 {total_samples} 个样本中选择 {n_select} 个")
-
-        selected_data = _perform_diversity_selection(scored_data, all_logits_by_dataset, selection_percentage, device, distance_batch_size, fps_log_interval)
-
-        return selected_data
-
-
-def _perform_diversity_selection(
-    scored_data: List[dict],
-    all_logits_by_dataset: dict,
-    selection_percentage: float,
-    device: torch.device,
-    distance_batch_size: int,
-    fps_log_interval: int = 100,
-) -> List[dict]:
-    """
-    执行多样性选择的核心逻辑
-
-    Args:
-        scored_data: 待选择的数据列表
-        all_logits_by_dataset: logits张量数据
         selection_percentage: 选择比例
+        clustering_method: 聚类方法 ('kmeans' 或 'hdbscan')
+        clustering_params: 聚类参数
         device: GPU设备
-        distance_batch_size: GPU批处理大小
-        fps_log_interval: FPS日志输出间隔
 
     Returns:
         选择后的数据列表
     """
     total_samples = len(scored_data)
-    n_select = int(total_samples * selection_percentage)
-
-    # 1. 收集所有logits张量 - 维度: [样本数, L, E]
-    all_logits = []
-    sample_to_data_mapping = []
-
-    # 按scored_data的顺序重新组织logits
-    dataset_logits_index = {name: 0 for name in all_logits_by_dataset.keys()}
-
-    for data_item in scored_data:
-        dataset_name = data_item["dataset"]
-        current_idx = dataset_logits_index[dataset_name]
-
-        if current_idx < len(all_logits_by_dataset[dataset_name]):
-            logits_tensor = all_logits_by_dataset[dataset_name][current_idx]
-            all_logits.append(logits_tensor)
-            sample_to_data_mapping.append(data_item)
-            dataset_logits_index[dataset_name] += 1
-        else:
-            log = logging.getLogger(__name__)
-            log.warning(f"数据集 {dataset_name} 的logits不足")
-
-    if len(all_logits) != len(scored_data):
-        log = logging.getLogger(__name__)
-        log.warning(f"logits数量({len(all_logits)}) 与数据数量({len(scored_data)})不匹配")
-        # 回退到质量分数选择
-        scored_data.sort(key=lambda x: x["scores"], reverse=True)
-        return scored_data[:n_select]
+    target_count = int(total_samples * selection_percentage)
 
     log = logging.getLogger(__name__)
-    log.info(f"收集到 {len(all_logits)} 个logits张量")
-    log.info(f"张量形状示例: {all_logits[0].shape} (应为 [L, E])")
+    log.info(f"开始聚类选择: 从 {total_samples} 个样本中选择 {target_count} 个")
+    log.info(f"使用聚类方法: {clustering_method}")
 
-    # 2. 计算基于逐层二级路由余弦相似度的距离矩阵
-    distance_matrix = compute_cosine_distance_matrix(all_logits, device=device, batch_size=distance_batch_size)
+    # 初始化聚类选择器
+    cluster_selector = ClusterBasedSelection(device=device)
 
-    # 3. 使用GPU FPS选择多样化样本，传递质量分数用于初始点选择
-    sample_quality_scores = [item["scores"] for item in sample_to_data_mapping]
-    selected_indices = farthest_point_sampling_gpu(distance_matrix, n_select, quality_scores=sample_quality_scores, log_interval=fps_log_interval)
-
-    # 4. 根据选择的索引返回对应的数据
-    selected_data = [sample_to_data_mapping[idx] for idx in selected_indices]
+    # 执行聚类-轮选选择
+    selected_data = cluster_selector.select_data_by_clustering(
+        scored_data=scored_data,
+        all_logits_by_dataset=all_logits_by_dataset,
+        target_count=target_count,
+        clustering_method=clustering_method,
+        clustering_params=clustering_params or {},
+    )
 
     return selected_data
 
@@ -516,12 +198,9 @@ def select(cfg: DictConfig) -> None:
     log.info("--- 开始阶段2：数据选择 ---")
 
     # 确定目标设备
-    # 自动选择设备，正确响应CUDA_VISIBLE_DEVICES
     if torch.cuda.is_available():
-        # 检查实际可用的GPU设备数量
         num_gpus = torch.cuda.device_count()
         if num_gpus > 0:
-            # 使用第一个可用的GPU（在CUDA_VISIBLE_DEVICES环境下会是指定的设备）
             device = torch.device("cuda")
             log.info(f"使用设备: {device} (实际GPU: {torch.cuda.current_device()}, 共{num_gpus}个可用设备)")
         else:
@@ -542,9 +221,7 @@ def select(cfg: DictConfig) -> None:
     log.info(f"成功加载模型: {cfg.model_checkpoint_path}")
 
     # 2. 验证新架构
-    # 进行一次前向传播验证模型结构
     with torch.no_grad():
-        # 获取模型实际所在的设备
         model_device = next(model.parameters()).device
         dummy_input = torch.ones(1, 10, dtype=torch.long, device=model_device)
         dummy_outputs = model(dummy_input, output_router_logits=True)
@@ -578,24 +255,22 @@ def select(cfg: DictConfig) -> None:
         dataset = dataset.shuffle(seed=cfg.dataset.seed)
 
     log.info(f"总样本数: {len(dataset)}")
-    log.info("✓ 数据集已准备完毕，每个样本包含唯一ID用于索引对应")
+    log.info("✓ 数据集已准备完毕")
 
     # 4. 数据评分和路由logits记录
     scored_data = []
-    # 重构：同时记录质量门和MoE路由的输出
     all_router_data_by_dataset = {
         name: {
-            "quality_score": [],  # 质量门分数: [样本数, 层数, 序列长度, 1]
-            "moe_logits": [],  # MoE路由logits: [样本数, 层数, 专家数] (平均后)
-            "sample_ids": [],  # 样本的原始ID（唯一标识符）
+            "quality_score": [],  # 质量门分数
+            "moe_logits": [],  # MoE路由logits
+            "sample_ids": [],  # 样本ID
         }
         for name in cfg.dataset.dataset_names
     }
-    dataset_sample_counts = {name: 0 for name in cfg.dataset.dataset_names}  # 记录每个数据集的样本数
+    dataset_sample_counts = {name: 0 for name in cfg.dataset.dataset_names}
 
     # 创建数据加载器
     def collate_fn(batch):
-        """自定义collate函数，保留数据集信息"""
         return {
             "messages": [item["messages"] for item in batch],
             "dataset": [item["dataset"] for item in batch],
@@ -614,7 +289,6 @@ def select(cfg: DictConfig) -> None:
         texts = []
         for messages in messages_list:
             if isinstance(messages, list) and len(messages) > 0:
-                # 格式化为对话文本
                 text_parts = []
                 for msg in messages:
                     role = msg.get("role", "")
@@ -622,7 +296,7 @@ def select(cfg: DictConfig) -> None:
                     text_parts.append(f"{role}: {content}")
                 texts.append("\n".join(text_parts))
             else:
-                texts.append("")  # 空文本作为fallback
+                texts.append("")
 
         if i == 0:
             log.info("批次0，前3个文本示例:")
@@ -637,18 +311,16 @@ def select(cfg: DictConfig) -> None:
             return_tensors="pt",
             max_length=cfg.dataset.max_sequence_length,
         )
-        # 将输入数据移动到模型所在的设备
         model_device = next(model.parameters()).device
         inputs = {k: v.to(model_device) for k, v in inputs.items()}
 
         with torch.no_grad():
             outputs = model(**inputs, output_router_logits=True)
 
-        # 处理router logits - 新架构返回字典格式
+        # 处理router logits
         batch_size = len(texts)
         sequence_length = inputs["input_ids"].shape[1]
 
-        # 从字典格式中提取MoE路由logits
         moe_router_logits = [layer_dict["moe_logits"] for layer_dict in outputs.router_logits]
         all_router_logits = torch.stack(moe_router_logits)
 
@@ -656,11 +328,11 @@ def select(cfg: DictConfig) -> None:
             log.info(f"Router logits形状: {all_router_logits.shape}")
             log.info(f"批次大小: {batch_size}, 序列长度: {sequence_length}")
 
-        # 计算质量分数 - 使用新架构的质量门输出
+        # 计算质量分数
         for j in range(batch_size):
             dataset_name = dataset_names[j]
             sample_attention_mask = inputs["attention_mask"][j]
-            debug_mode = i == 0 and j < 3  # 只对前3个样本启用调试
+            debug_mode = i == 0 and j < 3
 
             # 使用质量门输出计算质量分数
             quality_score_list = [layer_dict["quality_score"][j] for layer_dict in outputs.router_logits]
@@ -674,67 +346,56 @@ def select(cfg: DictConfig) -> None:
             valid_mask = sample_attention_mask.bool()
             actual_length = valid_mask.sum().item()
 
-            # 记录完整的路由信息用于分析和多样性采样
-            # 1. 收集质量门logits并在序列维度进行平均 - 与MoE路由保持一致的形状
+            # 记录完整的路由信息
+            # 1. 收集质量门logits并在序列维度进行平均
             quality_score_averaged = []
             for layer_quality_score in quality_score_list:
-                # layer_quality_score: [seq_len, 1]
                 if actual_length > 0:
-                    # 使用attention_mask提取有效token的logits
-                    valid_quality_score = layer_quality_score[valid_mask]  # [actual_length, 1]
-                    # 对有效token求平均
-                    layer_avg_quality_score = valid_quality_score.mean(dim=0)  # [1]
+                    valid_quality_score = layer_quality_score[valid_mask]
+                    layer_avg_quality_score = valid_quality_score.mean(dim=0)
                 else:
-                    # 如果没有有效token，使用零值
                     layer_avg_quality_score = torch.zeros(1)
-
                 quality_score_averaged.append(layer_avg_quality_score)
 
-            # 堆叠为 [num_layers, 1]
             quality_score_sample = torch.stack(quality_score_averaged)  # [num_layers, 1]
 
             # 2. 收集MoE路由logits并计算平均概率分布
             if actual_length > 0:
                 moe_logits_list = []
-                seq_len = inputs["input_ids"].shape[1]  # 序列长度
+                seq_len = inputs["input_ids"].shape[1]
 
                 for _, layer_dict in enumerate(outputs.router_logits):
-                    # layer_dict["moe_logits"] 形状: [batch*seq_len, num_experts]
-                    layer_moe_logits = layer_dict["moe_logits"]  # [batch*seq_len, num_experts]
+                    layer_moe_logits = layer_dict["moe_logits"]
 
                     # 提取第j个样本的logits
                     start_idx = j * seq_len
                     end_idx = (j + 1) * seq_len
-                    sample_layer_logits = layer_moe_logits[start_idx:end_idx]  # [seq_len, num_experts]
+                    sample_layer_logits = layer_moe_logits[start_idx:end_idx]
 
                     # 转换为概率分布
-                    sample_layer_probs = torch.softmax(sample_layer_logits, dim=-1)  # [seq_len, num_experts]
+                    sample_layer_probs = torch.softmax(sample_layer_logits, dim=-1)
 
                     # 根据attention mask提取有效token的概率，然后求平均
-                    valid_probs = sample_layer_probs[valid_mask]  # [actual_length, num_experts]
+                    valid_probs = sample_layer_probs[valid_mask]
                     if valid_probs.shape[0] > 0:
-                        layer_avg_probs = valid_probs.mean(dim=0)  # [num_experts]
+                        layer_avg_probs = valid_probs.mean(dim=0)
                     else:
-                        # 如果没有有效token，使用均匀分布
                         num_experts = sample_layer_probs.shape[-1]
                         layer_avg_probs = torch.ones(num_experts) / num_experts
 
                     moe_logits_list.append(layer_avg_probs)
 
-                # 构建样本的MoE路由特征矩阵 [num_layers, num_experts]
                 sample_moe_matrix = torch.stack(moe_logits_list)  # [num_layers, num_experts]
             else:
-                # 如果没有有效token，使用均匀分布
                 num_layers = len(outputs.router_logits)
                 num_experts = outputs.router_logits[0]["moe_logits"].shape[-1]
                 sample_moe_matrix = torch.ones(num_layers, num_experts) / num_experts
-                quality_score_sample = torch.zeros(num_layers, 1)  # 修正：[num_layers, 1]
+                quality_score_sample = torch.zeros(num_layers, 1)
 
-            # 3. 保存到数据结构中，建立ID对应关系
+            # 保存到数据结构中
             all_router_data_by_dataset[dataset_name]["quality_score"].append(quality_score_sample.cpu())
             all_router_data_by_dataset[dataset_name]["moe_logits"].append(sample_moe_matrix.cpu())
             all_router_data_by_dataset[dataset_name]["sample_ids"].append(ids[j])
-
             dataset_sample_counts[dataset_name] += 1
 
             if i == 0 and j < 3:
@@ -743,20 +404,7 @@ def select(cfg: DictConfig) -> None:
                 log.info(f"  - 数据集: {dataset_names[j]}")
                 log.info(f"  - 样本ID: {ids[j]}")
                 log.info(f"  - 实际长度: {actual_length} / 总长度: {sample_attention_mask.shape[0]}")
-                log.info(f"  - 质量门输出形状: {quality_score_list[0].shape}")
-                log.info(f"  - 质量门张量形状: {quality_score_sample.shape}")
-                log.info(f"  - MoE路由矩阵形状: {sample_moe_matrix.shape}")
-
-                # 显示质量门和MoE路由的详细信息
-                log.info(f"  - Quality Gate前3层的输出形状: {[ql.shape for ql in quality_score_list[:3]]}")
-                moe_shapes = [
-                    outputs.router_logits[i]["moe_logits"][j * sequence_length : (j + 1) * sequence_length].shape
-                    for i in range(min(3, len(outputs.router_logits)))
-                ]
-                log.info(f"  - MoE Logits前3层的输出形状: {moe_shapes}")
-
                 log.info(f"  - 最终质量分数: {quality_score:.6f}")
-                log.info("=" * 80)
 
             scored_data.append(
                 {
@@ -767,7 +415,7 @@ def select(cfg: DictConfig) -> None:
                 }
             )
 
-    # 5. 立即保存完整的路由张量文件（包含质量门和MoE路由输出）
+    # 5. 立即保存完整的路由张量文件
     log.info("模型推理完成，立即保存完整路由张量文件...")
     output_path = hydra.utils.to_absolute_path(cfg.output_path)
     output_dir = os.path.dirname(output_path)
@@ -780,7 +428,6 @@ def select(cfg: DictConfig) -> None:
         dataset_router_data = all_router_data_by_dataset[dataset_name]
 
         if dataset_router_data["quality_score"] and dataset_router_data["moe_logits"]:
-            # 构建完整的数据字典 - 两种路由数据形状现在保持一致
             router_data_dict = {
                 "quality_score": torch.stack(dataset_router_data["quality_score"]),  # [N, L, 1]
                 "moe_logits": torch.stack(dataset_router_data["moe_logits"]),  # [N, L, E]
@@ -791,13 +438,10 @@ def select(cfg: DictConfig) -> None:
                     "description": "完整的路由数据，包含质量门和MoE路由输出",
                     "quality_score_shape": "[N, num_layers, 1] - 质量门分数",
                     "moe_logits_shape": "[N, num_layers, num_experts] - MoE路由平均概率",
-                    "sample_ids": "样本的唯一ID标识，可与原数据集精确对应",
-                    "id_format": 'dataset_name + "_" + number (例如: oasst1_25460)',
-                    "note": "两种路由数据均已在序列维度进行平均，形状保持一致",
+                    "sample_ids": "样本的唯一ID标识",
                 },
             }
 
-            # 保存完整数据字典
             router_data_path = os.path.join(router_data_dir, f"{dataset_name}_router_data.pt")
             torch.save(router_data_dict, router_data_path)
 
@@ -805,13 +449,11 @@ def select(cfg: DictConfig) -> None:
             log.info(f"  - 质量门分数形状: {router_data_dict['quality_score'].shape}")
             log.info(f"  - MoE路由logits形状: {router_data_dict['moe_logits'].shape}")
             log.info(f"  - 样本数: {router_data_dict['num_samples']}")
-            sample_ids_preview = dataset_router_data["sample_ids"][:3] if dataset_router_data["sample_ids"] else "无"
-            log.info(f"  - 样本ID示例: {sample_ids_preview}")
 
         else:
             log.warning(f"数据集 '{dataset_name}' 没有路由数据")
 
-    # 释放模型和GPU内存，为距离计算腾出空间
+    # 释放模型和GPU内存
     log.info("释放模型实例和GPU内存...")
     del model
     if device.type == "cuda":
@@ -827,51 +469,38 @@ def select(cfg: DictConfig) -> None:
         log.info("--- 阶段2：数据选择完成（仅推理模式） ---")
         return
 
-    # 7. 尝试进行多样性数据选择
-    log.info("开始多样性数据选择...")
+    # 7. 进行聚类数据选择
+    log.info("开始聚类数据选择...")
 
-    # 检查是否启用多样性选择
-    enable_diversity = getattr(cfg, "enable_diversity_selection", True)
-    log.info(f"多样性选择模式: {'启用' if enable_diversity else '禁用(使用质量分数)'}")
+    clustering_method = getattr(cfg, "clustering_method", "kmeans")
+    clustering_params = getattr(cfg, "clustering_params", {})
 
-    # 使用多样性选择算法
-    distance_batch_size = getattr(cfg.distance_computation, "distance_batch_size", 1000)
-    fps_log_interval = getattr(cfg.distance_computation, "fps_log_interval", 100)
-    importance_selection_percentage = getattr(cfg, "importance_selection_percentage", None)
-
-    # 直接使用路由数据进行多样性选择
+    # 准备logits数据
     all_logits_by_dataset = {name: all_router_data_by_dataset[name]["moe_logits"] for name in cfg.dataset.dataset_names}
 
     try:
-        selected_data = diversity_based_selection(
+        selected_data = cluster_based_selection(
             scored_data=scored_data,
             all_logits_by_dataset=all_logits_by_dataset,
             selection_percentage=cfg.selection_percentage,
-            importance_selection_percentage=importance_selection_percentage,
-            enable_diversity=enable_diversity,
+            clustering_method=clustering_method,
+            clustering_params=clustering_params,
             device=device,
-            distance_batch_size=distance_batch_size,
-            fps_log_interval=fps_log_interval,
         )
     except torch.OutOfMemoryError as e:
-        log.error(f"GPU内存不足，距离计算失败: {e}")
+        log.error(f"GPU内存不足，聚类计算失败: {e}")
         log.error("但是，宝贵的logits张量已经安全保存！")
         log.info("您可以使用独立脚本继续数据选择过程:")
         log.info(
-            f"  python scripts/continue_selection.py --router_data_dir {router_data_dir} "
+            f"  python scripts/cluster_selection.py --router_data_dir {router_data_dir} "
             f"--output_path {output_path} --selection_percentage {cfg.selection_percentage}"
         )
-        if importance_selection_percentage:
-            log.info(f"  添加参数: --importance_selection_percentage {importance_selection_percentage}")
-        if not enable_diversity:
-            log.info("  添加参数: --disable_diversity")
-        log.info(f"  添加参数: --distance_batch_size {distance_batch_size}")
         raise
     except Exception as e:
-        log.error(f"数据选择过程中发生错误: {e}")
+        log.error(f"聚类选择过程中发生错误: {e}")
         log.error("但是，宝贵的logits张量已经安全保存！")
         log.info("您可以使用独立脚本继续数据选择过程:")
-        log.info(f"  python scripts/continue_selection.py --router_data_dir {router_data_dir} --output_path {output_path}")
+        log.info(f"  python scripts/cluster_selection.py --router_data_dir {router_data_dir} --output_path {output_path}")
         raise
 
     log.info(f"选择了前 {len(selected_data)} 个样本 ({cfg.selection_percentage * 100:.2f}%)")
@@ -885,5 +514,4 @@ def select(cfg: DictConfig) -> None:
             f.write(json.dumps(item, ensure_ascii=False) + "\n")
 
     log.info(f"筛选后的数据已保存到: {output_path}")
-
     log.info("--- 阶段2：数据选择完成 ---")

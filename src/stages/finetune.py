@@ -91,7 +91,7 @@ def validate_batch_size_configuration(total_batch_size: int, per_device_batch_si
     effective_batch_size = per_device_batch_size * world_size
 
     if total_batch_size % effective_batch_size != 0:
-        log.error(f"批次大小配置错误:")
+        log.error("批次大小配置错误:")
         log.error(f"  总批次大小: {total_batch_size}")
         log.error(f"  每设备批次大小: {per_device_batch_size}")
         log.error(f"  世界大小: {world_size}")
@@ -102,7 +102,7 @@ def validate_batch_size_configuration(total_batch_size: int, per_device_batch_si
 
     gradient_accumulation_steps = total_batch_size // effective_batch_size
 
-    log.info(f"批次大小配置验证通过:")
+    log.info("批次大小配置验证通过:")
     log.info(f"  总批次大小: {total_batch_size}")
     log.info(f"  每设备批次大小: {per_device_batch_size}")
     log.info(f"  世界大小: {world_size}")

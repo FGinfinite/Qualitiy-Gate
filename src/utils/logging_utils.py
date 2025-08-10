@@ -10,7 +10,9 @@
 
 import logging
 from typing import Optional
-from transformers import TrainerCallback, logging as transformers_logging
+
+from transformers import TrainerCallback
+from transformers import logging as transformers_logging
 
 
 class HydraLoggingCallback(TrainerCallback):

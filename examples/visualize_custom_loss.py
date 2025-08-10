@@ -10,11 +10,11 @@
 2. 一组详细的直方图，展示每种模拟分布的具体形态。
 """
 
-import torch
-import numpy as np
 import matplotlib.pyplot as plt
-import seaborn as sns
+import numpy as np
 import pandas as pd
+import seaborn as sns
+import torch
 
 plt.rcParams["font.sans-serif"] = ["Maple Mono NF CN"]
 
