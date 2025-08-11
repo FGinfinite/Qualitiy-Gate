@@ -105,6 +105,7 @@ def cluster_based_selection(
     clustering_method: str = "kmeans",
     clustering_params: dict = None,
     device: torch.device = None,
+    debug_print: bool = False,
 ) -> List[dict]:
     """
     基于聚类的数据选择策略
@@ -116,6 +117,7 @@ def cluster_based_selection(
         clustering_method: 聚类方法 ('kmeans' 或 'hdbscan')
         clustering_params: 聚类参数
         device: GPU设备
+        debug_print: 是否启用调试输出
 
     Returns:
         选择后的数据列表
@@ -127,8 +129,11 @@ def cluster_based_selection(
     log.info(f"开始聚类选择: 从 {total_samples} 个样本中选择 {target_count} 个")
     log.info(f"使用聚类方法: {clustering_method}")
 
+    if debug_print:
+        log.info("启用调试模式")
+
     # 初始化聚类选择器
-    cluster_selector = ClusterBasedSelection(device=device)
+    cluster_selector = ClusterBasedSelection(device=device, debug_print=debug_print)
 
     # 执行聚类-轮选选择
     selected_data = cluster_selector.select_data_by_clustering(

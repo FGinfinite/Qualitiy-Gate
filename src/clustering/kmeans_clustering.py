@@ -11,23 +11,26 @@ import logging
 from typing import Dict, List, Optional, Tuple
 
 import torch
-from sklearn.metrics import silhouette_score
 from tqdm import tqdm
+
+from .gpu_metrics import gpu_silhouette_score_cosine
 
 
 class GPUKMeansClustering:
     """GPU加速的K-Means聚类实现"""
 
-    def __init__(self, device: torch.device, random_state: int = 42):
+    def __init__(self, device: torch.device, random_state: int = 42, debug_print: bool = False):
         """
         初始化GPU K-Means聚类器
 
         Args:
             device: GPU设备
             random_state: 随机种子
+            debug_print: 是否启用调试输出
         """
         self.device = device
         self.random_state = random_state
+        self.debug_print = debug_print
         self.logger = logging.getLogger(__name__)
 
     def kmeans_cosine(
@@ -76,7 +79,7 @@ class GPUKMeansClustering:
             labels = similarities.argmax(dim=1)  # [N]
 
             # 更新中心
-            new_centers = torch.zeros_like(centers)
+            new_centers = torch.zeros_like(centers, dtype=centers.dtype, device=centers.device)
             for i in range(k):
                 mask = labels == i
                 if mask.sum() > 0:
@@ -92,15 +95,19 @@ class GPUKMeansClustering:
             centers = new_centers
 
             if center_shift < tol:
-                self.logger.debug(f"K-Means收敛于第{iteration + 1}次迭代")
+                if self.debug_print:
+                    self.logger.info(f"K-means 第{iteration + 1}次迭代收敛 (中心偏移: {center_shift:.6f})")
                 break
+            elif self.debug_print and (iteration + 1) % 10 == 0:
+                self.logger.info(f"K-means 第{iteration + 1}次迭代 (中心偏移: {center_shift:.6f})")
 
         return centers, labels
 
     def _kmeans_plus_plus_init(self, data: torch.Tensor, k: int) -> torch.Tensor:
         """K-Means++初始化方法"""
         n_samples, n_features = data.shape
-        centers = torch.zeros(k, n_features, device=self.device)
+        # 使用与输入数据相同的dtype和device
+        centers = torch.zeros(k, n_features, dtype=data.dtype, device=self.device)
 
         # 设置随机种子
         torch.manual_seed(self.random_state)
@@ -151,7 +158,7 @@ class GPUKMeansClustering:
         data: torch.Tensor,
         k_range: Optional[Tuple[int, int]] = None,
         max_iters: int = 300,
-        n_runs: int = 3,
+        n_runs: int = 30,
     ) -> Dict:
         """
         使用Elbow Method自动选择最优k值
@@ -184,8 +191,14 @@ class GPUKMeansClustering:
             best_inertia = float("inf")
             best_labels = None
 
+            if self.debug_print:
+                self.logger.info(f"测试 k={k} (共{n_runs}次运行)...")
+
             # 多次运行选择最佳结果
             for run in range(n_runs):
+                if self.debug_print and n_runs > 1:
+                    self.logger.info(f"  运行 {run + 1}/{n_runs}...")
+
                 centers, labels = self.kmeans_cosine(data, k, max_iters=max_iters)
                 inertia = self.compute_inertia_cosine(data, centers, labels)
 
@@ -195,15 +208,17 @@ class GPUKMeansClustering:
 
             inertias.append(best_inertia)
 
-            # 计算轮廓系数（转换为CPU进行计算）
+            # 计算轮廓系数（GPU计算）
             if k > 1:
-                data_cpu = data.cpu().numpy()
-                labels_cpu = best_labels.cpu().numpy()
-                # 使用余弦距离计算轮廓系数
-                sil_score = silhouette_score(data_cpu, labels_cpu, metric="cosine")
+                # 使用GPU加速的余弦距离轮廓系数计算
+                sil_score = gpu_silhouette_score_cosine(data, best_labels)
                 silhouette_scores.append(sil_score)
             else:
-                silhouette_scores.append(0.0)
+                sil_score = 0.0
+                silhouette_scores.append(sil_score)
+
+            if self.debug_print:
+                self.logger.info(f"k={k}: 惯性={best_inertia:.3f}, 轮廓系数={sil_score:.3f}")
 
         # 寻找Elbow点
         optimal_k = self._find_elbow_point(k_values, inertias)
@@ -284,11 +299,9 @@ class GPUKMeansClustering:
         centers, labels = self.kmeans_cosine(data, optimal_k, max_iters=max_iters)
         final_inertia = self.compute_inertia_cosine(data, centers, labels)
 
-        # 计算最终轮廓系数
+        # 计算最终轮廓系数（GPU计算）
         if optimal_k > 1:
-            data_cpu = data.cpu().numpy()
-            labels_cpu = labels.cpu().numpy()
-            final_silhouette = silhouette_score(data_cpu, labels_cpu, metric="cosine")
+            final_silhouette = gpu_silhouette_score_cosine(data, labels)
         else:
             final_silhouette = 0.0
 

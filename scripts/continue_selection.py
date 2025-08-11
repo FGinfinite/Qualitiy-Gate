@@ -4,16 +4,18 @@
 
 使用聚类-轮选策略从保存的router_data进行数据选择。
 支持K-Means和HDBSCAN两种聚类算法。
+现在使用Hydra进行配置管理。
 """
 
-import argparse
 import json
 import logging
 import os
 import sys
 from typing import Any, Dict, List
 
+import hydra
 import torch
+from omegaconf import DictConfig
 
 # 添加项目根目录到路径
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -22,10 +24,15 @@ if project_root not in sys.path:
 
 from src.data.dataset_loader import load_local_datasets
 from src.stages.selection import cluster_based_selection, load_router_data
+from src.utils.hydra_resolvers import register_custom_resolvers
+
+# Register custom Hydra resolvers before @hydra.main
+register_custom_resolvers()
 
 
-def setup_logging(verbose: bool = False):
+def setup_logging(cfg: DictConfig):
     """设置日志配置"""
+    verbose = cfg.logging.get("verbose", False)
     level = logging.DEBUG if verbose else logging.INFO
     logging.basicConfig(level=level, format="[%(asctime)s][%(name)s][%(levelname)s] - %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
 
@@ -184,74 +191,64 @@ def rebuild_logits_data(all_router_data: Dict[str, Dict[str, Any]]) -> Dict[str,
     return all_logits_by_dataset
 
 
-def parse_clustering_params(args) -> Dict:
+def parse_clustering_params(cfg: DictConfig) -> Dict:
     """解析聚类参数"""
     params = {}
+    clustering_params = cfg.clustering_params
 
-    if args.clustering_method == "kmeans":
+    if cfg.clustering_method == "kmeans":
         params.update(
             {
-                "auto_k": args.auto_k,
-                "k": args.k,
-                "k_range": args.k_range,
-                "max_iters": args.max_iters,
+                "auto_k": clustering_params.get("auto_k", True),
+                "k": clustering_params.get("k", None),
+                "k_range": clustering_params.get("k_range", [10, 100]),
+                "max_iters": clustering_params.get("max_iters", 300),
             }
         )
-    elif args.clustering_method == "hdbscan":
+    elif cfg.clustering_method == "hdbscan":
         params.update(
             {
-                "min_cluster_size": args.min_cluster_size,
-                "min_samples": args.min_samples,
-                "metric": args.metric,
-                "use_gpu": args.use_gpu,
-                "auto_tune": args.auto_tune,
+                "min_cluster_size": clustering_params.get("min_cluster_size", None),
+                "min_samples": clustering_params.get("min_samples", None),
+                "metric": clustering_params.get("metric", "cosine"),
+                "use_gpu": clustering_params.get("use_gpu", True),
+                "auto_tune": clustering_params.get("auto_tune", False),
             }
         )
 
     return params
 
 
-def main():
-    parser = argparse.ArgumentParser(description="从保存的router_data使用聚类-轮选进行数据选择")
-    parser.add_argument("--router_data_dir", required=True, help="包含router_data文件的目录路径")
-    parser.add_argument("--output_path", required=True, help="选择结果的输出文件路径")
-    parser.add_argument("--selection_percentage", type=float, required=True, help="数据选择比例")
-    parser.add_argument("--data_dir", help="原始数据集目录路径（自动推断如果未指定）")
+def generate_output_path(router_data_dir: str) -> str:
+    """
+    根据router_data_dir自动生成output_path
+    将输出文件放在与router_data_dir同一父目录下
+    """
+    # 获取父目录
+    parent_dir = os.path.dirname(router_data_dir)
+    # 生成输出文件路径
+    output_path = os.path.join(parent_dir, "selected_data.jsonl")
+    return output_path
 
-    # 聚类方法选择
-    parser.add_argument("--clustering_method", default="kmeans", choices=["kmeans", "hdbscan"], help="聚类方法（默认: kmeans）")
 
-    # K-Means参数
-    parser.add_argument("--auto_k", action="store_true", default=True, help="自动选择k值")
-    parser.add_argument("--k", type=int, help="手动指定k值（仅当--no-auto-k时使用）")
-    parser.add_argument("--no-auto-k", dest="auto_k", action="store_false", help="禁用自动k选择")
-    parser.add_argument("--k_range", type=int, nargs=2, default=[10, 100], help="k值搜索范围（默认: 10 100）")
-    parser.add_argument("--max_iters", type=int, default=300, help="K-Means最大迭代次数（默认: 300）")
+@hydra.main(config_path="../configs", config_name="continue_selection", version_base=None)
+def main(cfg: DictConfig) -> None:
+    """主函数：执行聚类-轮选数据选择"""
 
-    # HDBSCAN参数
-    parser.add_argument("--min_cluster_size", type=int, help="HDBSCAN最小簇大小（自动估计如果未指定）")
-    parser.add_argument("--min_samples", type=int, help="HDBSCAN最小样本数（自动设置如果未指定）")
-    parser.add_argument("--metric", default="cosine", help="HDBSCAN距离度量（默认: cosine）")
-    parser.add_argument("--use_gpu", action="store_true", default=True, help="使用GPU加速HDBSCAN（如果可用）")
-    parser.add_argument("--no-gpu", dest="use_gpu", action="store_false", help="禁用GPU加速")
-    parser.add_argument("--auto_tune", action="store_true", help="自动调参HDBSCAN")
-
-    # 其他参数
-    parser.add_argument("--device", default="auto", help="计算设备 (cuda/cpu/auto，默认: auto)")
-    parser.add_argument("--verbose", "-v", action="store_true", help="启用详细日志输出")
-
-    args = parser.parse_args()
+    # 验证必需参数
+    if cfg.router_data_dir is None:
+        raise ValueError("router_data_dir参数是必需的")
 
     # 设置日志
-    setup_logging(args.verbose)
+    setup_logging(cfg)
     log = logging.getLogger(__name__)
 
     log.info("=== 开始聚类-轮选数据选择 ===")
-    log.info(f"聚类方法: {args.clustering_method}")
-    log.info(f"选择比例: {args.selection_percentage}")
+    log.info(f"聚类方法: {cfg.clustering_method}")
+    log.info(f"选择比例: {cfg.selection_percentage}")
 
     # 确定设备
-    if args.device == "auto":
+    if cfg.device == "auto":
         if torch.cuda.is_available():
             num_gpus = torch.cuda.device_count()
             if num_gpus > 0:
@@ -264,21 +261,25 @@ def main():
             device = torch.device("cpu")
             log.info("CUDA不可用，使用CPU")
     else:
-        device = torch.device(args.device)
+        device = torch.device(cfg.device)
         log.info(f"使用指定设备: {device}")
 
     # 如果使用GPU，清理缓存
     if device.type == "cuda":
         torch.cuda.empty_cache()
 
+    # 自动生成输出路径
+    output_path = generate_output_path(cfg.router_data_dir)
+    log.info(f"输出路径: {output_path}")
+
     try:
         # 1. 加载所有router_data
         log.info("加载router_data文件...")
-        all_router_data = load_all_router_data(args.router_data_dir)
+        all_router_data = load_all_router_data(cfg.router_data_dir)
 
         # 2. 加载原始数据集映射
         log.info("加载原始数据集映射...")
-        dataset_mapping = load_original_dataset_mapping(args.router_data_dir, args.data_dir)
+        dataset_mapping = load_original_dataset_mapping(cfg.router_data_dir, cfg.data_dir)
 
         # 3. 重建scored_data（包含messages）
         log.info("重建scored_data（包含完整messages）...")
@@ -289,7 +290,7 @@ def main():
         all_logits_by_dataset = rebuild_logits_data(all_router_data)
 
         # 5. 解析聚类参数
-        clustering_params = parse_clustering_params(args)
+        clustering_params = parse_clustering_params(cfg)
         log.info(f"聚类参数: {clustering_params}")
 
         # 6. 执行聚类-轮选选择
@@ -297,13 +298,14 @@ def main():
         selected_data = cluster_based_selection(
             scored_data=scored_data,
             all_logits_by_dataset=all_logits_by_dataset,
-            selection_percentage=args.selection_percentage,
-            clustering_method=args.clustering_method,
+            selection_percentage=cfg.selection_percentage,
+            clustering_method=cfg.clustering_method,
             clustering_params=clustering_params,
             device=device,
+            debug_print=cfg.debug_print,
         )
 
-        log.info(f"聚类-轮选完成，选择了 {len(selected_data)} 个样本 ({args.selection_percentage * 100:.2f}%)")
+        log.info(f"聚类-轮选完成，选择了 {len(selected_data)} 个样本 ({cfg.selection_percentage * 100:.2f}%)")
 
         if len(selected_data) > 3:
             log.info(f"前3个分数: {[d['scores'] for d in selected_data[:3]]}")
@@ -311,23 +313,20 @@ def main():
 
         # 7. 保存选择结果
         log.info("保存选择结果...")
-        output_dir = os.path.dirname(args.output_path)
+        output_dir = os.path.dirname(output_path)
         os.makedirs(output_dir, exist_ok=True)
 
-        with open(args.output_path, "w", encoding="utf-8") as f:
+        with open(output_path, "w", encoding="utf-8") as f:
             for item in selected_data:
                 f.write(json.dumps(item, ensure_ascii=False) + "\n")
 
-        log.info(f"聚类选择的数据已保存到: {args.output_path}")
+        log.info(f"聚类选择的数据已保存到: {output_path}")
         log.info("=== 聚类-轮选数据选择完成 ===")
 
     except Exception as e:
         log.error(f"聚类选择过程中发生错误: {e}")
-        return 1
-
-    return 0
+        raise e
 
 
 if __name__ == "__main__":
-    exit_code = main()
-    sys.exit(exit_code)
+    main()

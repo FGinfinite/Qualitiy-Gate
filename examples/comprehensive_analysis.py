@@ -245,7 +245,7 @@ def perform_selection_comparison(router_data, distance_matrix, demo_indices, qua
     print("选择结果统计:")
     print("-" * 50)
 
-    for strategy_name, (local_indices, global_indices) in strategies.items():
+    for strategy_name, (local_indices, _global_indices) in strategies.items():
         # 质量分数统计
         selected_quality = quality_subset[local_indices]
         avg_quality = selected_quality.mean()

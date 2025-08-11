@@ -21,22 +21,25 @@ except ImportError:
     CUML_AVAILABLE = False
 
 from sklearn.cluster import HDBSCAN as SklearnHDBSCAN
-from sklearn.metrics import silhouette_score
+
+from .gpu_metrics import gpu_silhouette_score_cosine
 
 
 class GPUHDBSCANClustering:
     """GPU加速的HDBSCAN聚类实现"""
 
-    def __init__(self, device: torch.device, random_state: int = 42):
+    def __init__(self, device: torch.device, random_state: int = 42, debug_print: bool = False):
         """
         初始化GPU HDBSCAN聚类器
 
         Args:
             device: GPU设备
             random_state: 随机种子
+            debug_print: 是否启用调试输出
         """
         self.device = device
         self.random_state = random_state
+        self.debug_print = debug_print
         self.logger = logging.getLogger(__name__)
 
         if not CUML_AVAILABLE:
@@ -80,6 +83,8 @@ class GPUHDBSCANClustering:
         # 尝试使用GPU版本
         if use_gpu and CUML_AVAILABLE and self.device.type == "cuda":
             try:
+                if self.debug_print:
+                    self.logger.info("使用GPU HDBSCAN聚类...")
                 labels, info = self._fit_predict_gpu(data, min_cluster_size, min_samples, metric)
                 self.logger.info("使用GPU HDBSCAN聚类成功")
                 return labels, info
@@ -87,6 +92,8 @@ class GPUHDBSCANClustering:
                 self.logger.warning(f"GPU HDBSCAN失败: {e}，回退到CPU版本")
 
         # 回退到CPU版本
+        if self.debug_print:
+            self.logger.info("使用CPU HDBSCAN聚类...")
         labels, info = self._fit_predict_cpu(data, min_cluster_size, min_samples, metric)
         self.logger.info("使用CPU HDBSCAN聚类")
         return labels, info
@@ -131,11 +138,12 @@ class GPUHDBSCANClustering:
             # 过滤噪声点
             non_noise_mask = labels >= 0
             if non_noise_mask.sum() > 1:
-                data_filtered = data[non_noise_mask].cpu().numpy()
-                labels_filtered = labels[non_noise_mask].cpu().numpy()
+                # 使用GPU加速的余弦距离轮廓系数计算
+                data_filtered = data[non_noise_mask]
+                labels_filtered = labels[non_noise_mask]
 
                 try:
-                    silhouette_avg = silhouette_score(data_filtered, labels_filtered, metric="cosine")
+                    silhouette_avg = gpu_silhouette_score_cosine(data_filtered, labels_filtered)
                 except Exception as e:
                     self.logger.warning(f"轮廓系数计算失败: {e}")
 
@@ -186,12 +194,13 @@ class GPUHDBSCANClustering:
         if n_clusters > 1:
             # 过滤噪声点
             non_noise_mask = labels >= 0
+            # 使用GPU加速的余弦距离轮廓系数计算
             if non_noise_mask.sum() > 1:
-                data_filtered = data[non_noise_mask].cpu().numpy()
-                labels_filtered = labels[non_noise_mask].cpu().numpy()
+                data_filtered = data[non_noise_mask]
+                labels_filtered = labels[non_noise_mask]
 
                 try:
-                    silhouette_avg = silhouette_score(data_filtered, labels_filtered, metric=metric)
+                    silhouette_avg = gpu_silhouette_score_cosine(data_filtered, labels_filtered)
                 except Exception as e:
                     self.logger.warning(f"轮廓系数计算失败: {e}")
 
@@ -256,6 +265,9 @@ class GPUHDBSCANClustering:
         self.logger.info(f"调参候选值: min_cluster_size = {candidates}")
 
         for min_cluster_size in candidates:
+            if self.debug_print:
+                self.logger.info(f"测试 min_cluster_size={min_cluster_size}...")
+
             labels, info = self.fit_predict(
                 data,
                 min_cluster_size=min_cluster_size,
@@ -266,13 +278,22 @@ class GPUHDBSCANClustering:
             # 评估指标：轮廓系数 - 噪声点惩罚
             score = info["silhouette_score"] - 0.1 * info["noise_ratio"]
 
-            self.logger.debug(
-                f"min_cluster_size={min_cluster_size}: "
-                f"n_clusters={info['n_clusters']}, "
-                f"silhouette={info['silhouette_score']:.3f}, "
-                f"noise_ratio={info['noise_ratio']:.3f}, "
-                f"score={score:.3f}"
-            )
+            if self.debug_print:
+                self.logger.info(
+                    f"min_cluster_size={min_cluster_size}: "
+                    f"n_clusters={info['n_clusters']}, "
+                    f"silhouette={info['silhouette_score']:.3f}, "
+                    f"noise_ratio={info['noise_ratio']:.3f}, "
+                    f"score={score:.3f}"
+                )
+            else:
+                self.logger.debug(
+                    f"min_cluster_size={min_cluster_size}: "
+                    f"n_clusters={info['n_clusters']}, "
+                    f"silhouette={info['silhouette_score']:.3f}, "
+                    f"noise_ratio={info['noise_ratio']:.3f}, "
+                    f"score={score:.3f}"
+                )
 
             if score > best_score and info["n_clusters"] > 0:
                 best_score = score

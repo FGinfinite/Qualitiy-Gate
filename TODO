@@ -122,6 +122,8 @@ CUDA_VISIBLE_DEVICES=5 back scripts/run_stage_2.sh -m data_process.batch_size=32
 
 CUDA_VISIBLE_DEVICES=7 back scripts/run_stage_2.sh -m data_process.batch_size=32 model_checkpoint_path=\"outputs/stage_1_pretrain/2025-08-10/03-42-54-batch=8_lr=0.0003_loss=sigmoid_tag=none/full_rank_weights.pt\",\"outputs/stage_1_pretrain/2025-08-10/14-24-36-batch=8_lr=0.001_loss=mse_tag=none/full_rank_weights.pt\",\"outputs/stage_1_pretrain/2025-08-10/14-24-36-batch=8_lr=0.0001_loss=mse_tag=none/full_rank_weights.pt\",\"outputs/stage_1_pretrain/2025-08-10/14-24-36-batch=8_lr=0.0003_loss=mse_tag=none/full_rank_weights.pt\"
 
+CUDA_VISIBLE_DEVICES=1 uv run scripts/continue_selection.py router_data_dir=\"outputs/stage_2_selection/2025-08-11/03-52-40-batch=8_lr=0.001_loss=beta_moment_matching_tag=none/router_data\"
+CUDA_VISIBLE_DEVICES=1 uv run scripts/continue_selection.py
 
 可视化数据
 uv run examples/comprehensive_analysis.py outputs/stage_2_selection/2025-08-09/13-30-44-lr=1e-4/router_data --save-plots --aggregate-datasets
@@ -149,3 +151,4 @@ pretrain过程中mean要考虑有效token
 阶段二：
 1. 查看数据分布的特征
 2. 选择合适的聚类算法
+

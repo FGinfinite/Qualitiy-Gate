@@ -20,21 +20,23 @@ from .kmeans_clustering import GPUKMeansClustering
 class ClusterBasedSelection:
     """基于聚类的数据选择器"""
 
-    def __init__(self, device: torch.device, random_state: int = 42):
+    def __init__(self, device: torch.device, random_state: int = 42, debug_print: bool = False):
         """
         初始化聚类选择器
 
         Args:
             device: GPU设备
             random_state: 随机种子
+            debug_print: 是否启用调试输出
         """
         self.device = device
         self.random_state = random_state
+        self.debug_print = debug_print
         self.logger = logging.getLogger(__name__)
 
         # 初始化聚类器
-        self.kmeans_clusterer = GPUKMeansClustering(device, random_state)
-        self.hdbscan_clusterer = GPUHDBSCANClustering(device, random_state)
+        self.kmeans_clusterer = GPUKMeansClustering(device, random_state, debug_print)
+        self.hdbscan_clusterer = GPUHDBSCANClustering(device, random_state, debug_print)
 
     def select_data_by_clustering(
         self,
@@ -116,11 +118,16 @@ class ClusterBasedSelection:
             self.logger.error("没有收集到任何特征数据")
             return torch.empty(0, 0, device=self.device), []
 
-        # 堆叠为特征矩阵 [N, L*E]
-        features_matrix = torch.stack(all_features).to(self.device)
+        # 堆叠为特征矩阵 [N, L*E]，确保使用float32类型
+        features_matrix = torch.stack(all_features).to(device=self.device, dtype=torch.float32)
 
         self.logger.info(f"聚类特征矩阵形状: {features_matrix.shape}")
         self.logger.info(f"有效样本数: {len(sample_mapping)}")
+
+        if self.debug_print:
+            self.logger.info(f"特征向量维度: {features_matrix.shape[1]}")
+            if features_matrix.shape[0] > 0:
+                self.logger.info(f"特征数据类型: {features_matrix.dtype}")
 
         return features_matrix, sample_mapping
 

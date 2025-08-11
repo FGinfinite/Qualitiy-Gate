@@ -1,0 +1,58 @@
+# @package _global_
+
+stage: continue_selection
+
+# Hydra settings to create a timestamped output directory
+hydra:
+  run:
+    dir: outputs/continue_selection/${now:%Y-%m-%d}/${now:%H-%M-%S}
+  sweep:
+    dir: outputs/continue_selection
+    subdir: ${now:%Y-%m-%d}/${now:%H-%M-%S}
+  job:
+    config:
+      override_dirname:
+        kv_sep: "="
+        item_sep: ","
+        exclude_keys:
+          - hydra.run.dir
+          - hydra.sweep.dir
+          - hydra.sweep.subdir
+
+# Required: Directory containing router_data files
+# Example: outputs/stage_2_selection/2025-08-11/03-52-40-batch=8_lr=0.001_loss=beta_moment_matching_tag=none/router_data
+router_data_dir: "outputs/stage_2_selection/2025-08-11/03-52-40-batch=8_lr=0.001_loss=beta_moment_matching_tag=none/router_data"
+
+# Data selection percentage (0.05 means select top 5% of the data)
+selection_percentage: 0.05
+
+# Optional: Original dataset directory path (auto-inferred if not specified)
+data_dir: null
+
+# Clustering method: "kmeans" or "hdbscan"
+clustering_method: "kmeans"
+
+# Clustering parameters
+clustering_params:
+  # K-Means specific parameters
+  auto_k: true  # Automatically determine k using Elbow method
+  k: null  # Manual k value (only used if auto_k=false)
+  k_range: [10, 12]  # k search range for Elbow method
+  max_iters: 300  # Maximum iterations
+  
+  # HDBSCAN specific parameters
+  min_cluster_size: null  # Minimum cluster size (auto-estimated if null)
+  min_samples: null  # Minimum samples (auto-set if null)
+  metric: "cosine"  # Distance metric
+  use_gpu: true  # Use GPU acceleration if available
+  auto_tune: false  # Auto-tune HDBSCAN parameters
+
+# Device configuration
+device: "auto"  # "cuda", "cpu", or "auto" for automatic detection
+
+# Debug configuration
+debug_print: false  # Enable detailed debug output for clustering algorithms
+
+# Logging configuration
+logging:
+  verbose: false  # Enable detailed logging output
