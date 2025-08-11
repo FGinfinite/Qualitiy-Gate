@@ -40,6 +40,7 @@ Select-MoE is a data selection framework using Mixture-of-Experts (MoE) models. 
 ### Clustering-Based Selection (`src/clustering/`)
 - **GPU K-Means with Elbow Method**: Automatic k-value selection using GPU acceleration
 - **GPU HDBSCAN**: Parameter-free clustering with RAPIDS cuML support and CPU fallback
+- **GPU Silhouette Score**: High-performance GPU-accelerated silhouette coefficient calculation for cosine distance
 - **Round-Robin Selection**: Selects high-quality data from each cluster using quality scores
 - **Cosine Distance Metric**: Uses cosine similarity for better semantic clustering of MoE logits
 - **ClusterBasedSelection**: Main selection class integrating both clustering algorithms
@@ -132,6 +133,22 @@ bash scripts/run_stage_2.sh clustering_method=hdbscan clustering_params.min_clus
 
 # Override LoRA parameters
 bash scripts/run_stage_3.sh training.lora.r=64 training.lora.lora_alpha=128
+
+# Enable clustering debug output
+bash scripts/run_stage_2.sh debug_print=true
+
+# Use standalone clustering selection with debug
+CUDA_VISIBLE_DEVICES=1 uv run scripts/continue_selection.py debug_print=true
+```
+
+### Validation and Testing
+```bash
+# Validate GPU silhouette coefficient implementation
+python scripts/validate_gpu_silhouette.py
+
+# This will run accuracy tests comparing GPU vs CPU silhouette scores
+# on tiny datasets (10 samples, 3 features, 2 clusters) to ensure
+# numerical precision within 1e-6 tolerance
 ```
 
 ### Evaluation Commands
@@ -192,6 +209,7 @@ accelerate launch -m lm_eval --model hf \
 - `selection_percentage`: Data selection ratio (default: 0.05)
 - `model_checkpoint_path`: Path to Stage 1 output weights
 - `clustering_method`: Clustering algorithm ('kmeans' or 'hdbscan', default: 'kmeans')
+- `debug_print`: Enable detailed clustering debug output (default: false)
 - `clustering_params`: Clustering-specific parameters
   - **K-Means Parameters**:
     - `auto_k`: Auto k-value selection using Elbow Method (default: true)
@@ -238,6 +256,7 @@ Always verify output paths before proceeding to the next stage.
 - **Clustering-Based Selection**: GPU-accelerated clustering algorithms for data diversity
   - **K-Means + Elbow Method**: Automatic optimal k-value selection
   - **HDBSCAN**: Parameter-free density-based clustering
+  - **GPU Silhouette Score**: Precise GPU computation replacing CPU bottlenecks
   - **Round-Robin Selection**: Ensures balanced selection from all clusters
   - **Cosine Distance**: Semantic clustering using MoE logits as features
 
@@ -285,3 +304,81 @@ model.config.w_mean = 1.0
 model.config.w_var = 1.0
 model.config.lambda_var = 0.1
 ```
+
+## Code Structure Map
+
+### 📂 Root Directory
+- `pyproject.toml` - Python project configuration with dependencies and build settings
+- `TODO` - Development task tracking and progress notes
+- `CLAUDE.md` - This file: comprehensive project documentation and AI guidance
+
+### 📂 configs/
+Configuration files for different pipeline stages using Hydra framework:
+- `stage_1_pretrain.yaml` - Router training configuration (PEFT mode, learning rates, quality loss)
+- `stage_2_selection.yaml` - Data selection configuration (clustering methods, selection ratios)
+- `stage_3_finetune.yaml` - Target model fine-tuning configuration (LoRA parameters)
+- `stage_4_evaluate.yaml` - Model evaluation configuration (lm-eval settings)
+- `continue_selection.yaml` - Standalone clustering selection script configuration
+- `accelerate_config_*.yaml` - Multi-GPU distributed training configurations
+
+### 📂 src/
+Main source code organized by functionality:
+
+#### 📂 src/models/
+- `select_moe.py` - Core Select-MoE model implementation with two-tier routing architecture
+- `__init__.py` - Model package initialization and exports
+
+#### 📂 src/data/
+- `dataset_loader.py` - Multi-dataset loading and preprocessing (CoT, Dolly, FLAN-v2, OASST1)
+- `__init__.py` - Data package initialization and exports
+
+#### 📂 src/clustering/
+GPU-accelerated clustering algorithms for intelligent data selection:
+- `cluster_selection.py` - Main clustering-based selection coordinator class
+- `kmeans_clustering.py` - GPU K-means with automatic k-value selection via Elbow Method
+- `hdbscan_clustering.py` - GPU HDBSCAN with parameter auto-tuning and RAPIDS cuML support
+- `gpu_metrics.py` - High-performance GPU silhouette coefficient computation for cosine distance
+- `__init__.py` - Clustering package initialization and exports
+
+#### 📂 src/stages/
+Pipeline stage implementations following the four-stage architecture:
+- `pretrain.py` - Stage 1 implementation: Select-MoE router pretraining with quality loss
+- `selection.py` - Stage 2 implementation: router inference, data scoring, and clustering selection
+- `finetune.py` - Stage 3 implementation: target model LoRA fine-tuning with selected data
+- `evaluation.py` - Stage 4 implementation: model performance evaluation using lm-eval
+- `__init__.py` - Stages package initialization and exports
+
+#### 📂 src/training/
+Training utilities and distributed computing support:
+- `full_rank_finetuning.py` - Full-rank weight loading and saving utilities for router training
+- `__init__.py` - Training package initialization and exports
+
+#### 📂 src/utils/
+- `__init__.py` - Utilities package initialization and exports
+
+### 📂 scripts/
+Executable scripts for various operations:
+- `run_stage_1.sh` - Stage 1 router pretraining execution script
+- `run_stage_2.sh` - Stage 2 data selection execution script  
+- `run_stage_3.sh` - Stage 3 target model fine-tuning execution script
+- `eval.sh` - Stage 4 model evaluation execution script
+- `continue_selection.py` - Standalone clustering-based data selection script
+- `convert_olmoe_to_select_moe.py` - Model conversion from OLMoE to Select-MoE format
+- `compare_converted_model.py` - Model conversion verification and comparison
+- `validate_gpu_silhouette.py` - GPU silhouette coefficient implementation validation
+
+### 📂 ref_model/
+Reference model implementations for comparison and development:
+- `olmoe/` - Original OLMoE model implementation and configuration
+- `moe_plus_plus/` - MoE++ model reference implementation
+
+### 📂 examples/
+- `comprehensive_analysis.py` - Data analysis and visualization tools for router outputs
+
+### 📂 tools/
+- `install.sh` - Development environment setup and tool installation script
+
+### Key Entry Points
+- `src/main.py` - Main pipeline coordinator with Hydra configuration management
+- `scripts/continue_selection.py` - Standalone data selection with clustering algorithms
+- `scripts/run_stage_*.sh` - Stage-specific execution scripts with parameter overrides
