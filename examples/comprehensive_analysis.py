@@ -23,31 +23,33 @@ import glob
 
 import matplotlib.pyplot as plt
 import numpy as np
-import seaborn as sns
 import torch
-from sklearn.manifold import MDS
 
-from src.stages.selection import (
-    compute_batch_cosine_distance_gpu,
-    farthest_point_sampling_gpu,
-    load_router_data,
-)
+try:
+    import umap
+
+    UMAP_AVAILABLE = True
+except ImportError:
+    UMAP_AVAILABLE = False
+
+from src.clustering import ClusterBasedSelection
+from src.stages.selection import load_router_data
 
 plt.rcParams["font.sans-serif"] = ["Maple Mono NF CN"]
 
 
 def analyze_quality_gates(router_data, top_k=10):
     """分析质量门的输出分布"""
-    quality_logits = router_data["quality_logits"]  # [N, L, 2]
+    quality_score = router_data["quality_score"]  # [N, L, 1]
     sample_ids = router_data["sample_ids"]
 
     print("=" * 70)
     print("质量门分析")
     print("=" * 70)
 
-    # 计算每个样本的质量分数（good概率的平均值）
-    quality_probs = torch.softmax(quality_logits.float(), dim=-1)  # [N, L, 2]
-    good_probs = quality_probs[:, :, 0]  # [N, L] - good类别的概率
+    # 计算每个样本的质量分数（使用sigmoid转换）
+    quality_probs = torch.sigmoid(quality_score.float())  # [N, L, 1]
+    good_probs = quality_probs.squeeze(-1)  # [N, L] - good概率
 
     # 每个样本在所有层的平均good概率作为质量分数
     sample_quality_scores = good_probs.mean(dim=1).numpy()  # [N]
@@ -79,14 +81,14 @@ def analyze_quality_gates(router_data, top_k=10):
 
 def analyze_moe_routing(router_data):
     """分析MoE路由模式"""
-    moe_logits = router_data["moe_logits"]  # [N, L, E]
+    moe_logits = router_data["moe_logits"]  # [N, L, E] - 已经是概率分布
 
     print("=" * 70)
     print("MoE路由分析")
     print("=" * 70)
 
-    # 转换为概率分布
-    moe_probs = torch.softmax(moe_logits.float(), dim=-1)  # [N, L, E]
+    # 数据已经是概率分布格式，直接使用
+    moe_probs = moe_logits.float()  # [N, L, E]
 
     # 计算专家使用统计
     expert_usage = moe_probs.mean(dim=(0, 1)).numpy()  # [E] - 每个专家的平均使用率
@@ -112,275 +114,158 @@ def analyze_moe_routing(router_data):
     return expert_usage, sample_avg_entropy
 
 
-def compute_comprehensive_distances(router_data, max_samples=50):
-    """计算样本间的综合距离矩阵"""
-    moe_logits = router_data["moe_logits"]  # [N, L, E]
-
-    # 限制样本数量
-    n_samples = min(len(moe_logits), max_samples)
-    selected_indices = np.linspace(0, len(moe_logits) - 1, n_samples, dtype=int)
-
-    moe_subset = moe_logits[selected_indices]  # [n_samples, L, E]
-    distance_matrix = np.zeros((n_samples, n_samples))
+def perform_clustering_and_visualization(router_data, device=None, clustering_method="kmeans"):
+    """
+    使用GPU聚类算法进行聚类并准备2D投影可视化
+    """
+    moe_logits = router_data["moe_logits"]  # [N, L, E] - 已经是概率分布
 
     print("=" * 70)
-    print("逐层二级路由余弦相似度计算")
+    print("执行聚类算法和2D投影")
     print("=" * 70)
-    print(f"计算{n_samples}个样本的距离矩阵...")
 
-    # 尝试使用GPU加速计算
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    n_samples = len(moe_logits)
+    print(f"处理 {n_samples} 个样本...")
 
-    if device.type == "cuda":
-        print("使用GPU加速计算...")
-        # 转换为概率并移至GPU
-        moe_probs = torch.softmax(moe_subset.float(), dim=-1).to(device)
+    # 如果没有指定设备，自动选择
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        # compute_batch_cosine_distance_gpu需要批次间比较，不能直接计算N×N矩阵
-        # 改用循环方式逐对计算距离
-        distance_matrix = torch.zeros(n_samples, n_samples, device=device)
-        for i in range(n_samples):
-            for j in range(i, n_samples):  # 只计算上三角矩阵
-                sample_i = moe_probs[i : i + 1]  # [1, L, E]
-                sample_j = moe_probs[j : j + 1]  # [1, L, E]
-                dist = compute_batch_cosine_distance_gpu(sample_i, sample_j)
-                distance_matrix[i, j] = dist[0, 0]  # 提取标量值
-                distance_matrix[j, i] = dist[0, 0]  # 对称填充
+    # 1. 准备聚类特征：将 [N, L, E] 展平为 [N, L*E]
+    features_matrix = moe_logits.reshape(n_samples, -1).to(device=device, dtype=torch.float32)
+    print(f"聚类特征矩阵形状: {features_matrix.shape}")
 
-        distance_matrix = distance_matrix.cpu().numpy()
-    else:
-        print("使用CPU计算...")
-        # CPU计算
-        for i in range(n_samples):
-            for j in range(i + 1, n_samples):
-                # 转换为概率分布
-                probs_i = torch.softmax(moe_subset[i].float(), dim=-1)
-                probs_j = torch.softmax(moe_subset[j].float(), dim=-1)
+    # 2. 使用GPU聚类算法
+    cluster_selector = ClusterBasedSelection(device=device, debug_print=True)
 
-                # 计算逐层余弦相似度距离
-                total_similarity = 0
-                for layer_idx in range(probs_i.shape[0]):
-                    prob1 = probs_i[layer_idx].numpy()
-                    prob2 = probs_j[layer_idx].numpy()
-
-                    # 计算余弦相似度
-                    dot_product = np.dot(prob1, prob2)
-                    norm1 = np.linalg.norm(prob1)
-                    norm2 = np.linalg.norm(prob2)
-                    cosine_sim = dot_product / (norm1 * norm2 + 1e-8)
-                    total_similarity += cosine_sim
-
-                # 转换为距离
-                total_dist = 1.0 - total_similarity
-
-                distance_matrix[i, j] = total_dist
-                distance_matrix[j, i] = total_dist
-
-    print("✓ 距离矩阵计算完成")
-    # 过滤掉对角线上的0值和无效值
-    non_zero_distances = distance_matrix[distance_matrix > 0]
-    if len(non_zero_distances) > 0:
-        print(f"  平均距离: {non_zero_distances.mean():.4f}")
-        print(f"  距离标准差: {non_zero_distances.std():.4f}")
-    else:
-        print("  警告: 所有距离都为0或无效，可能计算出现问题")
-    print()
-
-    return distance_matrix, selected_indices
-
-
-def perform_selection_comparison(router_data, distance_matrix, demo_indices, quality_scores, selection_ratio=0.2):
-    """对比不同的选择策略"""
-    n_total = len(demo_indices)
-    n_select = max(1, int(n_total * selection_ratio))
-
-    print("=" * 70)
-    print("选择策略对比")
-    print("=" * 70)
-    print(f"从{n_total}个样本中选择{n_select}个样本（选择率: {selection_ratio:.1%}）")
-    print()
-
-    # 1. 质量选择：选择质量分数最高的样本
-    quality_subset = quality_scores[demo_indices]
-    quality_selected_local = np.argsort(quality_subset)[-n_select:]  # 本地索引
-    quality_selected_global = demo_indices[quality_selected_local]  # 全局索引
-
-    print("1. 质量选择（选择质量分数最高的样本）:")
-    for i, global_idx in enumerate(quality_selected_global):
-        local_idx = quality_selected_local[i]
-        print(f"   样本{global_idx} (本地{local_idx}): 质量分数 {quality_subset[local_idx]:.4f}")
-    print()
-
-    # 2. 多样性选择：使用FPS算法
-    distance_tensor = torch.from_numpy(distance_matrix).float()
-    if torch.cuda.is_available():
-        distance_tensor = distance_tensor.cuda()
-    fps_selected_local = farthest_point_sampling_gpu(distance_tensor, n_select, seed=42)
-    fps_selected_global = demo_indices[fps_selected_local]
-
-    print("2. 多样性选择（FPS算法）:")
-    for i, local_idx in enumerate(fps_selected_local):
-        global_idx = fps_selected_global[i]
-        print(f"   样本{global_idx} (本地{local_idx}): 质量分数 {quality_subset[local_idx]:.4f}")
-    print()
-
-    # 3. 随机选择作为基准
-    np.random.seed(42)
-    random_selected_local = np.random.choice(n_total, n_select, replace=False)
-    random_selected_global = demo_indices[random_selected_local]
-
-    print("3. 随机选择（基准）:")
-    for i, local_idx in enumerate(random_selected_local):
-        global_idx = random_selected_global[i]
-        print(f"   样本{global_idx} (本地{local_idx}): 质量分数 {quality_subset[local_idx]:.4f}")
-    print()
-
-    # 计算选择结果的统计指标
-    strategies = {
-        "Quality": (quality_selected_local, quality_selected_global),
-        "Diversity": (fps_selected_local, fps_selected_global),
-        "Random": (random_selected_local, random_selected_global),
+    # 准备聚类参数
+    clustering_params = {
+        "auto_k": False,
+        "k_range": [max(2, min(10, n_samples // 100)), min(50, n_samples // 10)],
+        "k": 30,
+        "max_iters": 300,
     }
 
-    print("选择结果统计:")
-    print("-" * 50)
+    if clustering_method.lower() == "kmeans":
+        cluster_labels, cluster_info = cluster_selector._kmeans_clustering(features_matrix, clustering_params)
+    elif clustering_method.lower() == "hdbscan":
+        hdbscan_params = {
+            "min_cluster_size": max(10, n_samples // 100),
+            "metric": "cosine",
+            "use_gpu": True,
+        }
+        cluster_labels, cluster_info = cluster_selector._hdbscan_clustering(features_matrix, hdbscan_params)
+    else:
+        raise ValueError(f"不支持的聚类方法: {clustering_method}")
 
-    for strategy_name, (local_indices, _global_indices) in strategies.items():
-        # 质量分数统计
-        selected_quality = quality_subset[local_indices]
-        avg_quality = selected_quality.mean()
+    print(f"聚类完成: {cluster_info}")
 
-        # 多样性统计（选中样本间的平均距离）
-        selected_distances = []
-        for i in range(len(local_indices)):
-            for j in range(i + 1, len(local_indices)):
-                selected_distances.append(distance_matrix[local_indices[i], local_indices[j]])
+    # 3. 2D投影（使用UMAP或PCA）
+    print("开始2D投影...")
+    features_cpu = features_matrix.cpu().numpy()
 
-        avg_diversity = np.mean(selected_distances) if selected_distances else 0
+    # 根据数据大小选择降维方法
+    if n_samples > 10000 or not UMAP_AVAILABLE:
+        print("使用PCA进行降维...")
+        from sklearn.decomposition import PCA
 
-        print(f"{strategy_name:>10}: 平均质量={avg_quality:.4f}, 平均距离={avg_diversity:.4f}")
+        reducer = PCA(n_components=2, random_state=42)
+        coords_2d = reducer.fit_transform(features_cpu)
+    else:
+        print("使用UMAP进行高质量降维...")
+        reducer = umap.UMAP(n_components=2, random_state=42, n_neighbors=min(15, n_samples // 10))
+        coords_2d = reducer.fit_transform(features_cpu)
 
-    print()
+    print(f"2D投影完成，坐标形状: {coords_2d.shape}")
 
-    return strategies
+    return coords_2d, cluster_labels.cpu().numpy(), cluster_info
 
 
-def create_comprehensive_visualization(router_data, distance_matrix, demo_indices, quality_scores, expert_usage, sample_entropy, strategies, save_path=None):
-    """创建综合可视化图表"""
+def create_simplified_visualization(router_data, coords_2d, cluster_labels, cluster_info, quality_scores, expert_usage, save_path=None):
+    """创建简化的三个子图可视化"""
     sample_ids = router_data["sample_ids"]
-    moe_logits = router_data["moe_logits"]
-    quality_logits = router_data["quality_logits"]
+    quality_score_raw = router_data["quality_score"]  # [N, L, 1]
 
-    # 使用GridSpec创建2x3的布局
-    fig = plt.figure(figsize=(24, 14))
-    gs = fig.add_gridspec(2, 3, hspace=0.3, wspace=0.25)
+    # 使用1x3布局
+    fig, axes = plt.subplots(1, 3, figsize=(21, 6))
+    plt.subplots_adjust(wspace=0.3)
 
-    # --- 创建6个子图 ---
-    ax1 = fig.add_subplot(gs[0, 0])  # 质量分数分布
-    ax2 = fig.add_subplot(gs[0, 1])  # 各层质量分数
-    ax3 = fig.add_subplot(gs[0, 2])  # 专家使用率
-    ax4 = fig.add_subplot(gs[1, 0])  # 路由多样性
-    ax5 = fig.add_subplot(gs[1, 1])  # 距离矩阵热力图
-    ax6 = fig.add_subplot(gs[1, 2])  # 样本2D投影分布
-
-    # 1. 质量分数分布
-    ax1.hist(quality_scores, bins=30, alpha=0.7, color="skyblue", edgecolor="black")
+    # 子图1: 样本质量分数分布
+    ax1 = axes[0]
+    ax1.hist(quality_scores, bins=50, alpha=0.7, color="skyblue", edgecolor="black")
     ax1.set_xlabel("质量分数")
     ax1.set_ylabel("样本数量")
-    ax1.set_title(f"样本质量分数分布 ({len(quality_scores)}条)")
+    ax1.set_title(f"样本质量分数分布\n总样本: {len(quality_scores)}个")
     ax1.grid(True, alpha=0.3)
 
-    # 2. 各层质量分数
-    quality_by_layer = torch.softmax(quality_logits.float(), dim=-1)[:, :, 0]  # [N, L]
+    # 添加统计信息
+    mean_score = quality_scores.mean()
+    std_score = quality_scores.std()
+    ax1.axvline(mean_score, color="red", linestyle="--", alpha=0.7, label=f"平均值: {mean_score:.3f}")
+    ax1.legend()
+
+    # 子图2: 各层质量分数分布
+    ax2 = axes[1]
+    quality_by_layer = torch.sigmoid(quality_score_raw.float()).squeeze(-1)  # [N, L]
     layer_avg_quality = quality_by_layer.mean(dim=0).numpy()  # [L]
-    ax2.plot(range(len(layer_avg_quality)), layer_avg_quality, "o-", linewidth=2)
+    layer_std_quality = quality_by_layer.std(dim=0).numpy()  # [L]
+
+    x_layers = range(len(layer_avg_quality))
+    ax2.plot(x_layers, layer_avg_quality, "o-", linewidth=2, markersize=6, color="blue", label="平均质量")
+    ax2.fill_between(x_layers, layer_avg_quality - layer_std_quality, layer_avg_quality + layer_std_quality, alpha=0.2, color="blue", label="标准差")
     ax2.set_xlabel("层索引")
     ax2.set_ylabel("平均质量分数")
     ax2.set_title("各层质量分数分布")
     ax2.grid(True, alpha=0.3)
+    ax2.legend()
 
-    # 3. MoE专家使用分析
-    ax3.bar(range(len(expert_usage)), expert_usage, alpha=0.7, color="lightgreen")
-    ax3.set_xlabel("专家索引")
-    ax3.set_ylabel("平均使用率")
-    ax3.set_title("专家使用率分布")
+    # 子图3: 二级路由 2D 投影 + 聚类结果
+    ax3 = axes[2]
+
+    # 获取独特的聚类标签
+    unique_labels = np.unique(cluster_labels)
+    n_clusters = len(unique_labels[unique_labels >= 0])  # 排除噪声点(-1)
+
+    # 为不同簇生成颜色
+    colors = plt.cm.Set1(np.linspace(0, 1, max(n_clusters, 1)))
+
+    # 绘制数据点
+    for i, label in enumerate(unique_labels):
+        if label == -1:
+            # 噪声点用灰色显示
+            mask = cluster_labels == label
+            ax3.scatter(coords_2d[mask, 0], coords_2d[mask, 1], c="gray", s=20, alpha=0.5, label=f"噪声 ({np.sum(mask)}个)", marker="x")
+        else:
+            # 正常簇用不同颜色
+            mask = cluster_labels == label
+            color = colors[i % len(colors)] if i < len(colors) else colors[i % len(colors)]
+            ax3.scatter(coords_2d[mask, 0], coords_2d[mask, 1], c=[color], s=30, alpha=0.7, label=f"簇 {label} ({np.sum(mask)}个)")
+
+    ax3.set_xlabel("第一主成分")
+    ax3.set_ylabel("第二主成分")
+    ax3.set_title(f"二级路由 2D 投影与聚类结果\n{cluster_info.get('method', 'Unknown')} | {n_clusters}个簇")
     ax3.grid(True, alpha=0.3)
 
-    # 4. 样本路由多样性
-    ax4.hist(sample_entropy, bins=30, alpha=0.7, color="orange", edgecolor="black")
-    ax4.set_xlabel("路由熵")
-    ax4.set_ylabel("样本数量")
-    ax4.set_title("样本路由多样性分布")
-    ax4.grid(True, alpha=0.3)
-
-    # 5. 距离矩阵热力图
-    mask = np.triu(np.ones_like(distance_matrix, dtype=bool), k=1)
-    sns.heatmap(distance_matrix, mask=~mask, cmap="viridis", square=True, cbar_kws={"label": "余弦相似度距离"}, ax=ax5)
-    ax5.set_title(f"样本间余弦相似度距离矩阵\n({len(demo_indices)}个样本)")
-
-    # 6. 样本2D投影分布
-    mds = MDS(n_components=2, dissimilarity="precomputed", random_state=42, max_iter=3000, eps=1e-9)
-    coords_2d = mds.fit_transform(distance_matrix)
-
-    # 根据质量分数给样本着色
-    quality_subset = quality_scores[demo_indices]
-    scatter = ax6.scatter(
-        coords_2d[:, 0],
-        coords_2d[:, 1],
-        c=quality_subset,
-        cmap="viridis",
-        s=60,
-        alpha=0.7,
-        edgecolors="black",
-        linewidth=0.5,
-    )
-
-    # 添加颜色条
-    cbar = plt.colorbar(scatter, ax=ax6)
-    cbar.set_label("质量分数", rotation=270, labelpad=15)
-
-    # 突出显示多样性选择的结果
-    diversity_local_indices, _ = strategies["Diversity"]
-    selected_coords = coords_2d[diversity_local_indices]
-    ax6.scatter(
-        selected_coords[:, 0],
-        selected_coords[:, 1],
-        marker="*",
-        s=200,
-        c="red",
-        alpha=0.9,
-        edgecolors="white",
-        linewidth=2,
-        label="多样性选择 (FPS)",
-    )
-
-    ax6.set_xlabel("第一主成分")
-    ax6.set_ylabel("第二主成分")
-    ax6.set_title("样本2D投影分布与多样性选择结果")
-    ax6.legend()
-    ax6.grid(True, alpha=0.3)
+    # 只在簇数不太多时显示图例
+    if len(unique_labels) <= 10:
+        ax3.legend(bbox_to_anchor=(1.05, 1), loc="upper left", fontsize="small")
 
     # 构建标题信息
-    title_info = f"Select-MoE数据选择综合分析 - {router_data['dataset_name']}"
-    subtitle_info = f"总样本: {len(sample_ids)}, 分析样本: {len(demo_indices)}"
+    title_info = f"Select-MoE 数据选择分析 - {router_data.get('dataset_name', 'Unknown')}"
+    subtitle_info = f"总样本: {len(sample_ids)}, 平均质量: {mean_score:.3f} ± {std_score:.3f}"
 
     # 如果是聚合数据集，添加数据集构成信息
     if "source_datasets" in router_data:
         datasets_info = ", ".join(router_data["source_datasets"])
-        if len(datasets_info) > 80:  # 如果太长则截断
-            datasets_info = datasets_info[:77] + "..."
+        if len(datasets_info) > 60:  # 如果太长则截断
+            datasets_info = datasets_info[:57] + "..."
         subtitle_info += f"\n包含数据集: {datasets_info}"
 
-    plt.suptitle(
-        title_info + "\n" + subtitle_info,
-        fontsize=16,
-        y=0.98,
-    )
-    plt.tight_layout()
+    plt.suptitle(title_info + "\n" + subtitle_info, fontsize=14, y=0.98)
 
     if save_path:
         plt.savefig(save_path, dpi=300, bbox_inches="tight")
-        print(f"✓ 已保存综合分析图: {save_path}")
+        print(f"✓ 已保存简化分析图: {save_path}")
 
     return fig
 
@@ -432,16 +317,16 @@ def aggregate_router_data(all_router_data):
     reference_moe_shape = None
 
     for dataset_name, router_data in all_router_data.items():
-        quality_logits = router_data["quality_logits"]  # [N, L, 2]
+        quality_score = router_data["quality_score"]  # [N, L, 1] - 新格式
         moe_logits = router_data["moe_logits"]  # [N, L, E]
 
         # 检查形状兼容性
         if reference_quality_shape is None:
-            reference_quality_shape = quality_logits.shape[1:]  # [L, 2]
+            reference_quality_shape = quality_score.shape[1:]  # [L, 1]
             reference_moe_shape = moe_logits.shape[1:]  # [L, E]
         else:
-            if quality_logits.shape[1:] != reference_quality_shape:
-                raise ValueError(f"数据集 {dataset_name} 的quality_logits形状 {quality_logits.shape[1:]} 与参考形状 {reference_quality_shape} 不兼容")
+            if quality_score.shape[1:] != reference_quality_shape:
+                raise ValueError(f"数据集 {dataset_name} 的quality_score形状 {quality_score.shape[1:]} 与参考形状 {reference_quality_shape} 不兼容")
             if moe_logits.shape[1:] != reference_moe_shape:
                 raise ValueError(f"数据集 {dataset_name} 的moe_logits形状 {moe_logits.shape[1:]} 与参考形状 {reference_moe_shape} 不兼容")
 
@@ -451,11 +336,11 @@ def aggregate_router_data(all_router_data):
         # 添加数据集前缀到sample_ids以避免冲突
         prefixed_sample_ids = [f"{dataset_name}_{sid}" for sid in router_data["sample_ids"]]
 
-        all_quality_logits.append(quality_logits)
+        all_quality_logits.append(quality_score)
         all_moe_logits.append(moe_logits)
         all_sample_ids.extend(prefixed_sample_ids)
 
-        print(f"  {dataset_name}: {sample_count} 样本, 形状 {quality_logits.shape}")
+        print(f"  {dataset_name}: {sample_count} 样本, 形状 {quality_score.shape}")
 
     # 合并张量
     aggregated_quality_logits = torch.cat(all_quality_logits, dim=0)
@@ -464,14 +349,14 @@ def aggregate_router_data(all_router_data):
     total_samples = sum(sample_counts)
     print("\n合并完成:")
     print(f"  总样本数: {total_samples}")
-    print(f"  质量logits形状: {aggregated_quality_logits.shape}")
+    print(f"  质量分数形状: {aggregated_quality_logits.shape}")
     print(f"  MoE logits形状: {aggregated_moe_logits.shape}")
     print(f"  包含数据集: {', '.join(dataset_names)}")
     print()
 
     # 构建聚合后的router_data
     aggregated_data = {
-        "quality_logits": aggregated_quality_logits,
+        "quality_score": aggregated_quality_logits,  # 使用新的键名
         "moe_logits": aggregated_moe_logits,
         "sample_ids": all_sample_ids,
         "dataset_name": f"所有数据集聚合 ({len(dataset_names)}个数据集)",
@@ -489,55 +374,51 @@ def analyze_single_dataset(dataset_name, router_data, args):
     print(f"{'=' * 80}")
 
     print(f"总样本数: {len(router_data['sample_ids'])}")
-    print(f"模型层数: {router_data['moe_logits'].shape[1]}")
+    print(f"模型层数: {router_data['quality_score'].shape[1]}")
     print(f"专家数量: {router_data['moe_logits'].shape[2]}")
     print()
 
-    # 2. 分析质量门
+    # 1. 分析质量门
     quality_scores, quality_ranking = analyze_quality_gates(router_data)
 
-    # 3. 分析MoE路由
+    # 2. 分析MoE路由
     expert_usage, sample_entropy = analyze_moe_routing(router_data)
 
-    # 4. 计算距离矩阵
-    distance_matrix, demo_indices = compute_comprehensive_distances(router_data, args.max_samples)
+    # 3. 执行聚类和2D投影
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    coords_2d, cluster_labels, cluster_info = perform_clustering_and_visualization(router_data, device=device, clustering_method=args.clustering_method)
 
-    # 5. 对比选择策略
-    strategies = perform_selection_comparison(router_data, distance_matrix, demo_indices, quality_scores, args.selection_ratio)
-
-    # 6. 创建综合可视化
+    # 4. 创建简化可视化
     print("=" * 70)
-    print(f"创建{dataset_name}数据集综合可视化...")
+    print(f"创建{dataset_name}数据集简化可视化...")
     print("=" * 70)
 
     save_path = None
-    if args.save_plots:
-        if dataset_name == "聚合数据集" and "source_datasets" in router_data:
-            # 聚合数据集使用特殊命名
-            safe_dataset_name = f"aggregated_{'_'.join(router_data['source_datasets'])}"
-            safe_dataset_name = safe_dataset_name.replace("/", "_").replace("\\", "_")
-        else:
-            safe_dataset_name = dataset_name.replace("/", "_").replace("\\", "_")
-        save_path = os.path.join(args.output_dir, f"comprehensive_analysis_{safe_dataset_name}.png")
+    if dataset_name == "聚合数据集" and "source_datasets" in router_data:
+        # 聚合数据集使用特殊命名
+        safe_dataset_name = f"aggregated_{'_'.join(router_data['source_datasets'])}"
+        safe_dataset_name = safe_dataset_name.replace("/", "_").replace("\\", "_")
+    else:
+        safe_dataset_name = dataset_name.replace("/", "_").replace("\\", "_")
+    save_path = os.path.join(args.output_dir, f"simplified_analysis_{safe_dataset_name}.png")
 
-    fig = create_comprehensive_visualization(router_data, distance_matrix, demo_indices, quality_scores, expert_usage, sample_entropy, strategies, save_path)
+    create_simplified_visualization(router_data, coords_2d, cluster_labels, cluster_info, quality_scores, expert_usage, save_path)
 
     plt.show()
 
-    # 7. 生成分析报告
+    # 5. 生成分析报告
     print("=" * 70)
     print(f"{dataset_name} - 分析总结")
     print("=" * 70)
 
     n_total = len(router_data["sample_ids"])
-    n_analyzed = len(demo_indices)
-    n_selected = len(strategies["Quality"][0])
+    n_clusters = len(np.unique(cluster_labels[cluster_labels >= 0]))
 
     print(f"数据集分析报告 - {dataset_name}")
     print(f"{'=' * 50}")
     print(f"总样本数量: {n_total}")
-    print(f"分析样本数量: {n_analyzed}")
-    print(f"选择样本数量: {n_selected} (选择率: {args.selection_ratio:.1%})")
+    print(f"聚类方法: {cluster_info.get('method', 'Unknown')}")
+    print(f"有效簇数: {n_clusters}")
     print()
 
     print("质量分析:")
@@ -551,54 +432,36 @@ def analyze_single_dataset(dataset_name, router_data, args):
     print(f"  最大可能熵: {np.log(len(expert_usage)):.4f}")
     print()
 
-    print("距离分析:")
-    non_zero_distances = distance_matrix[distance_matrix > 0]
-    if len(non_zero_distances) > 0:
-        print(f"  平均样本距离: {non_zero_distances.mean():.4f} ± {non_zero_distances.std():.4f}")
-        print(f"  距离范围: [{non_zero_distances.min():.4f}, {non_zero_distances.max():.4f}]")
-    else:
-        print("  警告: 所有距离都为0或无效")
+    print("聚类分析:")
+    print(f"  聚类方法: {cluster_info.get('method', 'Unknown')}")
+    print(f"  有效簇数: {n_clusters}")
+    if "optimal_k" in cluster_info:
+        print(f"  最优k值: {cluster_info['optimal_k']}")
     print()
-
-    print("选择策略效果:")
-    for strategy_name, (local_indices, _) in strategies.items():
-        quality_subset = quality_scores[demo_indices]
-        selected_quality = quality_subset[local_indices]
-
-        selected_distances = []
-        for i in range(len(local_indices)):
-            for j in range(i + 1, len(local_indices)):
-                selected_distances.append(distance_matrix[local_indices[i], local_indices[j]])
-
-        avg_diversity = np.mean(selected_distances) if selected_distances else 0
-
-        print(f"  {strategy_name:>10}: 质量={selected_quality.mean():.4f}, 多样性={avg_diversity:.4f}")
 
     return {
         "dataset_name": dataset_name,
         "quality_scores": quality_scores,
         "expert_usage": expert_usage,
         "sample_entropy": sample_entropy,
-        "strategies": strategies,
+        "cluster_info": cluster_info,
         "n_total": n_total,
+        "n_clusters": n_clusters,
     }
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Select-MoE综合数据选择分析")
+    parser = argparse.ArgumentParser(description="Select-MoE简化数据选择分析")
     parser.add_argument("router_data_path", help="路由数据文件路径(.pt格式)或包含多个router_data文件的目录")
-    parser.add_argument("--max-samples", type=int, default=40, help="分析的最大样本数 (默认: 40)")
-    parser.add_argument("--selection-ratio", type=float, default=0.2, help="选择比例 (默认: 0.2)")
-    parser.add_argument("--save-plots", action="store_true", help="保存图片到文件")
-    parser.add_argument("--output-dir", default="./outputs/visual_figs/comprehensive_analysis", help="图片保存目录")
+    parser.add_argument("--clustering-method", choices=["kmeans", "hdbscan"], default="kmeans", help="聚类方法 (默认: kmeans)")
+    parser.add_argument("--output-dir", default="./outputs/visual_figs/simplified_analysis", help="图片保存目录")
     parser.add_argument("--dataset-filter", help="只分析匹配此模式的数据集 (支持通配符)")
     parser.add_argument("--aggregate-datasets", action="store_true", help="将多个数据集聚合为一个整体进行分析，而不是分别分析每个数据集")
 
     args = parser.parse_args()
 
     # 创建输出目录
-    if args.save_plots:
-        os.makedirs(args.output_dir, exist_ok=True)
+    os.makedirs(args.output_dir, exist_ok=True)
 
     print("Select-MoE数据选择综合分析")
     print("=" * 70)
@@ -674,16 +537,15 @@ def main():
                 f"{result['sample_entropy'].mean():<10.4f} {balance:<12.4f}"
             )
 
-    print("\n" + "=" * 70)
-    print("关键洞察:")
-    print("1. 质量选择优化数据质量，但可能选择相似样本")
-    print("2. 多样性选择确保样本覆盖面，但质量可能不是最高")
-    print("3. Select-MoE结合两者优势，先质量筛选再多样性选择")
-    print("4. 逐层余弦相似度有效衡量MoE路由模式的差异")
-    print("5. FPS算法确保选择样本的最大化多样性分布")
-
     print("=" * 70)
-    print("分析完成！")
+    print("Select-MoE简化分析完成！")
+    print()
+    print("关键洞察:")
+    print("1. 质量分数反映了样本的整体数据质量")
+    print("2. 各层质量分数分布展示了模型层级间的质量判断一致性")
+    print("3. 聚类结果显示了MoE路由模式的数据分组特征")
+    print("4. GPU加速的聚类算法有效处理大规模数据集")
+    print("=" * 70)
 
 
 if __name__ == "__main__":

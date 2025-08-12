@@ -11,6 +11,7 @@ import logging
 from typing import Dict, List, Optional, Tuple
 
 import torch
+import torch.nn.functional as F
 from tqdm import tqdm
 
 from .gpu_metrics import gpu_silhouette_score_cosine
@@ -33,6 +34,31 @@ class GPUKMeansClustering:
         self.debug_print = debug_print
         self.logger = logging.getLogger(__name__)
 
+    def _compute_cosine_similarity_efficient(self, data: torch.Tensor, centers: torch.Tensor) -> torch.Tensor:
+        """
+        内存友好的余弦相似度计算，避免广播产生的巨大中间张量
+
+        Args:
+            data: [N, D] 数据矩阵
+            centers: [K, D] 中心点矩阵
+
+        Returns:
+            [N, K] 余弦相似度矩阵
+        """
+        # 点积计算 [N, D] × [D, K] -> [N, K]
+        dot_products = torch.mm(data, centers.t())
+
+        # L2范数计算
+        data_norms = torch.norm(data, dim=1, keepdim=True)  # [N, 1]
+        center_norms = torch.norm(centers, dim=1, keepdim=True)  # [K, 1]
+
+        # 余弦相似度 = 点积 / (||data|| * ||centers||)
+        # 使用矩阵乘法避免广播: [N, 1] @ [1, K] -> [N, K]
+        norm_products = data_norms @ center_norms.t()  # [N, K]
+        similarities = dot_products / (norm_products + 1e-8)  # 添加小值避免除零
+
+        return similarities
+
     def kmeans_cosine(
         self,
         data: torch.Tensor,
@@ -42,10 +68,10 @@ class GPUKMeansClustering:
         init_method: str = "k-means++",
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        使用余弦距离的K-Means聚类
+        使用余弦距离的K-Means聚类（基于概率分布特征）
 
         Args:
-            data: 输入数据 [N, D]
+            data: 输入概率分布数据 [N, D]
             k: 聚类数量
             max_iters: 最大迭代次数
             tol: 收敛容忍度
@@ -55,25 +81,20 @@ class GPUKMeansClustering:
             centers: 聚类中心 [K, D]
             labels: 聚类标签 [N]
         """
-        n_samples, n_features = data.shape
+        n_samples = data.shape[0]
 
-        # L2标准化数据以支持余弦距离
-        data_normalized = torch.nn.functional.normalize(data, p=2, dim=1)
-
-        # 初始化聚类中心
+        # 初始化聚类中心（不进行归一化，直接使用概率分布）
         if init_method == "k-means++":
-            centers = self._kmeans_plus_plus_init(data_normalized, k)
+            centers = self._kmeans_plus_plus_init(data, k)
         else:
             # 随机初始化
             torch.manual_seed(self.random_state)
             indices = torch.randperm(n_samples, device=self.device)[:k]
-            centers = data_normalized[indices].clone()
-
-        centers = torch.nn.functional.normalize(centers, p=2, dim=1)
+            centers = data[indices].clone()
 
         for iteration in range(max_iters):
-            # 计算余弦相似度（使用点积，因为数据已标准化）
-            similarities = torch.mm(data_normalized, centers.t())  # [N, K]
+            # 使用内存友好的余弦相似度计算
+            similarities = self._compute_cosine_similarity_efficient(data, centers)  # [N, K]
 
             # 分配到最相似的中心
             labels = similarities.argmax(dim=1)  # [N]
@@ -83,15 +104,16 @@ class GPUKMeansClustering:
             for i in range(k):
                 mask = labels == i
                 if mask.sum() > 0:
-                    cluster_points = data_normalized[mask]
+                    cluster_points = data[mask]
                     new_center = cluster_points.mean(dim=0)
-                    new_centers[i] = torch.nn.functional.normalize(new_center, p=2, dim=0)
+                    new_centers[i] = new_center
                 else:
                     # 如果某个簇为空，保持原中心
                     new_centers[i] = centers[i]
 
-            # 检查收敛
-            center_shift = torch.norm(new_centers - centers, dim=1).max()
+            # 检查收敛（使用余弦距离）
+            center_distances = 1 - F.cosine_similarity(new_centers, centers, dim=1)
+            center_shift = center_distances.max()
             centers = new_centers
 
             if center_shift < tol:
@@ -104,7 +126,7 @@ class GPUKMeansClustering:
         return centers, labels
 
     def _kmeans_plus_plus_init(self, data: torch.Tensor, k: int) -> torch.Tensor:
-        """K-Means++初始化方法"""
+        """K-Means++初始化方法（基于概率分布）"""
         n_samples, n_features = data.shape
         # 使用与输入数据相同的dtype和device
         centers = torch.zeros(k, n_features, dtype=data.dtype, device=self.device)
@@ -117,8 +139,8 @@ class GPUKMeansClustering:
         centers[0] = data[first_idx]
 
         for i in range(1, k):
-            # 计算到已有中心的最小距离（使用余弦距离）
-            similarities = torch.mm(data, centers[:i].t())  # [N, i]
+            # 使用内存友好的余弦相似度计算
+            similarities = self._compute_cosine_similarity_efficient(data, centers[:i])  # [N, i]
             max_similarities = similarities.max(dim=1)[0]  # [N]
             distances = 1 - max_similarities  # 余弦距离
             distances = torch.clamp(distances, min=0.0)  # 确保非负
@@ -134,19 +156,17 @@ class GPUKMeansClustering:
         return centers
 
     def compute_inertia_cosine(self, data: torch.Tensor, centers: torch.Tensor, labels: torch.Tensor) -> float:
-        """计算基于余弦距离的惯性值"""
-        data_normalized = torch.nn.functional.normalize(data, p=2, dim=1)
-        centers_normalized = torch.nn.functional.normalize(centers, p=2, dim=1)
-
+        """计算基于余弦距离的惯性值（基于概率分布，内存友好）"""
         inertia = 0.0
         for i in range(centers.shape[0]):
             mask = labels == i
             if mask.sum() > 0:
-                cluster_data = data_normalized[mask]  # [cluster_size, D]
-                cluster_center = centers_normalized[i : i + 1]  # [1, D]
+                cluster_data = data[mask]  # [cluster_size, D]
+                cluster_center = centers[i : i + 1]  # [1, D]
 
-                # 余弦相似度
-                similarities = torch.mm(cluster_data, cluster_center.t()).squeeze()
+                # 使用内存友好的余弦相似度计算
+                similarities = self._compute_cosine_similarity_efficient(cluster_data, cluster_center)
+                similarities = similarities.squeeze(-1)  # [cluster_size]
                 # 余弦距离
                 distances = 1 - similarities
                 inertia += distances.sum().item()
@@ -294,18 +314,23 @@ class GPUKMeansClustering:
                 raise ValueError("当auto_k=False时必须指定k值")
             optimal_k = k
             k_info = {}
+            self.logger.info(f"使用指定的k值: {optimal_k}")
 
         # 执行最终聚类
         centers, labels = self.kmeans_cosine(data, optimal_k, max_iters=max_iters)
         final_inertia = self.compute_inertia_cosine(data, centers, labels)
 
-        # 计算最终轮廓系数（GPU计算）
-        if optimal_k > 1:
+        # 只有在auto_k=True时才计算轮廓系数（因为需要比较不同k值）
+        if auto_k and optimal_k > 1:
+            self.logger.info("计算最终聚类的轮廓系数...")
             final_silhouette = gpu_silhouette_score_cosine(data, labels)
         else:
             final_silhouette = 0.0
+            if not auto_k:
+                self.logger.info("使用固定k值，跳过轮廓系数计算")
 
         info = {
+            "method": "kmeans",
             "n_clusters": optimal_k,
             "inertia": final_inertia,
             "silhouette_score": final_silhouette,

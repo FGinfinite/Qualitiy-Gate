@@ -105,13 +105,13 @@ class GPUHDBSCANClustering:
         min_samples: int,
         metric: str,
     ) -> Tuple[torch.Tensor, Dict]:
-        """GPU版本的HDBSCAN聚类"""
-        # 转换数据到cuDF格式
+        """GPU版本的HDBSCAN聚类（基于概率分布）"""
+        # 转换数据到cuDF格式（不进行手动归一化）
         if metric == "cosine":
-            # L2标准化用于余弦距离
-            data_normalized = torch.nn.functional.normalize(data, p=2, dim=1)
-            data_cupy = data_normalized.detach().cpu().numpy()
-            metric = "euclidean"  # 标准化后使用欧氏距离等价于余弦距离
+            # 直接使用概率分布数据，不进行L2标准化
+            data_cupy = data.detach().cpu().numpy()
+            # 保持余弦距离度量
+            metric = "cosine"
         else:
             data_cupy = data.detach().cpu().numpy()
 

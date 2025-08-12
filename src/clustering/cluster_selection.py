@@ -105,8 +105,12 @@ class ClusterBasedSelection:
             if dataset_name in all_logits_by_dataset and current_idx < len(all_logits_by_dataset[dataset_name]):
                 logits_tensor = all_logits_by_dataset[dataset_name][current_idx]
 
-                # 将 [L, E] 展平为一维特征向量 [L*E]
-                flattened_features = logits_tensor.flatten()  # [L*E]
+                # 注意：logits_tensor已经是概率分布（在selection.py中通过softmax转换得到）
+                # 直接使用概率分布，不进行重复的softmax转换
+                probs_tensor = logits_tensor  # [L, E] 概率分布
+
+                # 将 [L, E] 概率分布展平为一维特征向量 [L*E]
+                flattened_features = probs_tensor.flatten()  # [L*E]
                 all_features.append(flattened_features)
                 sample_mapping.append(data_item)
 

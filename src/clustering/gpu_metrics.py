@@ -16,15 +16,19 @@ def gpu_silhouette_score_cosine(
     chunk_size: Optional[int] = None,
 ) -> float:
     """
-    GPU上精确计算余弦距离的轮廓系数
+    GPU上精确计算余弦距离的轮廓系数（基于概率分布特征）
 
     Args:
-        data: [N, D] 已标准化的特征矩阵，用于余弦距离计算
+        data: [N, D] 概率分布特征矩阵，每行为一个样本的概率分布特征向量
         labels: [N] 聚类标签
         chunk_size: 分块计算的大小，用于节省GPU内存。如果为None则自动选择
 
     Returns:
-        精确的轮廓系数值，与sklearn.metrics.silhouette_score完全等价
+        精确的轮廓系数值，使用标准余弦相似度计算
+
+    Note:
+        输入的data应该是概率分布特征（如softmax后的logits），
+        函数内部会自动使用标准余弦相似度计算，无需预先归一化
     """
     logger = logging.getLogger(__name__)
 
@@ -69,12 +73,16 @@ def _gpu_silhouette_full_matrix(
     labels: torch.Tensor,
     unique_labels: torch.Tensor,
 ) -> float:
-    """使用全距离矩阵计算轮廓系数"""
+    """使用全距离矩阵计算轮廓系数（基于概率分布）"""
     n_samples = data.shape[0]
 
-    # 计算所有样本对的余弦相似度矩阵 [N, N]
-    # 注意: data应该已经标准化，所以 ||data|| = 1
-    similarity_matrix = torch.mm(data, data.t())  # 余弦相似度
+    # 使用标准余弦相似度计算所有样本对的相似度矩阵 [N, N]
+    # 扩展维度以便批量计算：data [N, 1, D], data.t() [1, N, D] -> [N, N, D]
+    data_expanded = data.unsqueeze(1)  # [N, 1, D]
+    data_transposed = data.unsqueeze(0)  # [1, N, D]
+
+    # 使用标准余弦相似度函数
+    similarity_matrix = torch.nn.functional.cosine_similarity(data_expanded, data_transposed, dim=2)  # [N, N]
     distance_matrix = 1.0 - similarity_matrix  # 余弦距离
 
     silhouette_scores = torch.zeros(n_samples, device=data.device, dtype=data.dtype)
@@ -126,11 +134,9 @@ def _gpu_silhouette_chunked(
     unique_labels: torch.Tensor,
     chunk_size: int,
 ) -> float:
-    """使用分块计算轮廓系数，节省GPU内存"""
+    """使用分块计算轮廓系数，节省GPU内存（基于概率分布）"""
     n_samples = data.shape[0]
     silhouette_scores = torch.zeros(n_samples, device=data.device, dtype=data.dtype)
-
-    logger = logging.getLogger(__name__)
 
     # 分块处理每个样本
     for start_idx in tqdm(range(0, n_samples, chunk_size), "分块计算轮廓系数进度"):
@@ -141,8 +147,10 @@ def _gpu_silhouette_chunked(
         chunk_data = data[start_idx:end_idx]  # [chunk_size, D]
         chunk_labels = labels[start_idx:end_idx]  # [chunk_size]
 
-        # 计算相似度矩阵 [chunk_size, N]
-        similarity_matrix = torch.mm(chunk_data, data.t())
+        # 使用标准余弦相似度计算相似度矩阵 [chunk_size, N]
+        chunk_expanded = chunk_data.unsqueeze(1)  # [chunk_size, 1, D]
+        data_expanded = data.unsqueeze(0)  # [1, N, D]
+        similarity_matrix = torch.nn.functional.cosine_similarity(chunk_expanded, data_expanded, dim=2)
         distance_matrix = 1.0 - similarity_matrix
 
         for local_i, global_i in enumerate(chunk_indices):
@@ -194,7 +202,7 @@ def gpu_silhouette_score_batch(
     批量计算多个标签配置的轮廓系数，适用于Elbow Method等需要测试多个k值的场景
 
     Args:
-        data: [N, D] 已标准化的特征矩阵
+        data: [N, D] 概率分布特征矩阵
         labels_list: 多个标签配置的列表，每个元素为 [N] 的标签张量
         chunk_size: 分块大小
 
