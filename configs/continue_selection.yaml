@@ -21,7 +21,7 @@ hydra:
 
 # Required: Directory containing router_data files
 # Example: outputs/stage_2_selection/2025-08-11/03-52-40-batch=8_lr=0.001_loss=beta_moment_matching_tag=none/router_data
-router_data_dir: "outputs/stage_2_selection/2025-08-11/03-52-40-batch=8_lr=0.001_loss=beta_moment_matching_tag=none/router_data"
+router_data_dir: "outputs/stage_2_selection/2025-08-11/03-52-40-batch=8_lr=0.0001_loss=beta_moment_matching_tag=none/router_data"
 
 # Data selection percentage (0.05 means select top 5% of the data)
 selection_percentage: 0.05
@@ -37,8 +37,13 @@ clustering_params:
   # K-Means specific parameters
   auto_k: true  # Automatically determine k using Elbow method
   k: null  # Manual k value (only used if auto_k=false)
-  k_range: [10, 12]  # k search range for Elbow method
+  k_range: [20, 49]  # k search range for Elbow method
   max_iters: 300  # Maximum iterations
+  
+  # K-Means parallel computation parameters
+  enable_parallel_kmeans: true  # Enable multi-GPU parallel computation for k-value search
+  parallel_processes: 15  # Number of parallel processes for k-value computation
+  gpu_allocation_strategy: "round_robin"  # GPU allocation strategy: "round_robin" or "balanced"
   
   # HDBSCAN specific parameters
   min_cluster_size: null  # Minimum cluster size (auto-estimated if null)

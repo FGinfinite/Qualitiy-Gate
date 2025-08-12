@@ -203,6 +203,10 @@ def parse_clustering_params(cfg: DictConfig) -> Dict:
                 "k": clustering_params.get("k", None),
                 "k_range": clustering_params.get("k_range", [10, 100]),
                 "max_iters": clustering_params.get("max_iters", 300),
+                # 并行计算参数
+                "enable_parallel_kmeans": clustering_params.get("enable_parallel_kmeans", False),
+                "parallel_processes": clustering_params.get("parallel_processes", 4),
+                "gpu_allocation_strategy": clustering_params.get("gpu_allocation_strategy", "round_robin"),
             }
         )
     elif cfg.clustering_method == "hdbscan":

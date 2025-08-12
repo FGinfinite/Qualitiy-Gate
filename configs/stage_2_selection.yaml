@@ -52,15 +52,20 @@ dataset:
 selection_percentage: 0.05
 
 # Clustering method: "kmeans" or "hdbscan"
-clustering_method: "kmeans"
+clustering_method: "hdbscan"
 
 # Clustering parameters
 clustering_params:
   # K-Means specific parameters
   auto_k: true  # Automatically determine k using Elbow method
   k: null  # Manual k value (only used if auto_k=false)
-  k_range: [10, 100]  # k search range for Elbow method
+  k_range: [20, 50]  # k search range for Elbow method
   max_iters: 300  # Maximum iterations
+  
+  # K-Means parallel computation parameters
+  enable_parallel_kmeans: false  # Enable multi-GPU parallel computation for k-value search
+  parallel_processes: 4  # Number of parallel processes for k-value computation
+  gpu_allocation_strategy: "round_robin"  # GPU allocation strategy: "round_robin" or "balanced"
   
   # HDBSCAN specific parameters
   min_cluster_size: null  # Minimum cluster size (auto-estimated if null)
@@ -72,7 +77,7 @@ clustering_params:
 # Skip data selection process after obtaining router logits
 # If true, only performs model inference to collect router logits
 # Data selection can then be performed separately using scripts/cluster_selection.py
-skip_data_selection: false
+skip_data_selection: true
 
 # Data processing settings
 data_process:

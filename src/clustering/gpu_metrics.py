@@ -52,15 +52,19 @@ def gpu_silhouette_score_cosine(
     if chunk_size is None:
         # 估算距离矩阵大小 (bytes)
         matrix_size_bytes = n_samples * n_samples * 4  # float32
-        max_memory_bytes = 20 * 1024**3  # 20GB 限制
+        max_memory_bytes = 2 * 1024**3  # 2GB 限制（更保守）
+
+        logger.info(f"估算距离矩阵大小: {matrix_size_bytes / 1024**3:.2f} GB")
 
         if matrix_size_bytes <= max_memory_bytes:
             # 可以使用全矩阵计算
-            logger.info("可以使用全距离矩阵计算")
+            logger.info("使用全距离矩阵计算")
             return _gpu_silhouette_full_matrix(data, labels, unique_labels)
         else:
-            # 使用分块计算
-            chunk_size = max(100, int((max_memory_bytes / (n_samples * 4)) ** 0.5)) + 1000
+            # 使用分块计算，计算合适的块大小
+            # 目标：chunk_size × n_samples × 4 bytes <= max_memory_bytes
+            target_chunk_size = max_memory_bytes // (n_samples * 4)
+            chunk_size = max(100, min(target_chunk_size, 2000))  # 限制在100-2000之间
             logger.info(f"使用分块计算，chunk_size={chunk_size}")
             return _gpu_silhouette_chunked(data, labels, unique_labels, chunk_size)
     else:
@@ -76,13 +80,18 @@ def _gpu_silhouette_full_matrix(
     """使用全距离矩阵计算轮廓系数（基于概率分布）"""
     n_samples = data.shape[0]
 
-    # 使用标准余弦相似度计算所有样本对的相似度矩阵 [N, N]
-    # 扩展维度以便批量计算：data [N, 1, D], data.t() [1, N, D] -> [N, N, D]
-    data_expanded = data.unsqueeze(1)  # [N, 1, D]
-    data_transposed = data.unsqueeze(0)  # [1, N, D]
+    # 使用内存友好的余弦相似度计算所有样本对的相似度矩阵 [N, N]
+    # 避免创建 [N, N, D] 的巨大中间张量
+    # 点积计算: [N, D] × [D, N] -> [N, N]
+    dot_products = torch.mm(data, data.t())
 
-    # 使用标准余弦相似度函数
-    similarity_matrix = torch.nn.functional.cosine_similarity(data_expanded, data_transposed, dim=2)  # [N, N]
+    # L2范数计算
+    data_norms = torch.norm(data, dim=1, keepdim=True)  # [N, 1]
+
+    # 余弦相似度 = 点积 / (||data_i|| * ||data_j||)
+    # 使用矩阵乘法避免广播: [N, 1] @ [1, N] -> [N, N]
+    norm_products = data_norms @ data_norms.t()  # [N, N]
+    similarity_matrix = dot_products / (norm_products + 1e-8)  # [N, N]
     distance_matrix = 1.0 - similarity_matrix  # 余弦距离
 
     silhouette_scores = torch.zeros(n_samples, device=data.device, dtype=data.dtype)
@@ -147,10 +156,19 @@ def _gpu_silhouette_chunked(
         chunk_data = data[start_idx:end_idx]  # [chunk_size, D]
         chunk_labels = labels[start_idx:end_idx]  # [chunk_size]
 
-        # 使用标准余弦相似度计算相似度矩阵 [chunk_size, N]
-        chunk_expanded = chunk_data.unsqueeze(1)  # [chunk_size, 1, D]
-        data_expanded = data.unsqueeze(0)  # [1, N, D]
-        similarity_matrix = torch.nn.functional.cosine_similarity(chunk_expanded, data_expanded, dim=2)
+        # 使用内存友好的余弦相似度计算（避免广播）
+        # chunk_data: [chunk_size, D], data: [N, D]
+        # 点积计算: [chunk_size, D] × [D, N] -> [chunk_size, N]
+        dot_products = torch.mm(chunk_data, data.t())
+
+        # L2范数计算
+        chunk_norms = torch.norm(chunk_data, dim=1, keepdim=True)  # [chunk_size, 1]
+        data_norms = torch.norm(data, dim=1, keepdim=True)  # [N, 1]
+
+        # 余弦相似度 = 点积 / (||chunk|| * ||data||)
+        # 使用矩阵乘法避免广播: [chunk_size, 1] @ [1, N] -> [chunk_size, N]
+        norm_products = chunk_norms @ data_norms.t()  # [chunk_size, N]
+        similarity_matrix = dot_products / (norm_products + 1e-8)  # [chunk_size, N]
         distance_matrix = 1.0 - similarity_matrix
 
         for local_i, global_i in enumerate(chunk_indices):

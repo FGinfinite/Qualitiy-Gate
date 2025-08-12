@@ -289,6 +289,9 @@ class GPUKMeansClustering:
         auto_k: bool = True,
         k_range: Optional[Tuple[int, int]] = None,
         max_iters: int = 300,
+        enable_parallel: bool = False,
+        parallel_processes: int = 4,
+        gpu_allocation_strategy: str = "round_robin",
     ) -> Tuple[torch.Tensor, Dict]:
         """
         执行聚类并返回标签
@@ -299,6 +302,9 @@ class GPUKMeansClustering:
             auto_k: 是否自动选择k值
             k_range: k值搜索范围
             max_iters: 最大迭代次数
+            enable_parallel: 是否启用多GPU并行计算（仅在auto_k=True时有效）
+            parallel_processes: 并行进程数
+            gpu_allocation_strategy: GPU分配策略 ('round_robin' 或 'balanced')
 
         Returns:
             labels: 聚类标签 [N]
@@ -306,7 +312,31 @@ class GPUKMeansClustering:
         """
         if auto_k:
             # 自动选择k值
-            k_info = self.find_optimal_k_elbow(data, k_range, max_iters)
+            if enable_parallel:
+                # 使用多GPU并行计算
+                self.logger.info(f"启用多GPU并行模式，进程数: {parallel_processes}")
+                try:
+                    from .parallel_kmeans import ParallelKMeansSelector
+
+                    parallel_selector = ParallelKMeansSelector(self.random_state, self.debug_print)
+                    k_info = parallel_selector.find_optimal_k_elbow_parallel(
+                        data=data,
+                        k_range=k_range,
+                        max_iters=max_iters,
+                        n_runs=30,  # 默认运行次数
+                        parallel_processes=parallel_processes,
+                        gpu_allocation_strategy=gpu_allocation_strategy,
+                    )
+                except ImportError as e:
+                    self.logger.warning(f"无法导入并行模块，回退到串行模式: {e}")
+                    k_info = self.find_optimal_k_elbow(data, k_range, max_iters)
+                except Exception as e:
+                    self.logger.error(f"并行计算失败，回退到串行模式: {e}")
+                    k_info = self.find_optimal_k_elbow(data, k_range, max_iters)
+            else:
+                # 使用串行计算
+                k_info = self.find_optimal_k_elbow(data, k_range, max_iters)
+
             optimal_k = k_info["recommended_k"]
             self.logger.info(f"自动选择的k值: {optimal_k}")
         else:

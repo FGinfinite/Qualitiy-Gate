@@ -128,6 +128,12 @@ bash scripts/run_stage_2.sh selection_percentage=0.1 clustering_method=hdbscan
 # Override K-Means parameters
 bash scripts/run_stage_2.sh clustering_method=kmeans clustering_params.k=50 clustering_params.auto_k=false
 
+# Enable K-Means multi-GPU parallel computation
+bash scripts/run_stage_2.sh clustering_method=kmeans clustering_params.enable_parallel_kmeans=true clustering_params.parallel_processes=8
+
+# Override K-Means parallel parameters with custom GPU allocation
+bash scripts/run_stage_2.sh clustering_method=kmeans clustering_params.enable_parallel_kmeans=true clustering_params.parallel_processes=12 clustering_params.gpu_allocation_strategy=balanced
+
 # Override HDBSCAN parameters
 bash scripts/run_stage_2.sh clustering_method=hdbscan clustering_params.min_cluster_size=100 clustering_params.auto_tune=true
 
@@ -139,6 +145,9 @@ bash scripts/run_stage_2.sh debug_print=true
 
 # Use standalone clustering selection with debug
 CUDA_VISIBLE_DEVICES=1 uv run scripts/continue_selection.py debug_print=true
+
+# Use standalone clustering selection with multi-GPU parallel K-means
+CUDA_VISIBLE_DEVICES=0,1,2,3 uv run scripts/continue_selection.py clustering_method=kmeans clustering_params.enable_parallel_kmeans=true clustering_params.parallel_processes=8
 ```
 
 ### Validation and Testing
@@ -216,6 +225,9 @@ accelerate launch -m lm_eval --model hf \
     - `k`: Manual k-value (only when auto_k=false)
     - `k_range`: K-value search range for Elbow Method (default: [10, 100])
     - `max_iters`: Maximum iterations (default: 300)
+    - `enable_parallel_kmeans`: Enable multi-GPU parallel computation for k-value search (default: false)
+    - `parallel_processes`: Number of parallel processes for k-value computation (default: 4)
+    - `gpu_allocation_strategy`: GPU allocation strategy - "round_robin" or "balanced" (default: "round_robin")
   - **HDBSCAN Parameters**:
     - `min_cluster_size`: Minimum cluster size (auto-estimated if not specified)
     - `min_samples`: Minimum samples (auto-set if not specified)  
@@ -233,7 +245,10 @@ accelerate launch -m lm_eval --model hf \
 - **Stage 1**: 
   - `lora` mode: LoRA fine-tuning requires ~8GB GPU memory
   - `full_rank` mode: Full-rank router training requires ~16GB GPU memory
-- **Stage 2**: Clustering-based data selection with GPU acceleration requires moderate GPU memory (~4-8GB depending on dataset size)
+- **Stage 2**: 
+  - Serial mode: Clustering-based data selection with GPU acceleration requires moderate GPU memory (~4-8GB depending on dataset size)
+  - Parallel mode: Multi-GPU parallel K-means requires ~2-4GB per GPU (distributed across multiple devices)
+  - Parallel processes can be allocated flexibly across available GPUs for optimal resource utilization
 - **Stage 3**: Llama-2-7B LoRA training requires ~24GB GPU memory
 - **Multi-GPU**: Use FSDP configurations for distributed training
 

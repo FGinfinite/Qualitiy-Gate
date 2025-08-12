@@ -158,12 +158,23 @@ class ClusterBasedSelection:
         k_range = params.get("k_range", None)
         max_iters = params.get("max_iters", 300)
 
+        # 并行相关参数
+        enable_parallel = params.get("enable_parallel_kmeans", False)
+        parallel_processes = params.get("parallel_processes", 4)
+        gpu_allocation_strategy = params.get("gpu_allocation_strategy", "round_robin")
+
+        if self.debug_print and enable_parallel and auto_k:
+            self.logger.info(f"启用K-means并行模式: 进程数={parallel_processes}, 分配策略={gpu_allocation_strategy}")
+
         labels, info = self.kmeans_clusterer.fit_predict(
             features,
             k=k,
             auto_k=auto_k,
             k_range=k_range,
             max_iters=max_iters,
+            enable_parallel=enable_parallel,
+            parallel_processes=parallel_processes,
+            gpu_allocation_strategy=gpu_allocation_strategy,
         )
 
         return labels, info
