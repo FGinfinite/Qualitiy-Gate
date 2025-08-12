@@ -209,16 +209,10 @@ def parse_clustering_params(cfg: DictConfig) -> Dict:
                 "gpu_allocation_strategy": clustering_params.get("gpu_allocation_strategy", "round_robin"),
             }
         )
-    elif cfg.clustering_method == "hdbscan":
-        params.update(
-            {
-                "min_cluster_size": clustering_params.get("min_cluster_size", None),
-                "min_samples": clustering_params.get("min_samples", None),
-                "metric": clustering_params.get("metric", "cosine"),
-                "use_gpu": clustering_params.get("use_gpu", True),
-                "auto_tune": clustering_params.get("auto_tune", False),
-            }
-        )
+    else:
+        # 为未来扩展保留接口，目前仅支持kmeans
+        supported_methods = ["kmeans"]
+        raise ValueError(f"不支持的聚类方法: {cfg.clustering_method}。支持的方法: {supported_methods}")
 
     return params
 

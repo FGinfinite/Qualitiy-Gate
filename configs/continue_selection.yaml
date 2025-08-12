@@ -29,7 +29,7 @@ selection_percentage: 0.05
 # Optional: Original dataset directory path (auto-inferred if not specified)
 data_dir: null
 
-# Clustering method: "kmeans" or "hdbscan"
+# Clustering method: currently only "kmeans" is supported
 clustering_method: "kmeans"
 
 # Clustering parameters
@@ -44,13 +44,6 @@ clustering_params:
   enable_parallel_kmeans: true  # Enable multi-GPU parallel computation for k-value search
   parallel_processes: 15  # Number of parallel processes for k-value computation
   gpu_allocation_strategy: "round_robin"  # GPU allocation strategy: "round_robin" or "balanced"
-  
-  # HDBSCAN specific parameters
-  min_cluster_size: null  # Minimum cluster size (auto-estimated if null)
-  min_samples: null  # Minimum samples (auto-set if null)
-  metric: "cosine"  # Distance metric
-  use_gpu: true  # Use GPU acceleration if available
-  auto_tune: false  # Auto-tune HDBSCAN parameters
 
 # Device configuration
 device: "auto"  # "cuda", "cpu", or "auto" for automatic detection

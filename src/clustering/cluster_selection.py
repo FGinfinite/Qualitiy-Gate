@@ -5,6 +5,10 @@
 1. 使用GPU聚类算法对数据进行聚类
 2. 从每个簇中轮流选择质量最高的数据
 3. 确保选择的数据量符合目标要求
+
+目前支持的聚类算法：
+- K-Means（支持多GPU并行处理）
+- 扩展接口支持未来添加更多算法
 """
 
 import logging
@@ -13,7 +17,6 @@ from typing import Dict, List, Optional, Tuple
 import torch
 from tqdm import tqdm
 
-from .hdbscan_clustering import GPUHDBSCANClustering
 from .kmeans_clustering import GPUKMeansClustering
 
 
@@ -36,7 +39,6 @@ class ClusterBasedSelection:
 
         # 初始化聚类器
         self.kmeans_clusterer = GPUKMeansClustering(device, random_state, debug_print)
-        self.hdbscan_clusterer = GPUHDBSCANClustering(device, random_state, debug_print)
 
     def select_data_by_clustering(
         self,
@@ -53,7 +55,7 @@ class ClusterBasedSelection:
             scored_data: 评分后的数据列表
             all_logits_by_dataset: 按数据集分组的logits张量
             target_count: 目标选择数量
-            clustering_method: 聚类方法 ('kmeans' 或 'hdbscan')
+            clustering_method: 聚类方法 (目前仅支持 'kmeans')
             clustering_params: 聚类参数
 
         Returns:
@@ -146,10 +148,10 @@ class ClusterBasedSelection:
 
         if method.lower() == "kmeans":
             return self._kmeans_clustering(features, params)
-        elif method.lower() == "hdbscan":
-            return self._hdbscan_clustering(features, params)
         else:
-            raise ValueError(f"不支持的聚类方法: {method}")
+            # 为未来扩展保留接口
+            supported_methods = ["kmeans"]
+            raise ValueError(f"不支持的聚类方法: {method}。支持的方法: {supported_methods}")
 
     def _kmeans_clustering(self, features: torch.Tensor, params: Dict) -> Tuple[torch.Tensor, Dict]:
         """执行K-Means聚类"""
@@ -178,29 +180,6 @@ class ClusterBasedSelection:
         )
 
         return labels, info
-
-    def _hdbscan_clustering(self, features: torch.Tensor, params: Dict) -> Tuple[torch.Tensor, Dict]:
-        """执行HDBSCAN聚类"""
-        min_cluster_size = params.get("min_cluster_size", None)
-        min_samples = params.get("min_samples", None)
-        metric = params.get("metric", "cosine")
-        use_gpu = params.get("use_gpu", True)
-        auto_tune = params.get("auto_tune", False)
-
-        if auto_tune:
-            # 自动调参
-            tuning_result = self.hdbscan_clusterer.auto_tune_parameters(features, use_gpu=use_gpu)
-            return tuning_result["best_labels"], tuning_result["best_info"]
-        else:
-            # 使用指定参数
-            labels, info = self.hdbscan_clusterer.fit_predict(
-                features,
-                min_cluster_size=min_cluster_size,
-                min_samples=min_samples,
-                metric=metric,
-                use_gpu=use_gpu,
-            )
-            return labels, info
 
     def _round_robin_selection_from_clusters(
         self,

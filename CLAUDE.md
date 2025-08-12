@@ -38,12 +38,12 @@ Select-MoE is a data selection framework using Mixture-of-Experts (MoE) models. 
 - Support for multiple datasets: CoT, Dolly, FLAN-v2, OASST1
 
 ### Clustering-Based Selection (`src/clustering/`)
-- **GPU K-Means with Elbow Method**: Automatic k-value selection using GPU acceleration
-- **GPU HDBSCAN**: Parameter-free clustering with RAPIDS cuML support and CPU fallback
+- **GPU K-Means with Elbow Method**: Automatic k-value selection using GPU acceleration and multi-GPU parallel processing
 - **GPU Silhouette Score**: High-performance GPU-accelerated silhouette coefficient calculation for cosine distance
 - **Round-Robin Selection**: Selects high-quality data from each cluster using quality scores
 - **Cosine Distance Metric**: Uses cosine similarity for better semantic clustering of MoE logits
-- **ClusterBasedSelection**: Main selection class integrating both clustering algorithms
+- **ClusterBasedSelection**: Main selection class with extensible interface for future clustering algorithms
+- **Multi-GPU Parallel Processing**: Supports parallel k-value search across multiple GPUs for faster clustering
 
 ## Code Quality Instructions
 
@@ -122,8 +122,8 @@ bash scripts/run_stage_1.sh training.quality_loss_type=beta_moment_matching trai
 # Override custom loss parameters
 bash scripts/run_stage_1.sh training.quality_loss_type=mean_variance_regularization training.quality_loss_params.lambda_var=0.2
 
-# Override selection percentage and clustering method
-bash scripts/run_stage_2.sh selection_percentage=0.1 clustering_method=hdbscan
+# Override selection percentage
+bash scripts/run_stage_2.sh selection_percentage=0.1
 
 # Override K-Means parameters
 bash scripts/run_stage_2.sh clustering_method=kmeans clustering_params.k=50 clustering_params.auto_k=false
@@ -133,9 +133,6 @@ bash scripts/run_stage_2.sh clustering_method=kmeans clustering_params.enable_pa
 
 # Override K-Means parallel parameters with custom GPU allocation
 bash scripts/run_stage_2.sh clustering_method=kmeans clustering_params.enable_parallel_kmeans=true clustering_params.parallel_processes=12 clustering_params.gpu_allocation_strategy=balanced
-
-# Override HDBSCAN parameters
-bash scripts/run_stage_2.sh clustering_method=hdbscan clustering_params.min_cluster_size=100 clustering_params.auto_tune=true
 
 # Override LoRA parameters
 bash scripts/run_stage_3.sh training.lora.r=64 training.lora.lora_alpha=128
@@ -217,7 +214,7 @@ accelerate launch -m lm_eval --model hf \
 ### Stage 2 (Selection)
 - `selection_percentage`: Data selection ratio (default: 0.05)
 - `model_checkpoint_path`: Path to Stage 1 output weights
-- `clustering_method`: Clustering algorithm ('kmeans' or 'hdbscan', default: 'kmeans')
+- `clustering_method`: Clustering algorithm (currently only 'kmeans' supported)
 - `debug_print`: Enable detailed clustering debug output (default: false)
 - `clustering_params`: Clustering-specific parameters
   - **K-Means Parameters**:
@@ -228,12 +225,6 @@ accelerate launch -m lm_eval --model hf \
     - `enable_parallel_kmeans`: Enable multi-GPU parallel computation for k-value search (default: false)
     - `parallel_processes`: Number of parallel processes for k-value computation (default: 4)
     - `gpu_allocation_strategy`: GPU allocation strategy - "round_robin" or "balanced" (default: "round_robin")
-  - **HDBSCAN Parameters**:
-    - `min_cluster_size`: Minimum cluster size (auto-estimated if not specified)
-    - `min_samples`: Minimum samples (auto-set if not specified)  
-    - `metric`: Distance metric (default: 'cosine')
-    - `use_gpu`: Enable GPU acceleration (default: true)
-    - `auto_tune`: Enable automatic parameter tuning (default: false)
 
 ### Stage 3 (Finetune)
 - `training.lora.r`: LoRA rank (default: 128)
@@ -246,7 +237,7 @@ accelerate launch -m lm_eval --model hf \
   - `lora` mode: LoRA fine-tuning requires ~8GB GPU memory
   - `full_rank` mode: Full-rank router training requires ~16GB GPU memory
 - **Stage 2**: 
-  - Serial mode: Clustering-based data selection with GPU acceleration requires moderate GPU memory (~4-8GB depending on dataset size)
+  - Serial mode: K-means clustering with GPU acceleration requires moderate GPU memory (~4-8GB depending on dataset size)
   - Parallel mode: Multi-GPU parallel K-means requires ~2-4GB per GPU (distributed across multiple devices)
   - Parallel processes can be allocated flexibly across available GPUs for optimal resource utilization
 - **Stage 3**: Llama-2-7B LoRA training requires ~24GB GPU memory
@@ -269,11 +260,11 @@ Always verify output paths before proceeding to the next stage.
 - **Trash Expert**: Handles low-quality data with configurable output modes
 - **Loss Framework**: Extensible loss functions with proper padding token handling
 - **Clustering-Based Selection**: GPU-accelerated clustering algorithms for data diversity
-  - **K-Means + Elbow Method**: Automatic optimal k-value selection
-  - **HDBSCAN**: Parameter-free density-based clustering
-  - **GPU Silhouette Score**: Precise GPU computation replacing CPU bottlenecks
+  - **K-Means + Elbow Method**: Automatic optimal k-value selection with multi-GPU parallel processing
+  - **GPU Silhouette Score**: Precise GPU computation for clustering evaluation
   - **Round-Robin Selection**: Ensures balanced selection from all clusters
   - **Cosine Distance**: Semantic clustering using MoE logits as features
+  - **Extensible Interface**: Clean architecture for future clustering algorithm additions
 
 ### Router Output Format
 ```python
@@ -349,9 +340,9 @@ Main source code organized by functionality:
 
 #### 📂 src/clustering/
 GPU-accelerated clustering algorithms for intelligent data selection:
-- `cluster_selection.py` - Main clustering-based selection coordinator class
-- `kmeans_clustering.py` - GPU K-means with automatic k-value selection via Elbow Method
-- `hdbscan_clustering.py` - GPU HDBSCAN with parameter auto-tuning and RAPIDS cuML support
+- `cluster_selection.py` - Main clustering-based selection coordinator class with extensible interface
+- `kmeans_clustering.py` - GPU K-means with automatic k-value selection via Elbow Method and multi-GPU parallel processing
+- `parallel_kmeans.py` - Multi-GPU parallel K-means implementation for accelerated k-value search
 - `gpu_metrics.py` - High-performance GPU silhouette coefficient computation for cosine distance
 - `__init__.py` - Clustering package initialization and exports
 
