@@ -3,8 +3,11 @@
 独立的聚类选择脚本
 
 使用聚类-轮选策略从保存的router_data进行数据选择。
-支持K-Means和HDBSCAN两种聚类算法。
-现在使用Hydra进行配置管理。
+现在仅支持K-Means聚类算法。
+使用Hydra进行配置管理。
+
+注意：从router_data加载的quality_score是原始的质量门分数，
+需要应用sigmoid转换为[0,1]范围内的概率值后再计算最终质量分数。
 """
 
 import json
@@ -153,10 +156,11 @@ def rebuild_scored_data_with_messages(all_router_data: Dict[str, Dict[str, Any]]
             # 从质量门分数计算质量分数
             sample_quality_score = quality_score[i]  # [L, 1]
 
-            # 计算质量分数：对所有层的质量分数求平均
-            # 质量分数是sigmoid之后的好概率，直接取平均
-            quality_scores = sample_quality_score.squeeze(-1)  # [L]
-            final_score = quality_scores.mean().item()
+            # 计算质量分数：先对原始分数应用sigmoid，再求平均
+            # 注意：从router_data加载的quality_score是原始分数，需要sigmoid转换为概率
+            quality_scores_raw = sample_quality_score.squeeze(-1)  # [L]
+            quality_scores_sigmoid = torch.sigmoid(quality_scores_raw)  # [L] sigmoid转换为[0,1]概率
+            final_score = quality_scores_sigmoid.mean().item()
 
             # 获取原始messages
             sample_id = sample_ids[i]
