@@ -305,6 +305,7 @@ def main(cfg: DictConfig) -> None:
             clustering_params=clustering_params,
             device=device,
             debug_print=cfg.debug_print,
+            output_dir=os.path.dirname(output_path),
         )
 
         log.info(f"聚类-轮选完成，选择了 {len(selected_data)} 个样本 ({cfg.selection_percentage * 100:.2f}%)")

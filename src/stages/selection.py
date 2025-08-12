@@ -106,6 +106,7 @@ def cluster_based_selection(
     clustering_params: dict = None,
     device: torch.device = None,
     debug_print: bool = False,
+    output_dir: str = None,
 ) -> List[dict]:
     """
     基于聚类的数据选择策略
@@ -118,6 +119,7 @@ def cluster_based_selection(
         clustering_params: 聚类参数
         device: GPU设备
         debug_print: 是否启用调试输出
+        output_dir: 输出目录，用于创建子进程日志文件
 
     Returns:
         选择后的数据列表
@@ -133,7 +135,7 @@ def cluster_based_selection(
         log.info("启用调试模式")
 
     # 初始化聚类选择器
-    cluster_selector = ClusterBasedSelection(device=device, debug_print=debug_print)
+    cluster_selector = ClusterBasedSelection(device=device, debug_print=debug_print, output_dir=output_dir)
 
     # 执行聚类-轮选选择
     selected_data = cluster_selector.select_data_by_clustering(
@@ -491,6 +493,7 @@ def select(cfg: DictConfig) -> None:
             clustering_method=clustering_method,
             clustering_params=clustering_params,
             device=device,
+            output_dir=output_dir,
         )
     except torch.OutOfMemoryError as e:
         log.error(f"GPU内存不足，聚类计算失败: {e}")

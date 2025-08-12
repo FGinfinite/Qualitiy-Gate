@@ -23,7 +23,7 @@ from .kmeans_clustering import GPUKMeansClustering
 class ClusterBasedSelection:
     """基于聚类的数据选择器"""
 
-    def __init__(self, device: torch.device, random_state: int = 42, debug_print: bool = False):
+    def __init__(self, device: torch.device, random_state: int = 42, debug_print: bool = False, output_dir: Optional[str] = None):
         """
         初始化聚类选择器
 
@@ -31,10 +31,12 @@ class ClusterBasedSelection:
             device: GPU设备
             random_state: 随机种子
             debug_print: 是否启用调试输出
+            output_dir: 输出目录，用于创建子进程日志文件
         """
         self.device = device
         self.random_state = random_state
         self.debug_print = debug_print
+        self.output_dir = output_dir
         self.logger = logging.getLogger(__name__)
 
         # 初始化聚类器
@@ -177,6 +179,7 @@ class ClusterBasedSelection:
             enable_parallel=enable_parallel,
             parallel_processes=parallel_processes,
             gpu_allocation_strategy=gpu_allocation_strategy,
+            output_dir=self.output_dir,  # 传递输出目录
         )
 
         return labels, info

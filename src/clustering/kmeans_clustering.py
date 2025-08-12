@@ -292,6 +292,7 @@ class GPUKMeansClustering:
         enable_parallel: bool = False,
         parallel_processes: int = 4,
         gpu_allocation_strategy: str = "round_robin",
+        output_dir: Optional[str] = None,
     ) -> Tuple[torch.Tensor, Dict]:
         """
         执行聚类并返回标签
@@ -305,6 +306,7 @@ class GPUKMeansClustering:
             enable_parallel: 是否启用多GPU并行计算（仅在auto_k=True时有效）
             parallel_processes: 并行进程数
             gpu_allocation_strategy: GPU分配策略 ('round_robin' 或 'balanced')
+            output_dir: 输出目录，用于创建子进程日志文件
 
         Returns:
             labels: 聚类标签 [N]
@@ -318,7 +320,11 @@ class GPUKMeansClustering:
                 try:
                     from .parallel_kmeans import ParallelKMeansSelector
 
-                    parallel_selector = ParallelKMeansSelector(self.random_state, self.debug_print)
+                    parallel_selector = ParallelKMeansSelector(
+                        self.random_state,
+                        self.debug_print,
+                        output_dir,  # 传递输出目录
+                    )
                     k_info = parallel_selector.find_optimal_k_elbow_parallel(
                         data=data,
                         k_range=k_range,
@@ -329,9 +335,6 @@ class GPUKMeansClustering:
                     )
                 except ImportError as e:
                     self.logger.warning(f"无法导入并行模块，回退到串行模式: {e}")
-                    k_info = self.find_optimal_k_elbow(data, k_range, max_iters)
-                except Exception as e:
-                    self.logger.error(f"并行计算失败，回退到串行模式: {e}")
                     k_info = self.find_optimal_k_elbow(data, k_range, max_iters)
             else:
                 # 使用串行计算
@@ -350,10 +353,23 @@ class GPUKMeansClustering:
         centers, labels = self.kmeans_cosine(data, optimal_k, max_iters=max_iters)
         final_inertia = self.compute_inertia_cosine(data, centers, labels)
 
-        # 只有在auto_k=True时才计算轮廓系数（因为需要比较不同k值）
+        # 计算轮廓系数
         if auto_k and optimal_k > 1:
-            self.logger.info("计算最终聚类的轮廓系数...")
-            final_silhouette = gpu_silhouette_score_cosine(data, labels)
+            # 检查是否可以从并行计算结果中获取轮廓系数
+            if "silhouette_scores" in k_info and "k_values" in k_info:
+                # 从并行计算结果中提取对应k值的轮廓系数
+                try:
+                    k_index = k_info["k_values"].index(optimal_k)
+                    final_silhouette = k_info["silhouette_scores"][k_index]
+                    self.logger.info(f"使用并行计算的轮廓系数: {final_silhouette:.6f}")
+                except (ValueError, IndexError):
+                    # 如果无法找到对应k值，重新计算
+                    self.logger.info("未找到对应k值的轮廓系数，重新计算...")
+                    final_silhouette = gpu_silhouette_score_cosine(data, labels)
+            else:
+                # 串行模式或无轮廓系数数据，需要重新计算
+                self.logger.info("计算最终聚类的轮廓系数...")
+                final_silhouette = gpu_silhouette_score_cosine(data, labels)
         else:
             final_silhouette = 0.0
             if not auto_k:

@@ -37,12 +37,12 @@ clustering_params:
   # K-Means specific parameters
   auto_k: true  # Automatically determine k using Elbow method
   k: null  # Manual k value (only used if auto_k=false)
-  k_range: [20, 49]  # k search range for Elbow method
+  k_range: [20, 89]  # k search range for Elbow method
   max_iters: 300  # Maximum iterations
   
   # K-Means parallel computation parameters
   enable_parallel_kmeans: true  # Enable multi-GPU parallel computation for k-value search
-  parallel_processes: 15  # Number of parallel processes for k-value computation
+  parallel_processes: 7  # Number of parallel processes for k-value computation
   gpu_allocation_strategy: "round_robin"  # GPU allocation strategy: "round_robin" or "balanced"
 
 # Device configuration
