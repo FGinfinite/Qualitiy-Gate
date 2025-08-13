@@ -1,8 +1,7 @@
 # src/stages/selection.py
-import json
 import logging
 import os
-from typing import List, Tuple
+from typing import Tuple
 
 import hydra
 import torch
@@ -11,7 +10,6 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers import AutoTokenizer
 
-from src.clustering import ClusterBasedSelection
 from src.data import load_local_datasets
 from src.models.select_moe import SelectMoeForCausalLM, register_select_moe
 from src.training.full_rank_finetuning import load_full_rank_weights
@@ -98,55 +96,6 @@ def calculate_quality_score_from_gates(
     return final_quality_score
 
 
-def cluster_based_selection(
-    scored_data: List[dict],
-    all_logits_by_dataset: dict,
-    selection_percentage: float,
-    clustering_method: str = "kmeans",
-    clustering_params: dict = None,
-    device: torch.device = None,
-    debug_print: bool = False,
-    output_dir: str = None,
-) -> List[dict]:
-    """
-    基于聚类的数据选择策略
-
-    Args:
-        scored_data: 评分后的数据列表
-        all_logits_by_dataset: 按数据集分组的logits张量
-        selection_percentage: 选择比例
-        clustering_method: 聚类方法 ('kmeans' 或 'hdbscan')
-        clustering_params: 聚类参数
-        device: GPU设备
-        debug_print: 是否启用调试输出
-        output_dir: 输出目录，用于创建子进程日志文件
-
-    Returns:
-        选择后的数据列表
-    """
-    total_samples = len(scored_data)
-    target_count = int(total_samples * selection_percentage)
-
-    log = logging.getLogger(__name__)
-    log.info(f"开始聚类选择: 从 {total_samples} 个样本中选择 {target_count} 个")
-    log.info(f"使用聚类方法: {clustering_method}")
-
-    if debug_print:
-        log.info("启用调试模式")
-
-    # 初始化聚类选择器
-    cluster_selector = ClusterBasedSelection(device=device, debug_print=debug_print, output_dir=output_dir)
-
-    # 执行聚类-轮选选择
-    selected_data = cluster_selector.select_data_by_clustering(
-        scored_data=scored_data,
-        all_logits_by_dataset=all_logits_by_dataset,
-        target_count=target_count,
-        clustering_method=clustering_method,
-        clustering_params=clustering_params or {},
-    )
-
-    return selected_data
 
 
 def load_router_data(router_data_path: str) -> dict:
@@ -468,58 +417,8 @@ def select(cfg: DictConfig) -> None:
         torch.cuda.synchronize()
     log.info("模型内存已释放")
 
-    # 6. 检查是否跳过数据选择步骤
-    skip_selection = getattr(cfg, "skip_data_selection", False)
-    if skip_selection:
-        log.info("根据配置，跳过数据选择步骤。")
-        log.info("路由数据已保存，可以使用其他脚本进行数据选择算法实验。")
-        log.info("--- 阶段2：数据选择完成（仅推理模式） ---")
-        return
-
-    # 7. 进行聚类数据选择
-    log.info("开始聚类数据选择...")
-
-    clustering_method = getattr(cfg, "clustering_method", "kmeans")
-    clustering_params = getattr(cfg, "clustering_params", {})
-
-    # 准备logits数据
-    all_logits_by_dataset = {name: all_router_data_by_dataset[name]["moe_logits"] for name in cfg.dataset.dataset_names}
-
-    try:
-        selected_data = cluster_based_selection(
-            scored_data=scored_data,
-            all_logits_by_dataset=all_logits_by_dataset,
-            selection_percentage=cfg.selection_percentage,
-            clustering_method=clustering_method,
-            clustering_params=clustering_params,
-            device=device,
-            output_dir=output_dir,
-        )
-    except torch.OutOfMemoryError as e:
-        log.error(f"GPU内存不足，聚类计算失败: {e}")
-        log.error("但是，宝贵的logits张量已经安全保存！")
-        log.info("您可以使用独立脚本继续数据选择过程:")
-        log.info(
-            f"  python scripts/cluster_selection.py --router_data_dir {router_data_dir} "
-            f"--output_path {output_path} --selection_percentage {cfg.selection_percentage}"
-        )
-        raise
-    except Exception as e:
-        log.error(f"聚类选择过程中发生错误: {e}")
-        log.error("但是，宝贵的logits张量已经安全保存！")
-        log.info("您可以使用独立脚本继续数据选择过程:")
-        log.info(f"  python scripts/cluster_selection.py --router_data_dir {router_data_dir} --output_path {output_path}")
-        raise
-
-    log.info(f"选择了前 {len(selected_data)} 个样本 ({cfg.selection_percentage * 100:.2f}%)")
-    if len(selected_data) > 3:
-        log.info(f"前3个分数: {[d['scores'] for d in selected_data[:3]]}")
-        log.info(f"后3个分数: {[d['scores'] for d in selected_data[-3:]]}")
-
-    # 保存选择的数据
-    with open(output_path, "w", encoding="utf-8") as f:
-        for item in selected_data:
-            f.write(json.dumps(item, ensure_ascii=False) + "\n")
-
-    log.info(f"筛选后的数据已保存到: {output_path}")
-    log.info("--- 阶段2：数据选择完成 ---")
+    # 6. Router数据计算和保存完成
+    log.info("路由数据已保存，可以使用独立脚本进行数据选择算法实验:")
+    log.info(f"  使用continue_selection.py: CUDA_VISIBLE_DEVICES=0 uv run scripts/continue_selection.py router_data_dir={router_data_dir}")
+    log.info(f"  使用batch_selection.py: CUDA_VISIBLE_DEVICES=0 uv run scripts/batch_selection.py root_dir={os.path.dirname(router_data_dir)}")
+    log.info("--- 阶段2：路由数据计算完成 ---")

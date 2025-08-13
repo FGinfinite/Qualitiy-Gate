@@ -419,7 +419,7 @@ class ParallelKMeansSelector:
         # 打印出所有k值对应的轮廓系数
         if silhouette_scores:
             self.logger.info("------ 各k值的轮廓系数详情 ------")
-            for k, score in zip(sorted_k_values, silhouette_scores):
+            for k, score in zip(sorted_k_values, silhouette_scores, strict=False):
                 # 使用 f-string 格式化输出，保留4位小数使结果更易读
                 self.logger.info(f"  k = {k:<2} | 轮廓系数 (Silhouette Score) = {score:.4f}")
             self.logger.info("------------------------------------")

@@ -12,7 +12,7 @@ import os
 import shutil
 import sys
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import hydra
 import torch
@@ -24,8 +24,14 @@ project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-from src.data.dataset_loader import load_local_datasets
-from src.stages.selection import cluster_based_selection, load_router_data
+from src.selection.data_selection import (
+    cluster_based_selection,
+    load_all_router_data,
+    load_original_dataset_mapping,
+    parse_clustering_params,
+    rebuild_logits_data,
+    rebuild_scored_data_with_messages,
+)
 from src.utils.hydra_resolvers import register_custom_resolvers
 
 # Register custom Hydra resolvers before @hydra.main
@@ -97,185 +103,14 @@ def should_skip_experiment(experiment_dir: str, skip_existing: bool) -> Tuple[bo
     return False, ""
 
 
-def load_all_router_data(router_data_dir: str) -> Dict[str, Dict[str, Any]]:
-    """加载所有数据集的router_data文件"""
-    log = logging.getLogger(__name__)
-    all_router_data = {}
-
-    if not os.path.exists(router_data_dir):
-        raise FileNotFoundError(f"Router data目录不存在: {router_data_dir}")
-
-    # 查找所有的router_data文件
-    for filename in os.listdir(router_data_dir):
-        if filename.endswith("_router_data.pt"):
-            dataset_name = filename.replace("_router_data.pt", "")
-            file_path = os.path.join(router_data_dir, filename)
-
-            log.debug(f"加载数据集 '{dataset_name}' 的router data: {file_path}")
-            router_data = load_router_data(file_path)
-            all_router_data[dataset_name] = router_data
-
-    if not all_router_data:
-        raise ValueError(f"在目录 {router_data_dir} 中未找到任何router_data文件")
-
-    log.debug(f"成功加载 {len(all_router_data)} 个数据集的router数据")
-    return all_router_data
 
 
-def load_original_dataset_mapping(router_data_dir: str, data_dir: str = None) -> Dict[str, Dict[str, Any]]:
-    """加载原始数据集的消息映射"""
-    log = logging.getLogger(__name__)
-
-    # 推断数据集目录
-    if data_dir is None:
-        current_dir = router_data_dir
-        project_root = None
-        for _ in range(10):  # 最多向上10层
-            current_dir = os.path.dirname(current_dir)
-            if os.path.exists(os.path.join(current_dir, "dataset", "train", "processed")):
-                project_root = current_dir
-                break
-
-        if project_root is None:
-            project_root = os.getcwd()
-
-        data_dir = os.path.join(project_root, "dataset", "train", "processed")
-
-    if not os.path.exists(data_dir):
-        log.warning(f"推断的数据集目录不存在: {data_dir}")
-        return {}
-
-    log.debug(f"使用标准数据加载器从目录加载数据: {data_dir}")
-
-    # 获取router_data中的数据集名称
-    dataset_names = []
-    for filename in os.listdir(router_data_dir):
-        if filename.endswith("_router_data.pt"):
-            dataset_name = filename.replace("_router_data.pt", "")
-            dataset_names.append(dataset_name)
-
-    if not dataset_names:
-        log.warning("未找到任何router_data文件")
-        return {}
-
-    log.debug(f"需要加载的数据集: {dataset_names}")
-
-    try:
-        # 使用标准数据加载器加载所有数据集
-        combined_dataset = load_local_datasets(
-            data_dir=data_dir,
-            dataset_names=dataset_names,
-            sample_percentage=1.0,  # 加载全部数据
-            seed=0,
-        )
-
-        log.debug(f"标准加载器成功加载 {len(combined_dataset)} 个样本")
-
-        # 将数据按ID组织为映射字典
-        dataset_mapping = {name: {} for name in dataset_names}
-
-        for item in combined_dataset:
-            dataset_name = item.get("dataset")
-            item_id = item.get("id")
-            messages = item.get("messages", [])
-
-            if dataset_name and item_id and dataset_name in dataset_mapping:
-                dataset_mapping[dataset_name][item_id] = messages
-
-        # 输出加载统计
-        for dataset_name in dataset_names:
-            count = len(dataset_mapping[dataset_name])
-            log.debug(f"数据集 '{dataset_name}': 映射了 {count} 个样本")
-
-        return dataset_mapping
-
-    except Exception as e:
-        log.error(f"使用标准数据加载器加载失败: {e}")
-        return {}
 
 
-def rebuild_scored_data_with_messages(all_router_data: Dict[str, Dict[str, Any]], dataset_mapping: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """从router_data重建scored_data列表，包含完整的messages"""
-    log = logging.getLogger(__name__)
-    scored_data = []
-
-    for dataset_name, router_data in all_router_data.items():
-        quality_score = router_data["quality_score"]  # [N, L, 1]
-        sample_ids = router_data["sample_ids"]
-        num_samples = router_data["num_samples"]
-
-        log.debug(f"处理数据集 '{dataset_name}': {num_samples} 个样本")
-
-        # 获取该数据集的消息映射
-        messages_mapping = dataset_mapping.get(dataset_name, {})
-
-        for i in range(num_samples):
-            # 从质量门分数计算质量分数
-            sample_quality_score = quality_score[i]  # [L, 1]
-
-            # 计算质量分数：先对原始分数应用sigmoid，再求平均
-            # 注意：从router_data加载的quality_score是原始分数，需要sigmoid转换为概率
-            quality_scores_raw = sample_quality_score.squeeze(-1)  # [L]
-            quality_scores_sigmoid = torch.sigmoid(quality_scores_raw)  # [L] sigmoid转换为[0,1]概率
-            final_score = quality_scores_sigmoid.mean().item()
-
-            # 获取原始messages
-            sample_id = sample_ids[i]
-            messages = messages_mapping.get(sample_id, [])
-
-            if not messages:
-                log.warning(f"样本 {sample_id} 未找到对应的messages")
-
-            # 构建scored_data项
-            scored_item = {"dataset": dataset_name, "id": sample_id, "scores": final_score, "messages": messages}
-            scored_data.append(scored_item)
-
-    log.debug(f"成功重建 {len(scored_data)} 个样本的scored_data（包含messages）")
-    return scored_data
 
 
-def rebuild_logits_data(all_router_data: Dict[str, Dict[str, Any]]) -> Dict[str, List[torch.Tensor]]:
-    """从router_data重建logits数据用于聚类选择"""
-    log = logging.getLogger(__name__)
-    all_logits_by_dataset = {}
-
-    for dataset_name, router_data in all_router_data.items():
-        moe_logits = router_data["moe_logits"]  # [N, L, E]
-        num_samples = router_data["num_samples"]
-
-        # 将张量拆分为列表，每个元素是 [L, E]
-        logits_list = [moe_logits[i] for i in range(num_samples)]
-        all_logits_by_dataset[dataset_name] = logits_list
-
-        log.debug(f"数据集 '{dataset_name}': {len(logits_list)} 个logits张量，形状 {logits_list[0].shape} [L, E]")
-
-    return all_logits_by_dataset
 
 
-def parse_clustering_params(cfg: DictConfig) -> Dict:
-    """解析聚类参数"""
-    params = {}
-    clustering_params = cfg.clustering_params
-
-    if cfg.clustering_method == "kmeans":
-        params.update(
-            {
-                "auto_k": clustering_params.get("auto_k", True),
-                "k": clustering_params.get("k", None),
-                "k_range": clustering_params.get("k_range", [10, 100]),
-                "max_iters": clustering_params.get("max_iters", 300),
-                # 并行计算参数
-                "enable_parallel_kmeans": clustering_params.get("enable_parallel_kmeans", False),
-                "parallel_processes": clustering_params.get("parallel_processes", 4),
-                "gpu_allocation_strategy": clustering_params.get("gpu_allocation_strategy", "round_robin"),
-            }
-        )
-    else:
-        # 为未来扩展保留接口，目前仅支持kmeans
-        supported_methods = ["kmeans"]
-        raise ValueError(f"不支持的聚类方法: {cfg.clustering_method}。支持的方法: {supported_methods}")
-
-    return params
 
 
 def save_selection_config(experiment_dir: str, cfg: DictConfig, clustering_params: Dict, start_time: datetime, end_time: datetime, device: torch.device):

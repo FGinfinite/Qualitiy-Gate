@@ -37,6 +37,13 @@ Select-MoE is a data selection framework using Mixture-of-Experts (MoE) models. 
 - Dataset loaders for training and evaluation data
 - Support for multiple datasets: CoT, Dolly, FLAN-v2, OASST1
 
+### Data Selection Module (`src/selection/`)
+- **Decoupled Selection Logic**: Clean separation between router computation and data selection algorithms
+- **Consolidated Functions**: Single source of truth for all data selection utilities
+- **Clustering Integration**: Seamless integration with GPU-accelerated clustering algorithms
+- **Router Data Processing**: Utilities for loading and processing router inference outputs
+- **Multi-Script Support**: Shared functions used by both standalone and batch selection scripts
+
 ### Clustering-Based Selection (`src/clustering/`)
 - **GPU K-Means with Elbow Method**: Automatic k-value selection using GPU acceleration and multi-GPU parallel processing
 - **GPU Silhouette Score**: High-performance GPU-accelerated silhouette coefficient calculation for cosine distance
@@ -100,8 +107,14 @@ python scripts/compare_converted_model.py --converted-model ./converted_models/s
 # Stage 1: Router pretraining (set CUDA_VISIBLE_DEVICES first)
 CUDA_VISIBLE_DEVICES=0,1,2,3 bash scripts/run_stage_1.sh
 
-# Stage 2: Clustering-based data selection
+# Stage 2: Router data computation (inference only)
 CUDA_VISIBLE_DEVICES=0 bash scripts/run_stage_2.sh model_checkpoint_path=outputs/stage_1_pretrain/YYYY-MM-DD/HH-MM-SS/full_rank_weights.pt
+
+# Stage 2b: Data selection using standalone scripts (after router data computation)
+CUDA_VISIBLE_DEVICES=0 uv run scripts/continue_selection.py router_data_dir=outputs/stage_2_selection/YYYY-MM-DD/HH-MM-SS/router_data
+
+# Stage 2c: Batch data selection across multiple experiments
+CUDA_VISIBLE_DEVICES=0 uv run scripts/batch_selection.py root_dir=outputs/stage_2_selection
 
 # Stage 3: Target model fine-tuning
 CUDA_VISIBLE_DEVICES=0,1,2,3 bash scripts/run_stage_3.sh dataset.data_path=outputs/stage_2_selection/YYYY-MM-DD/HH-MM-SS/selected_data.jsonl
@@ -140,11 +153,14 @@ bash scripts/run_stage_3.sh training.lora.r=64 training.lora.lora_alpha=128
 # Enable clustering debug output
 bash scripts/run_stage_2.sh debug_print=true
 
-# Use standalone clustering selection with debug
-CUDA_VISIBLE_DEVICES=1 uv run scripts/continue_selection.py debug_print=true
+# Stage 2b: Standalone data selection with debug output
+CUDA_VISIBLE_DEVICES=1 uv run scripts/continue_selection.py router_data_dir=outputs/stage_2_selection/YYYY-MM-DD/HH-MM-SS/router_data debug_print=true
 
-# Use standalone clustering selection with multi-GPU parallel K-means
-CUDA_VISIBLE_DEVICES=0,1,2,3 uv run scripts/continue_selection.py clustering_method=kmeans clustering_params.enable_parallel_kmeans=true clustering_params.parallel_processes=8
+# Stage 2c: Multi-GPU parallel K-means selection
+CUDA_VISIBLE_DEVICES=0,1,2,3 uv run scripts/continue_selection.py router_data_dir=outputs/stage_2_selection/YYYY-MM-DD/HH-MM-SS/router_data clustering_method=kmeans clustering_params.enable_parallel_kmeans=true clustering_params.parallel_processes=8
+
+# Batch processing multiple experiments
+CUDA_VISIBLE_DEVICES=0 uv run scripts/batch_selection.py root_dir=outputs/stage_2_selection selection_percentage=0.1 clustering_method=kmeans
 ```
 
 ### Validation and Testing
@@ -211,9 +227,14 @@ accelerate launch -m lm_eval --model hf \
   - **Mean-Variance Regularization**:
     - `lambda_var`: Variance regularization weight (default: 0.1)
 
-### Stage 2 (Selection)
-- `selection_percentage`: Data selection ratio (default: 0.05)
+### Stage 2 (Router Data Computation)
 - `model_checkpoint_path`: Path to Stage 1 output weights
+- Router inference parameters for data quality scoring
+- Outputs router data files for subsequent selection algorithms
+
+### Data Selection (Standalone Scripts)
+- `selection_percentage`: Data selection ratio (default: 0.05)
+- `router_data_dir`: Path to Stage 2 router data output directory
 - `clustering_method`: Clustering algorithm (currently only 'kmeans' supported)
 - `debug_print`: Enable detailed clustering debug output (default: false)
 - `clustering_params`: Clustering-specific parameters
@@ -247,10 +268,34 @@ accelerate launch -m lm_eval --model hf \
 
 Ensure correct path dependencies between stages:
 - Stage 2 requires Stage 1's `full_rank_weights.pt`
-- Stage 3 requires Stage 2's `selected_data.jsonl`
+- **Data Selection** requires Stage 2's router data files (`*_router_data.pt`)
+- Stage 3 requires selected data (`selected_data.jsonl` from standalone selection scripts)
 - Stage 4 requires Stage 3's LoRA checkpoint
 
 Always verify output paths before proceeding to the next stage.
+
+## Pipeline Architecture Changes
+
+### Decoupled Stage 2 Architecture
+**Stage 2** has been split into two distinct phases for better modularity:
+
+1. **Router Data Computation** (`src/stages/selection.py`):
+   - Pure router inference on training data
+   - Saves quality scores and MoE logits to `router_data/` directory
+   - No data selection logic - focused solely on computation
+   - Memory efficient with proper GPU cleanup
+
+2. **Data Selection Algorithms** (`src/selection/`):
+   - Standalone scripts for various selection strategies
+   - Load router data from Stage 2 output
+   - Apply clustering-based selection algorithms
+   - Output final `selected_data.jsonl` for Stage 3
+
+### Benefits of Decoupled Architecture:
+- **Experimental Flexibility**: Test different selection algorithms on same router data
+- **Resource Efficiency**: Separate GPU memory requirements for inference vs. clustering
+- **Debugging**: Isolate router computation issues from selection algorithm issues
+- **Scalability**: Run selection algorithms across multiple experiments in batch mode
 
 ## Architecture Overview
 
@@ -346,10 +391,21 @@ GPU-accelerated clustering algorithms for intelligent data selection:
 - `gpu_metrics.py` - High-performance GPU silhouette coefficient computation for cosine distance
 - `__init__.py` - Clustering package initialization and exports
 
+#### 📂 src/selection/
+Decoupled data selection module with consolidated selection algorithms:
+- `data_selection.py` - Core data selection functions and utilities
+  - `cluster_based_selection()` - Main clustering-based selection algorithm
+  - `load_all_router_data()` - Load router data from multiple datasets
+  - `load_original_dataset_mapping()` - Load original dataset message mappings
+  - `rebuild_scored_data_with_messages()` - Rebuild scored data with complete messages
+  - `rebuild_logits_data()` - Process MoE logits for clustering algorithms
+  - `parse_clustering_params()` - Parse and validate clustering configuration
+- `__init__.py` - Selection module exports for easy importing
+
 #### 📂 src/stages/
 Pipeline stage implementations following the four-stage architecture:
 - `pretrain.py` - Stage 1 implementation: Select-MoE router pretraining with quality loss
-- `selection.py` - Stage 2 implementation: router inference, data scoring, and clustering selection
+- `selection.py` - Stage 2 implementation: **router inference and data computation only** (selection logic moved to `src/selection/`)
 - `finetune.py` - Stage 3 implementation: target model LoRA fine-tuning with selected data
 - `evaluation.py` - Stage 4 implementation: model performance evaluation using lm-eval
 - `__init__.py` - Stages package initialization and exports
@@ -365,10 +421,11 @@ Training utilities and distributed computing support:
 ### 📂 scripts/
 Executable scripts for various operations:
 - `run_stage_1.sh` - Stage 1 router pretraining execution script
-- `run_stage_2.sh` - Stage 2 data selection execution script  
+- `run_stage_2.sh` - Stage 2 router data computation execution script (inference only)
 - `run_stage_3.sh` - Stage 3 target model fine-tuning execution script
 - `eval.sh` - Stage 4 model evaluation execution script
-- `continue_selection.py` - Standalone clustering-based data selection script
+- `continue_selection.py` - **Standalone clustering-based data selection script** (Stage 2b: processes router data from Stage 2)
+- `batch_selection.py` - **Batch data selection script** (Stage 2c: processes multiple experiments automatically)
 - `convert_olmoe_to_select_moe.py` - Model conversion from OLMoE to Select-MoE format
 - `compare_converted_model.py` - Model conversion verification and comparison
 - `validate_gpu_silhouette.py` - GPU silhouette coefficient implementation validation
@@ -386,5 +443,16 @@ Reference model implementations for comparison and development:
 
 ### Key Entry Points
 - `src/main.py` - Main pipeline coordinator with Hydra configuration management
-- `scripts/continue_selection.py` - Standalone data selection with clustering algorithms
+- **Data Selection Scripts**:
+  - `scripts/continue_selection.py` - Single experiment data selection with clustering algorithms
+  - `scripts/batch_selection.py` - Batch processing for multiple experiments
 - `scripts/run_stage_*.sh` - Stage-specific execution scripts with parameter overrides
+
+### Recommended Workflow
+1. **Stage 1**: Train Select-MoE router using `scripts/run_stage_1.sh`
+2. **Stage 2**: Compute router data using `scripts/run_stage_2.sh` 
+3. **Stage 2b/2c**: Apply data selection algorithms using standalone scripts:
+   - Single experiment: `scripts/continue_selection.py`
+   - Multiple experiments: `scripts/batch_selection.py`
+4. **Stage 3**: Fine-tune target model using `scripts/run_stage_3.sh`
+5. **Stage 4**: Evaluate model performance using `scripts/eval.sh`

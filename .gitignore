@@ -23,3 +23,7 @@ converted_models/
 dataset/
 
 LESS/
+
+.ruff_cache/
+
+笔记.md

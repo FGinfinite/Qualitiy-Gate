@@ -39,9 +39,9 @@ explicit = true
 
 [tool.ruff]
 line-length = 160
+exclude = ["ref_model"]
 
 [tool.ruff.lint]
-# 选择一个更保守、更安全的规则集
 select = [
     "E",  # pycodestyle errors
     "F",  # pyflakes
