@@ -1,13 +1,13 @@
 # @package _global_
 
-stage: continue_selection
+stage: batch_selection
 
 # Hydra settings to create a timestamped output directory
 hydra:
   run:
-    dir: outputs/continue_selection/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    dir: outputs/batch_selection/${now:%Y-%m-%d}/${now:%H-%M-%S}
   sweep:
-    dir: outputs/continue_selection
+    dir: outputs/batch_selection
     subdir: ${now:%Y-%m-%d}/${now:%H-%M-%S}
   job:
     config:
@@ -19,9 +19,10 @@ hydra:
           - hydra.sweep.dir
           - hydra.sweep.subdir
 
-# Required: Directory containing router_data files
-# Example: outputs/stage_2_selection/2025-08-11/03-52-40-batch=8_lr=0.001_loss=beta_moment_matching_tag=none/router_data
-router_data_dir: "outputs/stage_2_selection/2025-08-11/03-52-40-batch=8_lr=0.0001_loss=beta_moment_matching_tag=none/router_data"
+output_dir: ${hydra:run.dir}
+
+# Required: Root directory containing stage_2_selection outputs
+root_dir: "outputs/stage_2_selection"
 
 # Data selection percentage (0.05 means select top 5% of the data)
 selection_percentage: 0.05
@@ -35,9 +36,9 @@ clustering_method: "kmeans"
 # Clustering parameters
 clustering_params:
   # K-Means specific parameters
-  auto_k: true  # Automatically determine k using Elbow method
-  k: null  # Manual k value (only used if auto_k=false)
-  k_range: [20, 100]  # k search range for Elbow method
+  auto_k: false  # Automatically determine k using Elbow method
+  k: 35  # Manual k value (only used if auto_k=false)
+  k_range: [20, 89]  # k search range for Elbow method
   max_iters: 300  # Maximum iterations
   
   # K-Means parallel computation parameters
@@ -54,3 +55,28 @@ debug_print: false  # Enable detailed debug output for clustering algorithms
 # Logging configuration
 logging:
   verbose: false  # Enable detailed logging output
+
+# Batch processing configuration
+batch_processing:
+  # Skip directories that already have selected_data.jsonl
+  skip_existing: true
+  
+  # Maximum number of experiments to process in parallel
+  max_parallel_experiments: 1
+  
+  # Continue processing other experiments if one fails
+  continue_on_error: true
+  
+  # Save detailed processing report
+  save_report: true
+  
+  # Dry run mode - only scan and report, don't actually process
+  dry_run: false
+
+# Force processing configuration
+force_processing:
+  # Force reprocess even if selected_data.jsonl exists
+  enabled: false
+  
+  # Backup existing files before overwriting
+  backup_existing: true

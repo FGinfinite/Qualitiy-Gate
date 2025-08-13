@@ -14,10 +14,12 @@ import json
 import logging
 import os
 import sys
+from datetime import datetime
 from typing import Any, Dict, List
 
 import hydra
 import torch
+import yaml
 from omegaconf import DictConfig
 
 # 添加项目根目录到路径
@@ -233,6 +235,39 @@ def generate_output_path(router_data_dir: str) -> str:
     return output_path
 
 
+def save_selection_config(output_path: str, cfg: DictConfig, clustering_params: Dict, start_time: datetime, end_time: datetime, device: torch.device):
+    """保存数据选择配置到selection_config.yaml"""
+    log = logging.getLogger(__name__)
+
+    # 构建配置字典
+    config_dict = {
+        "selection_metadata": {
+            "script_name": "continue_selection.py",
+            "execution_time": {"start": start_time.isoformat(), "end": end_time.isoformat(), "duration_seconds": (end_time - start_time).total_seconds()},
+            "device_used": str(device),
+        },
+        "selection_parameters": {
+            "selection_percentage": float(cfg.selection_percentage),
+            "clustering_method": cfg.clustering_method,
+            "debug_print": cfg.debug_print,
+        },
+        "clustering_parameters": clustering_params,
+        "paths": {"router_data_dir": cfg.router_data_dir, "selected_data_path": output_path, "data_dir": cfg.get("data_dir", "auto-inferred")},
+        "device_configuration": {
+            "device_type": device.type,
+            "cuda_available": torch.cuda.is_available(),
+            "cuda_device_count": torch.cuda.device_count() if torch.cuda.is_available() else 0,
+        },
+    }
+
+    # 保存配置文件
+    config_path = os.path.join(os.path.dirname(output_path), "selection_config.yaml")
+    with open(config_path, "w", encoding="utf-8") as f:
+        yaml.dump(config_dict, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+
+    log.info(f"选择配置已保存到: {config_path}")
+
+
 @hydra.main(config_path="../configs", config_name="continue_selection", version_base=None)
 def main(cfg: DictConfig) -> None:
     """主函数：执行聚类-轮选数据选择"""
@@ -244,6 +279,9 @@ def main(cfg: DictConfig) -> None:
     # 设置日志
     setup_logging(cfg)
     log = logging.getLogger(__name__)
+
+    # 记录开始时间
+    start_time = datetime.now()
 
     log.info("=== 开始聚类-轮选数据选择 ===")
     log.info(f"聚类方法: {cfg.clustering_method}")
@@ -322,6 +360,12 @@ def main(cfg: DictConfig) -> None:
         with open(output_path, "w", encoding="utf-8") as f:
             for item in selected_data:
                 f.write(json.dumps(item, ensure_ascii=False) + "\n")
+
+        # 记录结束时间
+        end_time = datetime.now()
+
+        # 8. 保存选择配置
+        save_selection_config(output_path, cfg, clustering_params, start_time, end_time, device)
 
         log.info(f"聚类选择的数据已保存到: {output_path}")
         log.info("=== 聚类-轮选数据选择完成 ===")

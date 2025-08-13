@@ -111,13 +111,14 @@ class ParallelKMeansSelector:
         self.logger.info(f"进程-设备分配映射: {process_device_map}")
         return process_device_map
 
-    def split_k_values(self, k_values: List[int], num_processes: int) -> List[List[int]]:
+    def split_k_values(self, k_values: List[int], num_processes: int, strategy: str = "interleaved") -> List[List[int]]:
         """
         将k值列表分配给多个进程
 
         Args:
             k_values: k值列表
             num_processes: 进程数
+            strategy: 分配策略 ('sequential' 或 'interleaved')
 
         Returns:
             每个进程分配到的k值列表
@@ -132,25 +133,85 @@ class ParallelKMeansSelector:
             while len(k_splits) < num_processes:
                 k_splits.append([])
         else:
-            # 平均分配k值
-            k_per_process = len(k_values) // num_processes
-            remainder = len(k_values) % num_processes
+            if strategy == "sequential":
+                # 原有的连续分配策略
+                k_splits = self._split_k_values_sequential(k_values, num_processes)
+            elif strategy == "interleaved":
+                # 新的交替分配策略，平衡计算负载
+                k_splits = self._split_k_values_interleaved(k_values, num_processes)
+            else:
+                raise ValueError(f"未知的分配策略: {strategy}")
 
-            k_splits = []
-            start_idx = 0
+        # 计算负载均衡度（基于k值的平方，因为轮廓系数计算复杂度约为O(n²k)）
+        loads = [sum(k**2 for k in ks) for ks in k_splits]
+        if loads:
+            max_load = max(loads)
+            min_load = min(loads)
+            balance_ratio = min_load / max_load if max_load > 0 else 1.0
+        else:
+            balance_ratio = 1.0
 
-            for i in range(num_processes):
-                # 基础k值数
-                current_k_count = k_per_process
-                # 余数分配给前面的进程
-                if i < remainder:
-                    current_k_count += 1
-
-                end_idx = start_idx + current_k_count
-                k_splits.append(k_values[start_idx:end_idx])
-                start_idx = end_idx
-
+        self.logger.info(f"k值分配策略: {strategy}")
         self.logger.info(f"k值分配: {[(i, len(ks)) for i, ks in enumerate(k_splits)]}")
+        self.logger.info(f"负载均衡度: {balance_ratio:.3f} (越接近1.0越均衡)")
+        if self.debug_print:
+            for i, (ks, load) in enumerate(zip(k_splits, loads, strict=True)):
+                self.logger.debug(f"进程 {i}: k值={ks}, 估计负载={load}")
+
+        return k_splits
+
+    def _split_k_values_sequential(self, k_values: List[int], num_processes: int) -> List[List[int]]:
+        """原有的连续分配策略"""
+        k_per_process = len(k_values) // num_processes
+        remainder = len(k_values) % num_processes
+
+        k_splits = []
+        start_idx = 0
+
+        for i in range(num_processes):
+            # 基础k值数
+            current_k_count = k_per_process
+            # 余数分配给前面的进程
+            if i < remainder:
+                current_k_count += 1
+
+            end_idx = start_idx + current_k_count
+            k_splits.append(k_values[start_idx:end_idx])
+            start_idx = end_idx
+
+        return k_splits
+
+    def _split_k_values_interleaved(self, k_values: List[int], num_processes: int) -> List[List[int]]:
+        """
+        交替分配策略：使用蛇形模式分配k值，平衡计算负载
+
+        例如4个进程分配10个k值:
+        进程0: [k0, k7, k8]     # 第1轮取k0，第2轮倒序取k7，第3轮正序取k8
+        进程1: [k1, k6, k9]     # 第1轮取k1，第2轮倒序取k6，第3轮正序取k9
+        进程2: [k2, k5]         # 第1轮取k2，第2轮倒序取k5
+        进程3: [k3, k4]         # 第1轮取k3，第2轮倒序取k4
+        """
+        k_splits = [[] for _ in range(num_processes)]
+
+        idx = 0
+        round_num = 0
+
+        while idx < len(k_values):
+            if round_num % 2 == 0:
+                # 偶数轮：正序分配 (0, 1, 2, 3)
+                for process_id in range(num_processes):
+                    if idx < len(k_values):
+                        k_splits[process_id].append(k_values[idx])
+                        idx += 1
+            else:
+                # 奇数轮：倒序分配 (3, 2, 1, 0)
+                for process_id in range(num_processes - 1, -1, -1):
+                    if idx < len(k_values):
+                        k_splits[process_id].append(k_values[idx])
+                        idx += 1
+
+            round_num += 1
+
         return k_splits
 
     def find_optimal_k_elbow_parallel(
@@ -161,6 +222,7 @@ class ParallelKMeansSelector:
         n_runs: int = 30,
         parallel_processes: int = 4,
         gpu_allocation_strategy: str = "round_robin",
+        k_distribution_strategy: str = "interleaved",
         base_timeout_hours: float = 2.0,
         per_k_timeout_hours: float = 4.0,
     ) -> Dict:
@@ -174,6 +236,7 @@ class ParallelKMeansSelector:
             n_runs: 每个k值运行次数
             parallel_processes: 并行进程数
             gpu_allocation_strategy: GPU分配策略
+            k_distribution_strategy: k值分配策略 ('sequential' 或 'interleaved')
             base_timeout_hours: 基础超时时间（小时）
             per_k_timeout_hours: 每个k值额外超时时间（小时）
 
@@ -190,7 +253,8 @@ class ParallelKMeansSelector:
             k_range = (min_k, max_k)
 
         min_k, max_k = k_range
-        k_values = list(range(min_k, max_k + 1, max(1, (max_k - min_k) // 20)))
+        # k_values = list(range(min_k, max_k + 1, max(1, (max_k - min_k) // 20)))
+        k_values = list(range(min_k, max_k + 1))  # 更细粒度地调优k值
 
         # 计算动态超时时间
         total_timeout_seconds = int((base_timeout_hours + len(k_values) * per_k_timeout_hours / parallel_processes) * 3600)
@@ -212,7 +276,7 @@ class ParallelKMeansSelector:
         process_device_map = self.allocate_processes_to_devices(effective_processes, available_devices, gpu_allocation_strategy)
 
         # k值分配
-        k_value_splits = self.split_k_values(k_values, effective_processes)
+        k_value_splits = self.split_k_values(k_values, effective_processes, k_distribution_strategy)
 
         # 3. 准备共享数据和时间戳
         # 将数据移到CPU并共享内存
@@ -351,6 +415,14 @@ class ParallelKMeansSelector:
         silhouette_scores = [all_silhouette_scores[k] for k in sorted_k_values]
 
         self.logger.info(f"汇总结果: 计算了 {len(sorted_k_values)} 个k值")
+
+        # 打印出所有k值对应的轮廓系数
+        if silhouette_scores:
+            self.logger.info("------ 各k值的轮廓系数详情 ------")
+            for k, score in zip(sorted_k_values, silhouette_scores):
+                # 使用 f-string 格式化输出，保留4位小数使结果更易读
+                self.logger.info(f"  k = {k:<2} | 轮廓系数 (Silhouette Score) = {score:.4f}")
+            self.logger.info("------------------------------------")
 
         # 寻找Elbow点
         optimal_k = self._find_elbow_point(sorted_k_values, inertias)

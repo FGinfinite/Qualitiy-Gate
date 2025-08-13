@@ -148,7 +148,7 @@ CUDA_VISIBLE_DEVICES=1,2,3,4,5,6,7 uv run scripts/continue_selection.py clusteri
 
 CUDA_VISIBLE_DEVICES=3 uv run scripts/continue_selection.py router_data_dir=\"outputs/stage_2_selection/2025-08-11/03-52-40-batch=8_lr=0.001_loss=mean_variance_regularization_tag=none/router_data\" clustering_method="hdbscan"
 
-CUDA_VISIBLE_DEVICES=3 uv run scripts/continue_selection.py router_data_dir=\"outputs/stage_2_selection/2025-08-11/03-52-40-batch=8_lr=0.001_loss=mean_variance_regularization_tag=none/router_data\" clustering_params.auto_k=false clustering_params.k=30
+CUDA_VISIBLE_DEVICES=2,4,5,6,7 back uv run scripts/continue_selection.py router_data_dir=\"outputs/stage_2_selection/2025-08-11/03-52-40-batch=8_lr=0.0003_loss=sigmoid_tag=none/router_data\" clustering_params.parallel_processes=5
 
 优化方案：
 阶段一：
