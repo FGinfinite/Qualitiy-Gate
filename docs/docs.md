@@ -360,6 +360,7 @@ huggingface-cli download cais/mmlu --repo-type dataset
 export HF_ENDPOINT=https://hf-mirror.com
 huggingface-cli download allenai/OLMoE-1B-7B-0125
 huggingface-cli download meta-llama/Llama-2-7b-hf
+huggingface-cli download Qwen/Qwen3-1.7B
 ```
 
 ---

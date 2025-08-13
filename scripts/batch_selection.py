@@ -103,16 +103,6 @@ def should_skip_experiment(experiment_dir: str, skip_existing: bool) -> Tuple[bo
     return False, ""
 
 
-
-
-
-
-
-
-
-
-
-
 def save_selection_config(experiment_dir: str, cfg: DictConfig, clustering_params: Dict, start_time: datetime, end_time: datetime, device: torch.device):
     """保存数据选择配置到selection_config.yaml"""
     log = logging.getLogger(__name__)

@@ -27,10 +27,10 @@ echo "Using port $MAIN_PORT"
 
 if [ $NUM_GPUS -eq 1 ]; then
   echo "Using single GPU configuration (no FSDP)"
-  CONFIG_FILE="configs/accelerate_config_single_gpu.yaml"
+  CONFIG_FILE="configs/accelerate_config/SINGLE.yaml"
 else
   echo "Using multi-GPU FSDP configuration"
-  CONFIG_FILE="configs/accelerate_config_fsdp_finetune.yaml"
+  CONFIG_FILE="configs/accelerate_config/FSDP.yaml"
 fi
 
 .venv/bin/accelerate launch \

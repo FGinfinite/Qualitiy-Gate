@@ -55,17 +55,17 @@ def get_model_and_tokenizer(
     cfg: DictConfig,
 ) -> Tuple[AutoModelForCausalLM, AutoTokenizer]:
     """
-    加载Llama-2-7B模型和分词器。
+    加载模型和分词器。
     """
     # 加载模型
     model_kwargs = {
         "low_cpu_mem_usage": True,
         "torch_dtype": torch.bfloat16,
     }
-    model = AutoModelForCausalLM.from_pretrained(cfg.model.name, **model_kwargs)
+    model = AutoModelForCausalLM.from_pretrained(cfg.training.model.name, **model_kwargs)
 
     # 加载分词器
-    tokenizer = AutoTokenizer.from_pretrained(cfg.model.name)
+    tokenizer = AutoTokenizer.from_pretrained(cfg.training.model.name)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
@@ -119,12 +119,12 @@ def validate_batch_size_configuration(total_batch_size: int, per_device_batch_si
 
 def finetune(cfg: DictConfig) -> None:
     """
-    使用Llama-2-7B模型进行LoRA微调。
+    进行LoRA微调。
     """
     # 设置训练日志系统
     log, hydra_callback = setup_training_logging(__name__)
 
-    log.info("--- 开始阶段 3：Llama-2-7B LoRA 微调 ---")
+    log.info(f"--- 开始阶段 3：{cfg.training.model.name} LoRA 微调 ---")
 
     set_seed(cfg.training.seed)
 
@@ -138,15 +138,15 @@ def finetune(cfg: DictConfig) -> None:
     log.info(f"CUDA设备数量: {torch.cuda.device_count()}")
     log.info(f"当前CUDA设备: {torch.cuda.current_device()}")
 
-    if cfg.training.gpu_grab.grab and local_rank == 0:
+    if cfg.gpu_grab.grab and local_rank == 0:
         # 只在主进程抢占GPU
         log.info("--- 正在抢占GPU显存 ---")
         # 创建一个简化的GPU抢占逻辑，不依赖accelerator
         torch.cuda.empty_cache()
         log.info("--- GPU显存清理完成 ---")
 
-    # 2. 加载 Llama-2-7B 模型和分词器
-    log.info("正在加载和配置 Llama-2-7B 模型...")
+    # 2. 加载模型和分词器
+    log.info(f"正在加载和配置 {cfg.training.model.name} 模型...")
     model, tokenizer = get_model_and_tokenizer(cfg)
     log.info("模型加载完成。")
 
@@ -207,15 +207,21 @@ def finetune(cfg: DictConfig) -> None:
         "ddp_timeout": 1800,  # 30分钟超时
     }
 
+    FSDP_CONFIG = {
+        "meta-llama/Llama-2-7b-hf": {
+            "fsdp": "full_shard auto_wrap",
+            "fsdp_transformer_layer_cls_to_wrap": "LlamaDecoderLayer",
+        },
+        "Qwen/Qwen3-1.7B": {
+            "fsdp": "full_shard auto_wrap",
+            "fsdp_transformer_layer_cls_to_wrap": "Qwen3DecoderLayer",
+        },
+    }
+
     # 根据设备数决定是否使用FSDP
     if world_size > 1:
         log.info(f"检测到多GPU环境 (world_size={world_size})，启用FSDP配置")
-        training_args_dict.update(
-            {
-                "fsdp": "full_shard auto_wrap",
-                "fsdp_transformer_layer_cls_to_wrap": "LlamaDecoderLayer",
-            }
-        )
+        training_args_dict.update(FSDP_CONFIG[cfg.training.model.name])
     else:
         log.info(f"检测到单GPU环境 (world_size={world_size})，使用常规训练模式（无FSDP）")
 
@@ -223,7 +229,7 @@ def finetune(cfg: DictConfig) -> None:
 
     # 10. 初始化并运行训练器
     # 清理显存
-    if cfg.training.gpu_grab.grab:
+    if cfg.gpu_grab.grab:
         torch.cuda.empty_cache()
         if local_rank == 0:
             log.info("已清理GPU显存以准备训练...")

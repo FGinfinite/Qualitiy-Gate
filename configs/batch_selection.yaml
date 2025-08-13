@@ -37,7 +37,7 @@ clustering_method: "kmeans"
 clustering_params:
   # K-Means specific parameters
   auto_k: false  # Automatically determine k using Elbow method
-  k: 35  # Manual k value (only used if auto_k=false)
+  k: 26  # Manual k value (only used if auto_k=false)
   k_range: [20, 89]  # k search range for Elbow method
   max_iters: 300  # Maximum iterations
   

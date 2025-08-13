@@ -29,7 +29,7 @@ echo "Using port $MAIN_PORT for the main process."
 # Use FSDP for multi-GPU training when more than 1 GPU is available
 
 .venv/bin/accelerate launch \
-  --config_file configs/accelerate_config_ddp.yaml \
+  --config_file configs/accelerate_config/DDP.yaml \
   --num_processes=$NUM_GPUS \
   --main_process_port=$MAIN_PORT \
   src/main.py --config-name=stage_1_pretrain "$@"

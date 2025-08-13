@@ -28,9 +28,6 @@ def main(cfg: DictConfig) -> None:
         selection.select(cfg)
     elif cfg.stage == "finetune":
         finetune.train(cfg)
-    elif cfg.stage == "evaluate":
-        # evaluate.run(cfg)  # Placeholder for the evaluation stage
-        pass
     else:
         raise ValueError(f"Unknown stage: {cfg.stage}")
 

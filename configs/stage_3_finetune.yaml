@@ -22,9 +22,14 @@ hydra:
 
 tag: "none"
 
+defaults:
+  - _self_
+  - training: qwen_3_1.7b
+
+
 # Model configuration
-model:
-  name: "meta-llama/Llama-2-7b-hf"
+# model:
+#   name: "meta-llama/Llama-2-7b-hf"
 
 output_dir: ${hydra:run.dir}
 
@@ -35,27 +40,7 @@ dataset:
   processing_num_workers: 10
   overwrite_cache: false
 
-# Training configuration
-training:
-  seed: 42
-  batch_size: 128  # 总批次大小，会根据设备数自动分配
-  per_device_batch_size: 8  # 每设备批次大小，可配置
-  learning_rate: 2e-5
-  epochs: 4
-  optimizer: "AdamW"
-  scheduler: "cosine"  # 余弦衰减
-  warmup_ratio: 0.03    # 线性预热比例（LESS未指出）
-  peft_mode: "lora"    # 使用LoRA微调
-  lora:
-    r: 128
-    lora_alpha: 512
-    lora_dropout: 0.1
-    target_modules:
-      - "q_proj"
-      - "k_proj"
-      - "v_proj"
-      - "o_proj"
-  gpu_grab:
-    grab: false
-    memory_need_gb: 24
-    over_grab: false
+gpu_grab:
+  grab: false
+  memory_need_gb: 24
+  over_grab: false
