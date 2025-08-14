@@ -364,17 +364,17 @@ def create_simplified_visualization(router_data, coords_2d, cluster_labels, clus
     # 为不同簇生成颜色
     colors = plt.cm.Set1(np.linspace(0, 1, max(n_clusters, 1)))
 
-    # 绘制数据点
+    # 绘制数据点 (减小点的半径)
     for i, label in enumerate(unique_labels):
         if label == -1:
-            # 噪声点用灰色显示
+            # 噪声点用灰色显示 (s 从 20 减小到 8)
             mask = cluster_labels == label
-            ax3.scatter(coords_2d[mask, 0], coords_2d[mask, 1], c="gray", s=20, alpha=0.5, label=f"噪声 ({np.sum(mask)}个)", marker="x")
+            ax3.scatter(coords_2d[mask, 0], coords_2d[mask, 1], c="gray", s=1, alpha=0.5, label=f"噪声 ({np.sum(mask)}个)", marker="x")
         else:
-            # 正常簇用不同颜色
+            # 正常簇用不同颜色 (s 从 30 减小到 12)
             mask = cluster_labels == label
             color = colors[i % len(colors)] if i < len(colors) else colors[i % len(colors)]
-            ax3.scatter(coords_2d[mask, 0], coords_2d[mask, 1], c=[color], s=30, alpha=0.7, label=f"簇 {label} ({np.sum(mask)}个)")
+            ax3.scatter(coords_2d[mask, 0], coords_2d[mask, 1], c=[color], s=2, alpha=0.7, label=f"簇 {label} ({np.sum(mask)}个)")
 
     ax3.set_xlabel("第一主成分")
     ax3.set_ylabel("第二主成分")
