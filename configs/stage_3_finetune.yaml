@@ -6,10 +6,10 @@ stage: finetune
 # Hydra Configuration
 hydra:
   run:
-    dir: outputs/stage_3_finetune/${now:%Y-%m-%d}/${now:%H-%M-%S}-batch=${training.batch_size},lr=${training.learning_rate},tag=${tag}
+    dir: outputs/stage_3_finetune/${now:%Y-%m-%d}/${now:%H-%M-%S}-MODEL=<|${extract_model_config:${training.batch_size},${training.learning_rate},${tag}}|>-DATA=<|${extract_data_config:${dataset.data_path}}|>
   sweep:
     dir: outputs/stage_3_finetune
-    subdir: ${now:%Y-%m-%d}/${now:%H-%M-%S}-batch=${training.batch_size},lr=${training.learning_rate}-${hydra.job.override_dirname}
+    subdir: ${now:%Y-%m-%d}/${now:%H-%M-%S}-MODEL=<|${extract_model_config:${training.batch_size},${training.learning_rate},${tag}}|>-DATA=<|${extract_data_config:${dataset.data_path}}|>
   job:
     config:
       override_dirname:
@@ -27,15 +27,11 @@ defaults:
   - training: qwen_3_1.7b
 
 
-# Model configuration
-# model:
-#   name: "meta-llama/Llama-2-7b-hf"
-
 output_dir: ${hydra:run.dir}
 
 # Dataset configuration - 使用选择后的数据
 dataset:
-  data_path: "outputs/stage_2_selection/2025-08-09/13-27-39-lr=1e-3/selected_data.jsonl"
+  data_path: "outputs/stage_2_selection/2025-08-11/03-52-40-batch=8_lr=0.001_loss=beta_moment_matching_tag=none/selected_data.jsonl"
   max_sequence_length: 1024
   processing_num_workers: 10
   overwrite_cache: false

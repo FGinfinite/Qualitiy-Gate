@@ -21,7 +21,7 @@ hydra:
 
 # Required: Directory containing router_data files
 # Example: outputs/stage_2_selection/2025-08-11/03-52-40-batch=8_lr=0.001_loss=beta_moment_matching_tag=none/router_data
-router_data_dir: "outputs/stage_2_selection/2025-08-11/03-52-40-batch=8_lr=0.0001_loss=beta_moment_matching_tag=none/router_data"
+router_data_dir: "outputs/stage_2_selection/2025-08-11/03-52-40-batch=8_lr=0.0003_loss=sigmoid_tag=none/router_data"
 
 # Data selection percentage (0.05 means select top 5% of the data)
 selection_percentage: 0.05
@@ -35,8 +35,8 @@ clustering_method: "kmeans"
 # Clustering parameters
 clustering_params:
   # K-Means specific parameters
-  auto_k: true  # Automatically determine k using Elbow method
-  k: null  # Manual k value (only used if auto_k=false)
+  auto_k: false  # Automatically determine k using Elbow method
+  k: 26  # Manual k value (only used if auto_k=false)
   k_range: [20, 100]  # k search range for Elbow method
   max_iters: 300  # Maximum iterations
   

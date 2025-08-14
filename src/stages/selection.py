@@ -96,8 +96,6 @@ def calculate_quality_score_from_gates(
     return final_quality_score
 
 
-
-
 def load_router_data(router_data_path: str) -> dict:
     """
     加载保存的完整路由数据

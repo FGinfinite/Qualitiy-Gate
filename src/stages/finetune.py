@@ -257,9 +257,8 @@ def finetune(cfg: DictConfig) -> None:
         raise
 
     # 11. 保存最终模型
-    if local_rank == 0:
-        log.info(f"正在将最终的 LoRA 适配器保存到 {cfg.output_dir}")
-        trainer.save_model(cfg.output_dir)
+    log.info(f"正在将最终的 LoRA 适配器保存到 {cfg.output_dir}")
+    trainer.save_model(cfg.output_dir)
 
     log.info("--- 阶段 3：LoRA微调完成 ---")
 

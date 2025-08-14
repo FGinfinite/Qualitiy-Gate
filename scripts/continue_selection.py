@@ -48,16 +48,6 @@ def setup_logging(cfg: DictConfig):
     logging.basicConfig(level=level, format="[%(asctime)s][%(name)s][%(levelname)s] - %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
 
 
-
-
-
-
-
-
-
-
-
-
 def generate_output_path(router_data_dir: str) -> str:
     """
     根据router_data_dir自动生成output_path

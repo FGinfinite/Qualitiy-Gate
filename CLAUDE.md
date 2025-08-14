@@ -360,17 +360,26 @@ model.config.lambda_var = 0.1
 
 ### 📂 Root Directory
 - `pyproject.toml` - Python project configuration with dependencies and build settings
+- `uv.lock` - UV lock file for reproducible dependency management
 - `TODO` - Development task tracking and progress notes
 - `CLAUDE.md` - This file: comprehensive project documentation and AI guidance
+- `README.md` - Project overview and quick start guide
+- `笔记.md` - Chinese development notes and documentation
 
 ### 📂 configs/
 Configuration files for different pipeline stages using Hydra framework:
 - `stage_1_pretrain.yaml` - Router training configuration (PEFT mode, learning rates, quality loss)
 - `stage_2_selection.yaml` - Data selection configuration (clustering methods, selection ratios)
 - `stage_3_finetune.yaml` - Target model fine-tuning configuration (LoRA parameters)
-- `stage_4_evaluate.yaml` - Model evaluation configuration (lm-eval settings)
+- `batch_selection.yaml` - Batch data selection configuration for processing multiple experiments
 - `continue_selection.yaml` - Standalone clustering selection script configuration
-- `accelerate_config_*.yaml` - Multi-GPU distributed training configurations
+- `accelerate_config/` - Multi-GPU distributed training configurations:
+  - `DDP.yaml` - Distributed Data Parallel configuration
+  - `FSDP.yaml` - Fully Sharded Data Parallel configuration
+  - `SINGLE.yaml` - Single GPU configuration
+- `training/` - Model-specific training configurations:
+  - `llama_2_7b.yaml` - Llama-2-7B training parameters
+  - `qwen_3_1.7b.yaml` - Qwen-3-1.7B training parameters (newly added)
 
 ### 📂 src/
 Main source code organized by functionality:
@@ -407,15 +416,17 @@ Pipeline stage implementations following the four-stage architecture:
 - `pretrain.py` - Stage 1 implementation: Select-MoE router pretraining with quality loss
 - `selection.py` - Stage 2 implementation: **router inference and data computation only** (selection logic moved to `src/selection/`)
 - `finetune.py` - Stage 3 implementation: target model LoRA fine-tuning with selected data
-- `evaluation.py` - Stage 4 implementation: model performance evaluation using lm-eval
 - `__init__.py` - Stages package initialization and exports
 
 #### 📂 src/training/
 Training utilities and distributed computing support:
 - `full_rank_finetuning.py` - Full-rank weight loading and saving utilities for router training
-- `__init__.py` - Training package initialization and exports
 
 #### 📂 src/utils/
+Utility functions for various system operations:
+- `hydra_resolvers.py` - Custom Hydra resolvers for configuration management
+- `logging_utils.py` - Enhanced logging utilities and configuration
+- `tools.py` - General utility functions and tools
 - `__init__.py` - Utilities package initialization and exports
 
 ### 📂 scripts/
@@ -428,18 +439,70 @@ Executable scripts for various operations:
 - `batch_selection.py` - **Batch data selection script** (Stage 2c: processes multiple experiments automatically)
 - `convert_olmoe_to_select_moe.py` - Model conversion from OLMoE to Select-MoE format
 - `compare_converted_model.py` - Model conversion verification and comparison
-- `validate_gpu_silhouette.py` - GPU silhouette coefficient implementation validation
+- `convert.sh` - Shell script wrapper for model conversion operations
+
+### 📂 docs/
+Comprehensive project documentation:
+- `README_continue_selection.md` - Detailed guide for standalone data selection scripts
+- `custom_loss_fn.md` - Documentation for custom loss function implementations
+- `docs.md` - General project documentation and guides
+- `gpu_fps_fixes_summary.md` - GPU performance optimization and fixes summary
+- `router_data_format.md` - Router data format specifications and examples
+
+### 📂 examples/
+Example scripts and analysis tools:
+- `comprehensive_analysis.py` - Data analysis and visualization tools for router outputs
+- `visualize_custom_loss.py` - Visualization tools for custom loss function analysis
+- `README.md` - Examples documentation and usage instructions
 
 ### 📂 ref_model/
 Reference model implementations for comparison and development:
-- `olmoe/` - Original OLMoE model implementation and configuration
-- `moe_plus_plus/` - MoE++ model reference implementation
+- `olmoe/` - Original OLMoE model implementation and configuration:
+  - `configuration_olmoe.py` - OLMoE configuration class
+  - `modeling_olmoe.py` - OLMoE model implementation
+  - `__init__.py` - OLMoE package initialization
+- `moe_plus_plus/` - MoE++ model reference implementation:
+  - `configuration_moe_plus_plus.py` - MoE++ configuration class
+  - `modeling_moe_plus_plus.py` - MoE++ model implementation
+  - `moe_plus_plus_layer.py` - MoE++ layer implementations
 
-### 📂 examples/
-- `comprehensive_analysis.py` - Data analysis and visualization tools for router outputs
+### 📂 dataset/
+Training and evaluation datasets:
+- `train/processed/` - Preprocessed training data:
+  - `cot/cot_data.jsonl` - Chain-of-thought dataset
+  - `dolly/dolly_data.jsonl` - Dolly instruction dataset
+  - `flan_v2/flan_v2_data.jsonl` - FLAN-v2 dataset
+  - `oasst1/` - OpenAssistant dataset with variants
+- `eval/` - Evaluation datasets:
+  - `bbh/` - Big Bench Hard evaluation data
+  - `mmlu/` - MMLU evaluation data
+  - `tydiqa/` - TyDiQA evaluation data
+- `selected_data/` - Pre-selected data samples for various tasks and seeds
+
+### 📂 converted_models/
+Model conversion outputs:
+- `select_moe_converted_OLMoE-1B-7B-0125/` - Converted Select-MoE model files
+
+### 📂 outputs/
+Pipeline execution outputs organized by stage and timestamp:
+- `stage_1_pretrain/` - Router pretraining outputs with model weights and logs
+- `stage_2_selection/` - Router data computation outputs with router data files
+- `stage_3_finetune/` - Target model fine-tuning outputs with LoRA checkpoints
+- `stage_4_eval/` - Model evaluation results
+- `continue_selection/` - Standalone selection script outputs
+- `batch_selection/` - Batch processing outputs with reports
+- `visual_figs/` - Generated analysis figures and visualizations
 
 ### 📂 tools/
+Development and system tools:
 - `install.sh` - Development environment setup and tool installation script
+- `chsrc` - Chinese source configuration tool
+
+### 📂 LESS/
+LESS (Low-rank Expert Selection System) reference implementation:
+- Complete reference implementation with evaluation scripts
+- Training utilities and data processing tools
+- Evaluation benchmarks for multiple tasks
 
 ### Key Entry Points
 - `src/main.py` - Main pipeline coordinator with Hydra configuration management

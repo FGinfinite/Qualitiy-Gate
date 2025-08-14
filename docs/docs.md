@@ -290,6 +290,18 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 bash scripts/run_stage_3.sh \
 **执行示例**:
 ```bash
 # MMLU评估
+CUDA_VISIBLE_DEVICES=1,3 accelerate launch -m lm_eval --model hf \
+    --model_args pretrained=Qwen/Qwen3-1.7B,peft="outputs/stage_3_finetune/2025-08-14/03-19-50-MODEL=<|batch=128_lr=2e-05_tag=SE_qwen|>-DATA=<|03-52-40-batch=8_lr=0.001_loss=beta_moment_matching_tag=none|>/checkpoint-424" \
+    --tasks mmlu \
+    --batch_size auto \
+    --output_path outputs/stage_4_eval
+
+CUDA_VISIBLE_DEVICES=1,3 accelerate launch -m lm_eval --model hf \
+    --model_args pretrained=Qwen/Qwen3-1.7B \
+    --tasks mmlu \
+    --batch_size auto \
+    --output_path outputs/stage_4_eval
+
 CUDA_VISIBLE_DEVICES=0,1,2,3 accelerate launch -m lm_eval --model hf \
     --model_args pretrained=meta-llama/Llama-2-7b-hf,peft=outputs/stage_3_finetune/2025-07-18/01-01-10/checkpoint-1804 \
     --tasks mmlu \

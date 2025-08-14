@@ -53,6 +53,75 @@ def extract_config_from_path(checkpoint_path: str) -> str:
         return "unknown"
 
 
+def extract_data_timestamp(data_path: str) -> str:
+    """
+    Extract timestamp from dataset data path.
+
+    Example: outputs/stage_2_selection/2025-08-11/03-52-40-batch=8_lr=0.001_loss=beta_moment_matching_tag=none/selected_data.jsonl
+    Returns: 03-52-40
+    """
+    try:
+        # Split by '/' and find the timestamp part (format: HH-MM-SS)
+        parts = data_path.split("/")
+        for part in parts:
+            # Look for pattern HH-MM-SS at the beginning
+            if re.match(r"^\d{2}-\d{2}-\d{2}", part):
+                timestamp_match = re.match(r"^(\d{2}-\d{2}-\d{2})", part)
+                if timestamp_match:
+                    return timestamp_match.group(1)
+        return "unknown"
+    except Exception:
+        return "unknown"
+
+
+def extract_data_config(data_path: str) -> str:
+    """
+    Extract configuration parameters from dataset data path.
+
+    Example: outputs/stage_2_selection/2025-08-11/03-52-40-batch=8_lr=0.001_loss=beta_moment_matching_tag=none/selected_data.jsonl
+    Returns: 03-52-40-batch=8_lr=0.001_loss=beta_moment_matching_tag=none
+    """
+    try:
+        # Split by '/' and find the directory with timestamp and config
+        parts = data_path.split("/")
+        for part in parts:
+            # Look for pattern HH-MM-SS-config_params
+            if re.match(r"^\d{2}-\d{2}-\d{2}-", part):
+                return part
+        return "unknown"
+    except Exception:
+        return "unknown"
+
+
+def extract_model_config(batch_size: str, learning_rate: str, tag: str, model_name: str = "") -> str:
+    """
+    Create model configuration string from training parameters.
+
+    Args:
+        batch_size: Training batch size
+        learning_rate: Learning rate
+        tag: Training tag
+        model_name: Model name (optional, for future use)
+
+    Returns:
+        Formatted string like: batch=128_lr=2e-05_tag=SE_qwen
+    """
+    try:
+        # Convert learning rate to scientific notation if it's a float
+        try:
+            lr_float = float(learning_rate)
+            if lr_float < 0.001:
+                lr_str = f"{lr_float:.0e}"
+            else:
+                lr_str = str(learning_rate)
+        except (ValueError, TypeError):
+            lr_str = str(learning_rate)
+
+        return f"batch={batch_size}_lr={lr_str}_tag={tag}"
+    except Exception:
+        return f"batch={batch_size}_lr={learning_rate}_tag={tag}"
+
+
 def register_custom_resolvers():
     """
     Register all custom Hydra resolvers.
@@ -109,13 +178,22 @@ def register_custom_resolvers():
 
     OmegaConf.register_new_resolver("extract_tag", extract_tag_from_path, use_cache=True)
 
+    # Register new data path resolvers
+    OmegaConf.register_new_resolver("extract_data_timestamp", extract_data_timestamp, use_cache=True)
+    OmegaConf.register_new_resolver("extract_data_config", extract_data_config, use_cache=True)
+    OmegaConf.register_new_resolver("extract_model_config", extract_model_config, use_cache=True)
+
 
 if __name__ == "__main__":
     # Test the resolver functions
     test_path = "outputs/stage_1_pretrain/2025-08-10/03-42-54-batch=8_lr=0.001_loss=beta_moment_matching_tag=none/full_rank_weights.pt"
+    test_data_path = "outputs/stage_2_selection/2025-08-11/03-52-40-batch=8_lr=0.001_loss=beta_moment_matching_tag=none/selected_data.jsonl"
 
     print("Testing resolver functions:")
     print(f"Full config: {extract_config_from_path(test_path)}")
+    print(f"Data timestamp: {extract_data_timestamp(test_data_path)}")
+    print(f"Data config: {extract_data_config(test_data_path)}")
+    print(f"Model config: {extract_model_config('128', '2e-05', 'SE_qwen')}")
 
     # Register resolvers for testing
     register_custom_resolvers()
@@ -126,11 +204,16 @@ if __name__ == "__main__":
     config = OmegaConf.create(
         {
             "test_path": test_path,
+            "test_data_path": test_data_path,
             "batch": "${extract_batch:${test_path}}",
             "lr": "${extract_lr:${test_path}}",
             "loss": "${extract_loss:${test_path}}",
             "tag": "${extract_tag:${test_path}}",
             "full_config": "${extract_config:${test_path}}",
+            "data_timestamp": "${extract_data_timestamp:${test_data_path}}",
+            "data_config": "${extract_data_config:${test_data_path}}",
+            "model_config": "${extract_model_config:128,2e-05,SE_qwen}",
+            "full_format": "MODEL=<|${extract_model_config:128,2e-05,SE_qwen}|>-DATA=<|${extract_data_config:${test_data_path}}|>",
         }
     )
 
