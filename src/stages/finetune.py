@@ -67,7 +67,8 @@ def get_model_and_tokenizer(
     # 加载分词器
     tokenizer = AutoTokenizer.from_pretrained(cfg.training.model.name)
     if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
+        # 添加特殊的填充token，而不是使用eos_token
+        tokenizer.add_special_tokens({"pad_token": "<pad>"})
 
     return model, tokenizer
 
@@ -157,14 +158,39 @@ def finetune(cfg: DictConfig) -> None:
     log.info("PEFT 模型已创建。可训练参数：")
     model.print_trainable_parameters()
 
+    # 4. 调整embedding大小并处理梯度（匹配LESS项目的逻辑）
+    from peft import PeftModel
+
+    # 检查是否需要调整embedding大小
+    embedding_size = model.get_input_embeddings().weight.shape[0]
+    if len(tokenizer) > embedding_size:
+        log.info(f"调整embedding大小: {embedding_size} -> {len(tokenizer)}")
+        model.resize_token_embeddings(len(tokenizer))
+        # 如果是PEFT模型且调整了embedding，需要禁用embedding的梯度
+        if isinstance(model, PeftModel):
+            model.get_input_embeddings().weight.requires_grad = False
+            model.get_output_embeddings().weight.requires_grad = False
+            log.info("已禁用embedding层的梯度更新")
+
+    # 启用输入梯度（用于gradient checkpointing）
+    if hasattr(model, "enable_input_require_grads"):
+        model.enable_input_require_grads()
+    else:
+
+        def make_inputs_require_grad(module, input, output):
+            output.requires_grad_(True)
+
+        model.get_input_embeddings().register_forward_hook(make_inputs_require_grad)
+    log.info("已启用输入梯度计算")
+
     # 确保 `use_cache` 已禁用以保证训练兼容性
     model.config.use_cache = False
 
-    # 4. 加载并准备选择后的数据集
+    # 5. 加载并准备选择后的数据集
     log.info("正在加载选择后的数据集...")
     dataset = load_selected_data(cfg.dataset.data_path)
 
-    # 5. 编码数据集
+    # 6. 编码数据集
     tokenized_dataset = encode_data(
         dataset,
         tokenizer,
@@ -193,11 +219,13 @@ def finetune(cfg: DictConfig) -> None:
         "learning_rate": cfg.training.learning_rate,
         "lr_scheduler_type": cfg.training.scheduler,
         "warmup_ratio": cfg.training.warmup_ratio,
+        "weight_decay": cfg.training.weight_decay,
         "logging_dir": f"{cfg.output_dir}/logs",
         "logging_steps": 10,
         "save_strategy": "epoch",
         "report_to": "none",
         "bf16": True,
+        "tf32": False,  # 禁用TensorFloat-32以匹配LESS配置
         "dataloader_drop_last": True,
         "remove_unused_columns": False,
         # 提高稳定性的设置
