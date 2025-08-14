@@ -6,10 +6,10 @@ stage: pretrain
 # Hydra Configuration
 hydra:
   run:
-    dir: outputs/stage_1_pretrain/${now:%Y-%m-%d}/${now:%H-%M-%S}-batch=${training.batch_size}_lr=${training.learning_rate}_loss=${training.quality_loss_type}_tag=${tag}
+    dir: outputs/stage_1_pretrain/${now:%Y-%m-%d}/${now:%H-%M-%S}-batch=${training.batch_size}_lr=${training.learning_rate}_loss=${training.quality_loss_type}_lossWeight=${training.quality_loss_weight}_tag=${tag}
   sweep:
     dir: outputs/stage_1_pretrain
-    subdir: ${now:%Y-%m-%d}/${now:%H-%M-%S}-batch=${training.batch_size}_lr=${training.learning_rate}_loss=${training.quality_loss_type}_tag=${tag}
+    subdir: ${now:%Y-%m-%d}/${now:%H-%M-%S}-batch=${training.batch_size}_lr=${training.learning_rate}_loss=${training.quality_loss_type}_lossWeight=${training.quality_loss_weight}_tag=${tag}
   job:
     config:
       override_dirname:
@@ -39,13 +39,14 @@ dataset:
   subset_ratio: 0.05
   seed: 42
   shuffle: true
-  max_sequence_length: 1024
+  max_sequence_length: 2048
   processing_num_workers: 10
   overwrite_cache: false
 
 # Training configuration
 training:
-  batch_size: 8
+  batch_size: 16  # 总批次大小，会根据设备数自动分配
+  per_device_batch_size: 1  # 每设备批次大小，可配置
   learning_rate: 3e-4
   epochs: 4
   optimizer: "AdamW"

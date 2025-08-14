@@ -1,3 +1,4 @@
+import logging
 import os
 from typing import Tuple
 
@@ -61,6 +62,51 @@ def get_peft_config(cfg: DictConfig) -> LoraConfig:
 
 
 # ---------------------------------------------------------------------------
+# 批次大小验证函数
+# ---------------------------------------------------------------------------
+
+
+def validate_batch_size_configuration(total_batch_size: int, per_device_batch_size: int, world_size: int, log) -> int:
+    """
+    验证批次大小配置并计算梯度累积步数
+
+    Args:
+        total_batch_size: 目标总批次大小
+        per_device_batch_size: 每设备批次大小
+        world_size: 分布式训练的世界大小
+        log: 日志记录器
+
+    Returns:
+        gradient_accumulation_steps: 梯度累积步数
+
+    Raises:
+        SystemExit: 当批次大小配置无效时退出
+    """
+    effective_batch_size = per_device_batch_size * world_size
+
+    if total_batch_size % effective_batch_size != 0:
+        log.error("批次大小配置错误:")
+        log.error(f"  总批次大小: {total_batch_size}")
+        log.error(f"  每设备批次大小: {per_device_batch_size}")
+        log.error(f"  世界大小: {world_size}")
+        log.error(f"  有效批次大小: {effective_batch_size}")
+        log.error(f"总批次大小 ({total_batch_size}) 必须能被有效批次大小 ({effective_batch_size}) 整除")
+        log.error("请调整 training.batch_size 或 training.per_device_batch_size 配置")
+        raise SystemExit(1)
+
+    gradient_accumulation_steps = total_batch_size // effective_batch_size
+
+    log.info("批次大小配置验证通过:")
+    log.info(f"  总批次大小: {total_batch_size}")
+    log.info(f"  每设备批次大小: {per_device_batch_size}")
+    log.info(f"  世界大小: {world_size}")
+    log.info(f"  有效批次大小: {effective_batch_size}")
+    log.info(f"  梯度累积步数: {gradient_accumulation_steps}")
+
+    return gradient_accumulation_steps
+
+
+# ---------------------------------------------------------------------------
 # 核心数据加载和模型初始化（重构后）
 # ---------------------------------------------------------------------------
 
@@ -120,6 +166,22 @@ def get_model_and_tokenizer(
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
+    # 调整embedding大小
+    embedding_size = model.get_input_embeddings().weight.shape[0]
+    if len(tokenizer) > embedding_size:
+        log = logging.getLogger(__name__)
+        log.info(f"调整embedding大小: {embedding_size} -> {len(tokenizer)}")
+        model.resize_token_embeddings(len(tokenizer))
+
+    # 启用gradient checkpointing
+    model.gradient_checkpointing_enable()
+    log = logging.getLogger(__name__)
+    log.info("已启用gradient checkpointing")
+
+    # 启用输入梯度计算
+    model.enable_input_require_grads()
+    log.info("已启用输入梯度计算")
+
     return model, tokenizer
 
 
@@ -136,6 +198,12 @@ def pretrain(cfg: DictConfig) -> None:
     log, hydra_callback = setup_training_logging(__name__)
 
     log.info("--- 开始阶段 1：Select-MoE 预训练 ---")
+
+    # 获取分布式训练信息
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    world_size = int(os.environ.get("WORLD_SIZE", 1))
+
+    log.info(f"分布式训练信息: local_rank={local_rank}, world_size={world_size}")
 
     accelerator = Accelerator()
     if cfg.training.gpu_grab.grab:
@@ -188,15 +256,21 @@ def pretrain(cfg: DictConfig) -> None:
 
     data_collator = DataCollatorForSeq2Seq(tokenizer=tokenizer, model=model, padding="longest")
 
-    # 7. 配置训练参数
+    # 7. 验证并计算批次大小配置
+    per_device_batch_size = cfg.training.per_device_batch_size
+    gradient_accumulation_steps = validate_batch_size_configuration(cfg.training.batch_size, per_device_batch_size, world_size, log)
+
+    # 8. 配置训练参数
     # LoRA模式：保存中间权重；全秩微调和routing_only：不保存中间权重
     save_strategy = "epoch" if cfg.training.peft_mode == "lora" else "no"
 
     training_args = TrainingArguments(
         output_dir=cfg.output_dir,
         num_train_epochs=cfg.training.epochs,
-        per_device_train_batch_size=cfg.training.batch_size,
+        per_device_train_batch_size=per_device_batch_size,
+        gradient_accumulation_steps=gradient_accumulation_steps,
         learning_rate=cfg.training.learning_rate,
+        gradient_checkpointing=True,
         logging_dir=f"{cfg.output_dir}/logs",
         logging_steps=10,
         save_strategy=save_strategy,
@@ -238,6 +312,10 @@ def pretrain(cfg: DictConfig) -> None:
     # 9. 保存最终模型
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:
+        # 保存分词器
+        tokenizer.save_pretrained(cfg.output_dir)
+        log.info(f"分词器已保存到 {cfg.output_dir}")
+
         if cfg.training.peft_mode == "lora":
             log.info(f"正在将最终的 PEFT 适配模型保存到 {cfg.output_dir}")
             trainer.save_model(cfg.output_dir)
