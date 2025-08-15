@@ -31,15 +31,12 @@ def get_model_and_tokenizer(cfg: DictConfig) -> Tuple[SelectMoeForCausalLM, Auto
     # 加载预转换的Select-MoE模型
     model = SelectMoeForCausalLM.from_pretrained(cfg.selector_model.path, **model_kwargs)
 
-    # 加载全秩微调权重
-    load_full_rank_weights(model, cfg.model_checkpoint_path)
+    # 加载全秩微调权重和分词器
+    tokenizer = load_full_rank_weights(model, cfg.model_checkpoint_path)
 
     model.eval()
 
-    # 加载分词器
-    tokenizer = AutoTokenizer.from_pretrained(cfg.selector_model.tokenizer_name)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
+    assert tokenizer is not None, "分词器加载失败，请检查模型路径和配置"
 
     return model, tokenizer
 

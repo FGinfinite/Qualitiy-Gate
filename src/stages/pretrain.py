@@ -312,17 +312,16 @@ def pretrain(cfg: DictConfig) -> None:
     # 9. 保存最终模型
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:
-        # 保存分词器
-        tokenizer.save_pretrained(cfg.output_dir)
-        log.info(f"分词器已保存到 {cfg.output_dir}")
-
         if cfg.training.peft_mode == "lora":
+            # 保存分词器
+            tokenizer.save_pretrained(cfg.output_dir)
+            log.info(f"分词器已保存到 {cfg.output_dir}")
             log.info(f"正在将最终的 PEFT 适配模型保存到 {cfg.output_dir}")
             trainer.save_model(cfg.output_dir)
         elif cfg.training.peft_mode == "full_rank":
             log.info(f"正在将路由全秩微调权重保存到 {cfg.output_dir}")
             full_rank_weights_path = os.path.join(cfg.output_dir, "full_rank_weights.pt")
-            save_full_rank_weights(model, ROUTING_PATTERNS, full_rank_weights_path, mode="parameter")
+            save_full_rank_weights(model, ROUTING_PATTERNS, full_rank_weights_path, mode="parameter", tokenizer=tokenizer)
 
     log.info("--- 阶段 1：预训练完成 ---")
 

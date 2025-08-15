@@ -98,15 +98,16 @@ def setup_full_rank_training(model: torch.nn.Module, target_patterns: List[str],
     return trainable_params
 
 
-def save_full_rank_weights(model: torch.nn.Module, target_patterns: List[str], save_path: str, mode: str = "module") -> None:
+def save_full_rank_weights(model: torch.nn.Module, target_patterns: List[str], save_path: str, mode: str = "module", tokenizer=None) -> None:
     """
-    保存全秩微调的模块权重。
+    保存全秩微调的模块权重和分词器。
 
     Args:
         model: PyTorch模型
         target_patterns: 目标模块名称模式列表，或者参数名模式列表
         save_path: 保存路径
         mode: 匹配模式，"module"（模块匹配）或"parameter"（参数名匹配）
+        tokenizer: 可选的分词器，如果提供则一并保存
     """
     # 收集目标参数的状态字典
     full_rank_state_dict = {}
@@ -141,20 +142,34 @@ def save_full_rank_weights(model: torch.nn.Module, target_patterns: List[str], s
         **metadata,
     }
 
-    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    # 保存分词器（如果提供）
+    save_dir = os.path.dirname(save_path)
+    os.makedirs(save_dir, exist_ok=True)
+
+    if tokenizer is not None:
+        tokenizer.save_pretrained(save_dir)
+        checkpoint["tokenizer_saved"] = True
+        log = logging.getLogger(__name__)
+        log.info(f"分词器已保存到 {save_dir}")
+    else:
+        checkpoint["tokenizer_saved"] = False
+
     torch.save(checkpoint, save_path)
 
     log = logging.getLogger(__name__)
     log.info(f"权重已保存到: {save_path} (模式: {mode}, 参数数量: {len(full_rank_state_dict)})")
 
 
-def load_full_rank_weights(model: torch.nn.Module, checkpoint_path: str) -> None:
+def load_full_rank_weights(model: torch.nn.Module, checkpoint_path: str):
     """
-    加载全秩微调的权重到预训练模型。
+    加载全秩微调的权重到预训练模型，并返回分词器（如果存在）。
 
     Args:
         model: 预训练的PyTorch模型
         checkpoint_path: 权重检查点路径
+
+    Returns:
+        tokenizer: 如果checkpoint中保存了分词器则返回，否则返回None
     """
     if not os.path.exists(checkpoint_path):
         raise FileNotFoundError(f"检查点文件未找到: {checkpoint_path}")
@@ -190,6 +205,22 @@ def load_full_rank_weights(model: torch.nn.Module, checkpoint_path: str) -> None
 
     log = logging.getLogger(__name__)
     log.info(f"成功加载 {loaded_count}/{len(full_rank_weights)} 个权重参数 (模式: {mode})")
+
+    # 尝试加载分词器
+    tokenizer = None
+    if checkpoint.get("tokenizer_saved", False):
+        checkpoint_dir = os.path.dirname(checkpoint_path)
+        try:
+            from transformers import AutoTokenizer
+
+            tokenizer = AutoTokenizer.from_pretrained(checkpoint_dir)
+            if tokenizer.pad_token is None:
+                tokenizer.pad_token = tokenizer.eos_token
+            log.info(f"成功从 {checkpoint_dir} 加载分词器")
+        except Exception as e:
+            log.warning(f"无法从 {checkpoint_dir} 加载分词器: {e}")
+
+    return tokenizer
 
 
 def print_trainable_parameters(model: torch.nn.Module) -> None:
