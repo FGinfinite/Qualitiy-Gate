@@ -1,8 +1,8 @@
-# Select-MoE: 基于混合专家模型的数据选择策略
+# MyGO: using MoE to select your Good and Omnigenous data
 
 ## 项目简介
 
-本项目是一个创新的数据选择实验，旨在探索一种利用混合专家模型（Mixture-of-Experts, MoE）进行高效数据筛选的方法。核心思想是：
+本项目 (MyGO) 是一个创新的数据选择实验，旨在探索一种利用混合专家模型（Mixture-of-Experts, MoE）进行高效数据筛选的方法。核心思想是：
 
 1. **预热阶段**: 对小型 Select-MoE 模型的 Router（路由器）进行预热微调，使其具备数据质量判别能力
 2. **选择阶段**: 利用预热的 Router 为大规模数据集打分，通过GPU加速聚类算法筛选多样化高质量数据子集  
