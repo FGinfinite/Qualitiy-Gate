@@ -160,6 +160,8 @@ def get_model_and_tokenizer(
             model.config.w_var = params.w_var
         if hasattr(params, "lambda_var"):
             model.config.lambda_var = params.lambda_var
+        if hasattr(params, "sample_wise_averaging"):
+            model.config.sample_wise_averaging = params.sample_wise_averaging
 
     # 加载分词器（使用原始模型名称）
     tokenizer = AutoTokenizer.from_pretrained(cfg.selector_model.tokenizer_name)

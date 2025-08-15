@@ -52,6 +52,8 @@ class SelectMoeConfig(OlmoeConfig):
         w_var: float = 1.0,
         # Mean-variance regularization parameters
         lambda_var: float = 0.1,
+        # Loss averaging strategy
+        sample_wise_averaging: bool = False,
         # Debug configuration
         quality_loss_debug: bool = False,
         **kwargs,
@@ -72,6 +74,7 @@ class SelectMoeConfig(OlmoeConfig):
         self.w_mean = w_mean
         self.w_var = w_var
         self.lambda_var = lambda_var
+        self.sample_wise_averaging = sample_wise_averaging
         self.quality_loss_debug = quality_loss_debug
 
         # 确保默认输出router logits用于MoE训练
@@ -618,15 +621,41 @@ def quality_classification_loss(
 
             # 只计算有效token的损失
             masked_loss = layer_loss_raw * attention_mask_expanded.float()
-            valid_tokens = attention_mask_expanded.sum()
 
-            if valid_tokens > 0:
-                layer_loss = masked_loss.sum() / valid_tokens
+            # 根据配置选择平均化策略
+            if hasattr(config, "sample_wise_averaging") and config.sample_wise_averaging:
+                # Sample-wise averaging: 先计算每个样本的平均损失，再对样本求平均
+                batch_size = layer_loss_raw.shape[0]
+                sample_losses = []
+
+                for i in range(batch_size):
+                    sample_mask = attention_mask_expanded[i]
+                    sample_loss = masked_loss[i]
+                    valid_tokens_in_sample = sample_mask.sum()
+
+                    if valid_tokens_in_sample > 0:
+                        sample_avg_loss = sample_loss.sum() / valid_tokens_in_sample
+                        sample_losses.append(sample_avg_loss)
+
+                if sample_losses:
+                    layer_loss = torch.stack(sample_losses).mean()
+                else:
+                    layer_loss = torch.tensor(0.0, device=quality_score.device)
+
+                if debug:
+                    print(f"使用Sample-wise平均化策略，有效样本数量: {len(sample_losses)}")
             else:
-                layer_loss = torch.tensor(0.0, device=quality_score.device)
+                # Token-wise averaging: 直接对所有有效token求和平均 (当前方式)
+                valid_tokens = attention_mask_expanded.sum()
 
-            if debug:
-                print(f"有效token数量: {valid_tokens.item()}")
+                if valid_tokens > 0:
+                    layer_loss = masked_loss.sum() / valid_tokens
+                else:
+                    layer_loss = torch.tensor(0.0, device=quality_score.device)
+
+                if debug:
+                    print(f"使用Token-wise平均化策略，有效token数量: {valid_tokens.item()}")
+
         else:
             # 没有attention_mask时，对所有位置求平均
             layer_loss = layer_loss_raw.mean()
@@ -662,6 +691,25 @@ class SelectMoeForCausalLM(SelectMoePreTrainedModel):
 
         # 初始化权重并应用最终处理
         self.post_init()
+
+    def loss_function(self, logits, labels, vocab_size, **kwargs):
+        """
+        重写损失函数以正确处理填充token。
+        使用ignore_index=-100来忽略填充token的损失计算。
+        """
+        # 移位logits和labels用于因果语言建模
+        shift_logits = logits[..., :-1, :].contiguous()
+        shift_labels = labels[..., 1:].contiguous()
+
+        # 展平token以计算损失
+        shift_logits = shift_logits.view(-1, vocab_size)
+        shift_labels = shift_labels.view(-1)
+
+        # 使用ignore_index=-100忽略填充token
+        loss_fct = nn.CrossEntropyLoss(ignore_index=-100)
+        loss = loss_fct(shift_logits, shift_labels)
+
+        return loss
 
     def get_input_embeddings(self):
         return self.model.embed_tokens

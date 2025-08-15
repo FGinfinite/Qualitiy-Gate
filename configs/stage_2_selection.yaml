@@ -5,7 +5,6 @@ stage: selection
 # 模型配置
 selector_model:
   path: "converted_models/select_moe_converted_OLMoE-1B-7B-0125"
-  tokenizer_name: "allenai/OLMoE-1B-7B-0125"
 
 # Stage 2: Data Selection Configuration
 

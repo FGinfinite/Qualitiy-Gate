@@ -12,11 +12,14 @@ def extract_config_from_path(checkpoint_path: str) -> str:
     """
     Extract configuration information from model checkpoint path.
 
-    Parses paths like:
-    outputs/stage_1_pretrain/2025-08-10/03-42-54-batch=8_lr=0.001_loss=beta_moment_matching_tag=none/full_rank_weights.pt
+    Parses paths with adaptive parameter extraction, supporting formats like:
+    - New format:
+      outputs/stage_1_pretrain/2025-08-10/03-42-54-batch=8_lr=0.001_loss=beta_moment_matching_lossWeight=1_sampleWise=false_tag=none/full_rank_weights.pt
+    - Old format:
+      outputs/stage_1_pretrain/2025-08-10/03-42-54-batch=8_lr=0.001_loss=beta_moment_matching_tag=none/full_rank_weights.pt
 
     Returns a formatted string like:
-    batch=8_lr=0.001_loss=beta_moment_matching_tag=none
+    batch=8_lr=0.001_loss=beta_moment_matching_lossWeight=1_sampleWise=false_tag=none
 
     Args:
         checkpoint_path: Path to the model checkpoint
@@ -31,18 +34,19 @@ def extract_config_from_path(checkpoint_path: str) -> str:
         dir_name = os.path.basename(checkpoint_dir)
 
         # Pattern to match the timestamp-config format:
-        # HH-MM-SS-batch=X_lr=Y_loss=Z_tag=W
-        pattern = r"^\d{2}-\d{2}-\d{2}-(.*)"
+        # HH-MM-SS-param1=value1_param2=value2_...
+        pattern = r"^(\d{2}-\d{2}-\d{2})-(.*)"
         match = re.match(pattern, dir_name)
 
         if match:
             # Extract the config part after the timestamp
-            config_part = match.group(1)
+            config_part = match.group(2)
             return config_part
         else:
             # Fallback: try to extract any config-like patterns from the directory name
             # Look for patterns like key=value connected by underscores
-            config_patterns = re.findall(r"[a-zA-Z_]+=[^_]+", dir_name)
+            # This supports any number of parameters in any order
+            config_patterns = re.findall(r"[a-zA-Z_][a-zA-Z0-9_]*=[^_]+", dir_name)
             if config_patterns:
                 return "_".join(config_patterns)
             else:
@@ -117,7 +121,11 @@ def extract_model_config(batch_size: str, learning_rate: str, tag: str, model_na
         except (ValueError, TypeError):
             lr_str = str(learning_rate)
 
-        return f"batch={batch_size}_lr={lr_str}_tag={tag}"
+        # Use model_name if provided, otherwise create config without it
+        if model_name:
+            return f"batch={batch_size}_lr={lr_str}_tag={tag}_{model_name}"
+        else:
+            return f"batch={batch_size}_lr={lr_str}_tag={tag}"
     except Exception:
         return f"batch={batch_size}_lr={learning_rate}_tag={tag}"
 
@@ -159,8 +167,9 @@ def register_custom_resolvers():
     def extract_loss_from_path(checkpoint_path: str) -> str:
         try:
             config_str = extract_config_from_path(checkpoint_path)
-            # Match loss= followed by anything until _tag= or end of string
-            loss_match = re.search(r"loss=([^_]+(?:_[^=]+)*?)(?=_tag=|$)", config_str)
+            # Updated pattern to handle new format with additional parameters
+            # Match loss= followed by anything until the next parameter (_paramName=) or end of string
+            loss_match = re.search(r"loss=([^_]+(?:_[^=]+)*?)(?=_[a-zA-Z][a-zA-Z0-9_]*=|$)", config_str)
             return loss_match.group(1) if loss_match else "unknown"
         except Exception:
             return "unknown"
@@ -178,6 +187,28 @@ def register_custom_resolvers():
 
     OmegaConf.register_new_resolver("extract_tag", extract_tag_from_path, use_cache=True)
 
+    # Extract loss weight from checkpoint path
+    def extract_loss_weight_from_path(checkpoint_path: str) -> str:
+        try:
+            config_str = extract_config_from_path(checkpoint_path)
+            loss_weight_match = re.search(r"lossWeight=([^_]+)", config_str)
+            return loss_weight_match.group(1) if loss_weight_match else "unknown"
+        except Exception:
+            return "unknown"
+
+    OmegaConf.register_new_resolver("extract_loss_weight", extract_loss_weight_from_path, use_cache=True)
+
+    # Extract sample wise averaging setting from checkpoint path
+    def extract_sample_wise_from_path(checkpoint_path: str) -> str:
+        try:
+            config_str = extract_config_from_path(checkpoint_path)
+            sample_wise_match = re.search(r"sampleWise=([^_]+)", config_str)
+            return sample_wise_match.group(1) if sample_wise_match else "unknown"
+        except Exception:
+            return "unknown"
+
+    OmegaConf.register_new_resolver("extract_sample_wise", extract_sample_wise_from_path, use_cache=True)
+
     # Register new data path resolvers
     OmegaConf.register_new_resolver("extract_data_timestamp", extract_data_timestamp, use_cache=True)
     OmegaConf.register_new_resolver("extract_data_config", extract_data_config, use_cache=True)
@@ -185,9 +216,13 @@ def register_custom_resolvers():
 
 
 if __name__ == "__main__":
-    # Test the resolver functions
-    test_path = "outputs/stage_1_pretrain/2025-08-10/03-42-54-batch=8_lr=0.001_loss=beta_moment_matching_tag=none/full_rank_weights.pt"
-    test_data_path = "outputs/stage_2_selection/2025-08-11/03-52-40-batch=8_lr=0.001_loss=beta_moment_matching_tag=none/selected_data.jsonl"
+    # Test the resolver functions with new format
+    test_path = (
+        "outputs/stage_1_pretrain/2025-08-10/03-42-54-batch=8_lr=0.001_loss=beta_moment_matching_lossWeight=1_sampleWise=false_tag=none/full_rank_weights.pt"
+    )
+    test_data_path = (
+        "outputs/stage_2_selection/2025-08-11/03-52-40-batch=8_lr=0.001_loss=beta_moment_matching_lossWeight=1_sampleWise=false_tag=none/selected_data.jsonl"
+    )
 
     print("Testing resolver functions:")
     print(f"Full config: {extract_config_from_path(test_path)}")
@@ -198,7 +233,7 @@ if __name__ == "__main__":
     # Register resolvers for testing
     register_custom_resolvers()
 
-    # Test individual extractors
+    # Test individual extractors with new format
     from omegaconf import OmegaConf
 
     config = OmegaConf.create(
@@ -208,6 +243,8 @@ if __name__ == "__main__":
             "batch": "${extract_batch:${test_path}}",
             "lr": "${extract_lr:${test_path}}",
             "loss": "${extract_loss:${test_path}}",
+            "loss_weight": "${extract_loss_weight:${test_path}}",
+            "sample_wise": "${extract_sample_wise:${test_path}}",
             "tag": "${extract_tag:${test_path}}",
             "full_config": "${extract_config:${test_path}}",
             "data_timestamp": "${extract_data_timestamp:${test_data_path}}",
