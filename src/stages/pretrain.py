@@ -11,6 +11,7 @@ from transformers import (
     DataCollatorForSeq2Seq,
     Trainer,
     TrainingArguments,
+    set_seed,
 )
 
 from src.data import encode_data, get_data_statistics, load_and_prepare_dataset
@@ -196,10 +197,14 @@ def pretrain(cfg: DictConfig) -> None:
     """
     使用预转换的 Select-MoE 模型进行训练，并使用 PEFT 进行微调。
     """
+    # 设置全局种子以确保实验可复现
+    set_seed(cfg.seed)
+
     # 设置训练日志系统
     log, hydra_callback = setup_training_logging(__name__)
 
     log.info("--- 开始阶段 1：Select-MoE 预训练 ---")
+    log.info(f"使用全局种子: {cfg.seed}")
 
     # 获取分布式训练信息
     local_rank = int(os.environ.get("LOCAL_RANK", 0))

@@ -12,7 +12,7 @@ from transformers import (
     set_seed,
 )
 
-from src.data import encode_data, get_data_statistics, load_selected_data
+from src.data import encode_data, get_data_statistics, load_and_prepare_dataset, load_selected_data
 from src.utils.logging_utils import setup_training_logging
 
 # ---------------------------------------------------------------------------
@@ -126,8 +126,9 @@ def finetune(cfg: DictConfig) -> None:
     log, hydra_callback = setup_training_logging(__name__)
 
     log.info(f"--- 开始阶段 3：{cfg.training.model.name} LoRA 微调 ---")
+    log.info(f"使用全局种子: {cfg.seed}")
 
-    set_seed(cfg.training.seed)
+    set_seed(cfg.seed)
 
     # 获取分布式训练信息
     import os
@@ -186,9 +187,17 @@ def finetune(cfg: DictConfig) -> None:
     # 确保 `use_cache` 已禁用以保证训练兼容性
     model.config.use_cache = False
 
-    # 5. 加载并准备选择后的数据集
-    log.info("正在加载选择后的数据集...")
-    dataset = load_selected_data(cfg.dataset.data_path)
+    # 5. 加载并准备数据集
+    if cfg.dataset.mode == "full":
+        log.info("正在加载全量训练数据集...")
+        dataset = load_and_prepare_dataset(cfg)
+    else:
+        log.info("正在加载选择后的数据集...")
+        dataset = load_selected_data(cfg.dataset.data_path)
+        # 对选择数据也应用shuffle
+        if getattr(cfg.dataset, "shuffle", True):
+            dataset = dataset.shuffle(seed=cfg.seed)
+            log.info(f"已打乱数据集，使用种子: {cfg.seed}")
 
     # 6. 编码数据集
     tokenized_dataset = encode_data(

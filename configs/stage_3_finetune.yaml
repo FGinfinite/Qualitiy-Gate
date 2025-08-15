@@ -6,10 +6,10 @@ stage: finetune
 # Hydra Configuration
 hydra:
   run:
-    dir: outputs/stage_3_finetune/${now:%Y-%m-%d}/${now:%H-%M-%S}-MODEL=<|${extract_model_config:${training.batch_size},${training.learning_rate},${tag}}|>-DATA=<|${extract_data_config:${dataset.data_path}}|>
+    dir: outputs/stage_3_finetune/${now:%Y-%m-%d}/${now:%H-%M-%S}-MODEL=<|${extract_model_config:${training.batch_size},${training.learning_rate},${tag}}|>-DATA=<|${extract_data_config_conditional:${dataset.data_path},${dataset.mode}}|>
   sweep:
     dir: outputs/stage_3_finetune
-    subdir: ${now:%Y-%m-%d}/${now:%H-%M-%S}-MODEL=<|${extract_model_config:${training.batch_size},${training.learning_rate},${tag}}|>-DATA=<|${extract_data_config:${dataset.data_path}}|>
+    subdir: ${now:%Y-%m-%d}/${now:%H-%M-%S}-MODEL=<|${extract_model_config:${training.batch_size},${training.learning_rate},${tag}}|>-DATA=<|${extract_data_config_conditional:${dataset.data_path},${dataset.mode}}|>
   job:
     config:
       override_dirname:
@@ -22,6 +22,9 @@ hydra:
 
 tag: "none"
 
+# Global seed for reproducibility
+seed: 42
+
 defaults:
   - _self_
   - training: qwen_3_1.7b
@@ -29,12 +32,23 @@ defaults:
 
 output_dir: ${hydra:run.dir}
 
-# Dataset configuration - 使用选择后的数据
+# Dataset configuration
 dataset:
+  # For full mode: load from processed datasets
+  data_dir: "dataset/train/processed"
+  dataset_names:
+    - "cot"
+    - "dolly"
+    - "flan_v2"
+    - "oasst1"
+  subset_ratio: 1.0  # Use 100% of data in full mode
+  # For subset mode: load from selected data file
   data_path: "outputs/stage_2_selection/2025-08-11/03-52-40-batch=8_lr=0.001_loss=beta_moment_matching_tag=none/selected_data.jsonl"
   max_sequence_length: 2048
   processing_num_workers: 10
   overwrite_cache: false
+  mode: "subset" # "full" or "subset"
+  shuffle: true # Enable data shuffling
 
 gpu_grab:
   grab: false

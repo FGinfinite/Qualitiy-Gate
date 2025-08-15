@@ -242,7 +242,7 @@ def load_and_prepare_dataset(cfg: DictConfig) -> Dataset:
     data_dir = cfg.dataset.data_dir
     dataset_names = getattr(cfg.dataset, "dataset_names", None)
     sample_percentage = getattr(cfg.dataset, "subset_ratio", 1.0)
-    seed = getattr(cfg.dataset, "seed", 0)
+    seed = getattr(cfg, "seed", 42)  # 使用全局种子
     shuffle = getattr(cfg.dataset, "shuffle", True)
 
     # 加载本地数据集

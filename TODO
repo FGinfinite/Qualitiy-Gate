@@ -18,69 +18,6 @@ LESS是在FLAN V2、CoT、DOLLY、OPEN ASSISTANT 1的四个混合数据集上预
 
 目前约束计算的方式是：在top-k个专家中，垃圾桶专家的概率。如果top-k个专家中是没有垃圾专家的，那么trash_can_ratio就是0，约束值最大。不过这里是否应该设置为计算logits分数softmax后得到的概率，而非只从top-k个专家中计算，这样的话即使top-k个专家没有垃圾专家也能让它得到训练。
 
-def custom_constraint_loss(
-    router_logits: List[torch.Tensor], config: SelectMoeConfig
-) -> torch.Tensor:
-    """
-    Compute custom constraint loss for trash can experts.
-
-    This loss encourages the model to balance between using real experts and trash can experts
-    based on data quality. Higher trash can usage should correlate with lower data quality.
-    """
-    if len(router_logits) == 0:
-        return torch.tensor(
-            0.0, device=next(iter(router_logits)).device if router_logits else "cpu"
-        )
-
-    total_loss = 0.0
-    num_layers = 0
-
-    for layer_router_logits in router_logits:
-        if layer_router_logits is None:
-            continue
-
-        # Get routing probabilities for all experts
-        routing_probs = F.softmax(layer_router_logits, dim=-1)
-
-        # Get top-k routing decisions (actual expert selection)
-        top_k_probs, selected_experts = torch.topk(
-            routing_probs, k=config.num_experts_per_tok, dim=-1
-        )
-
-        # Calculate trash can expert usage ratio
-        # Trash can experts are indices >= config.num_experts
-        trash_can_mask = selected_experts >= config.num_experts
-        trash_can_probs = top_k_probs * trash_can_mask.float()
-        trash_can_ratio = trash_can_probs.sum(dim=-1)  # Shape: (batch_size * seq_len,)
-
-
-        # Beta distribution inspired loss to encourage balanced usage
-        # When trash_can_ratio is too low (high quality data): loss increases
-        # When trash_can_ratio is too high (low quality data): loss decreases
-        alpha = config.trash_can_loss_alpha
-        beta = config.trash_can_loss_beta
-
-        # Clamp ratio to avoid log(0)
-        ratio_clamped = torch.clamp(trash_can_ratio, min=1e-8, max=1.0 - 1e-8)
-
-        if alpha == 1.0:
-            # Simplified form: encourages moderate trash can usage
-            layer_loss = -(beta - 1) * torch.log(ratio_clamped) - torch.log(
-                1 - ratio_clamped
-            )
-        else:
-            # Full beta distribution form
-            layer_loss = -(
-                (alpha - 1) * torch.log(ratio_clamped)
-                + (beta - 1) * torch.log(1 - ratio_clamped)
-            )
-
-        total_loss += layer_loss.mean()
-        num_layers += 1
-
-    return total_loss / max(num_layers, 1)
-
-
 
 LESS的训练设置：
 线性预热，余弦衰减，学习率2e-5，batch size=128，epoch=4，

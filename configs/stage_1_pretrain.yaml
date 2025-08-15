@@ -22,6 +22,9 @@ hydra:
 
 tag: "none"
 
+# Global seed for reproducibility  
+seed: 42
+
 # Model configuration
 selector_model:
   path: "converted_models/select_moe_converted_OLMoE-1B-7B-0125"
@@ -37,7 +40,6 @@ dataset:
     - "flan_v2"
     - "oasst1"
   subset_ratio: 0.05
-  seed: 42
   shuffle: true
   max_sequence_length: 2048
   processing_num_workers: 10

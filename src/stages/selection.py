@@ -8,7 +8,7 @@ import torch
 from omegaconf import DictConfig
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, set_seed
 
 from src.data import load_local_datasets
 from src.models.select_moe import SelectMoeForCausalLM, register_select_moe
@@ -32,7 +32,7 @@ def get_model_and_tokenizer(cfg: DictConfig) -> Tuple[SelectMoeForCausalLM, Auto
     model = SelectMoeForCausalLM.from_pretrained(cfg.selector_model.path, **model_kwargs)
 
     # 加载全秩微调权重和分词器
-    tokenizer = load_full_rank_weights(model, cfg.model_checkpoint_path)
+    tokenizer = load_full_rank_weights(model, os.path.join(cfg.model_checkpoint_path, "full_rank_weights.pt"))
 
     model.eval()
 
@@ -145,8 +145,12 @@ def select(cfg: DictConfig) -> None:
     """
     数据选择阶段的主函数
     """
+    # 设置全局种子以确保实验可复现
+    set_seed(cfg.seed)
+
     log = logging.getLogger(__name__)
     log.info("--- 开始阶段2：数据选择 ---")
+    log.info(f"使用全局种子: {cfg.seed}")
 
     # 确定目标设备
     if torch.cuda.is_available():
@@ -198,12 +202,12 @@ def select(cfg: DictConfig) -> None:
         data_dir=cfg.dataset.data_dir,
         dataset_names=cfg.dataset.dataset_names,
         sample_percentage=cfg.dataset.subset_ratio,
-        seed=cfg.dataset.seed,
+        seed=cfg.seed,
     )
 
     if cfg.dataset.shuffle:
         log.info("对数据集进行shuffle...")
-        dataset = dataset.shuffle(seed=cfg.dataset.seed)
+        dataset = dataset.shuffle(seed=cfg.seed)
 
     log.info(f"总样本数: {len(dataset)}")
     log.info("✓ 数据集已准备完毕")

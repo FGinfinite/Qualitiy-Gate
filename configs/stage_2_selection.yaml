@@ -2,6 +2,9 @@
 
 stage: selection
 
+# Global seed for reproducibility
+seed: 42
+
 # 模型配置
 selector_model:
   path: "converted_models/select_moe_converted_OLMoE-1B-7B-0125"
@@ -26,7 +29,7 @@ hydra:
           - hydra.sweep.subdir
 
 # Path to the full rank weights from stage 1
-model_checkpoint_path: "outputs/stage_1_pretrain/2025-08-10/03-42-54-batch=8_lr=0.001_loss=beta_moment_matching_tag=none/full_rank_weights.pt"
+model_checkpoint_path: "outputs/stage_1_pretrain/2025-08-15/17-27-15-batch=16_lr=0.001_loss=sigmoid_lossWeight=1_sampleWise=True_tag=none"
 
 # The final output path for the selected data
 output_path: "${hydra:run.dir}/selected_data.jsonl"
@@ -41,9 +44,8 @@ dataset:
     - "dolly"
     - "flan_v2"
     - "oasst1"
-  seed: 42
   shuffle: false
-  max_sequence_length: 1024
+  max_sequence_length: 2048
   # 1.0 means using the full dataset
   subset_ratio: 1 
 

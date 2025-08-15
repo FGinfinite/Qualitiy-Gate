@@ -13,8 +13,10 @@ def extract_config_from_path(checkpoint_path: str) -> str:
     Extract configuration information from model checkpoint path.
 
     Parses paths with adaptive parameter extraction, supporting formats like:
-    - New format:
+    - New format with file:
       outputs/stage_1_pretrain/2025-08-10/03-42-54-batch=8_lr=0.001_loss=beta_moment_matching_lossWeight=1_sampleWise=false_tag=none/full_rank_weights.pt
+    - New format without file:
+      outputs/stage_1_pretrain/2025-08-15/17-27-15-batch=16_lr=0.001_loss=sigmoid_lossWeight=1_sampleWise=True_tag=none
     - Old format:
       outputs/stage_1_pretrain/2025-08-10/03-42-54-batch=8_lr=0.001_loss=beta_moment_matching_tag=none/full_rank_weights.pt
 
@@ -28,10 +30,26 @@ def extract_config_from_path(checkpoint_path: str) -> str:
         Extracted configuration string, or "unknown" if parsing fails
     """
     try:
-        # Extract the directory name that contains the configuration parameters
-        # This is the parent directory of the checkpoint file
-        checkpoint_dir = os.path.dirname(checkpoint_path)
-        dir_name = os.path.basename(checkpoint_dir)
+        # Handle both directory and file paths
+        # For paths like: outputs/stage_1_pretrain/2025-08-15/17-27-15-batch=16_lr=0.001_loss=sigmoid_lossWeight=1_sampleWise=True_tag=none
+        # or: outputs/stage_1_pretrain/2025-08-15/17-27-15-batch=16_lr=0.001_loss=sigmoid_lossWeight=1_sampleWise=True_tag=none/full_rank_weights.pt
+
+        path_parts = checkpoint_path.strip("/").split("/")
+
+        # Find the part that contains timestamp and config (starts with HH-MM-SS pattern)
+        dir_name = None
+        for part in reversed(path_parts):
+            if re.match(r"^\d{2}-\d{2}-\d{2}-", part):
+                dir_name = part
+                break
+
+        # If no timestamp pattern found, try the last directory part (excluding any file)
+        if dir_name is None:
+            if os.path.splitext(checkpoint_path)[1]:  # Has file extension
+                checkpoint_dir = os.path.dirname(checkpoint_path)
+                dir_name = os.path.basename(checkpoint_dir)
+            else:  # No file extension, treat as directory
+                dir_name = os.path.basename(checkpoint_path)
 
         # Pattern to match the timestamp-config format:
         # HH-MM-SS-param1=value1_param2=value2_...
@@ -95,6 +113,26 @@ def extract_data_config(data_path: str) -> str:
         return "unknown"
     except Exception:
         return "unknown"
+
+
+def extract_data_config_conditional(data_path: str, mode: str) -> str:
+    """
+    Conditional data config extractor based on dataset mode.
+
+    Args:
+        data_path: Path to the dataset
+        mode: Dataset mode ("full" or "subset")
+
+    Returns:
+        "FULL" if mode is "full", otherwise extracts config from data_path
+
+    Example:
+        mode="full" -> "FULL"
+        mode="subset", data_path="outputs/.../03-52-40-batch=8_lr=0.001_tag=none/selected_data.jsonl" -> "03-52-40-batch=8_lr=0.001_tag=none"
+    """
+    if mode == "full":
+        return "FULL"
+    return extract_data_config(data_path)
 
 
 def extract_model_config(batch_size: str, learning_rate: str, tag: str, model_name: str = "") -> str:
@@ -212,20 +250,23 @@ def register_custom_resolvers():
     # Register new data path resolvers
     OmegaConf.register_new_resolver("extract_data_timestamp", extract_data_timestamp, use_cache=True)
     OmegaConf.register_new_resolver("extract_data_config", extract_data_config, use_cache=True)
+    OmegaConf.register_new_resolver("extract_data_config_conditional", extract_data_config_conditional, use_cache=True)
     OmegaConf.register_new_resolver("extract_model_config", extract_model_config, use_cache=True)
 
 
 if __name__ == "__main__":
-    # Test the resolver functions with new format
-    test_path = (
+    # Test the resolver functions with both new formats
+    test_path_with_file = (
         "outputs/stage_1_pretrain/2025-08-10/03-42-54-batch=8_lr=0.001_loss=beta_moment_matching_lossWeight=1_sampleWise=false_tag=none/full_rank_weights.pt"
     )
+    test_path_directory = "outputs/stage_1_pretrain/2025-08-15/17-27-15-batch=16_lr=0.001_loss=sigmoid_lossWeight=1_sampleWise=True_tag=none"
     test_data_path = (
         "outputs/stage_2_selection/2025-08-11/03-52-40-batch=8_lr=0.001_loss=beta_moment_matching_lossWeight=1_sampleWise=false_tag=none/selected_data.jsonl"
     )
 
     print("Testing resolver functions:")
-    print(f"Full config: {extract_config_from_path(test_path)}")
+    print(f"Config from path with file: {extract_config_from_path(test_path_with_file)}")
+    print(f"Config from directory path: {extract_config_from_path(test_path_directory)}")
     print(f"Data timestamp: {extract_data_timestamp(test_data_path)}")
     print(f"Data config: {extract_data_config(test_data_path)}")
     print(f"Model config: {extract_model_config('128', '2e-05', 'SE_qwen')}")
@@ -233,20 +274,28 @@ if __name__ == "__main__":
     # Register resolvers for testing
     register_custom_resolvers()
 
-    # Test individual extractors with new format
+    # Test individual extractors with both formats
     from omegaconf import OmegaConf
 
     config = OmegaConf.create(
         {
-            "test_path": test_path,
+            "test_path_with_file": test_path_with_file,
+            "test_path_directory": test_path_directory,
             "test_data_path": test_data_path,
-            "batch": "${extract_batch:${test_path}}",
-            "lr": "${extract_lr:${test_path}}",
-            "loss": "${extract_loss:${test_path}}",
-            "loss_weight": "${extract_loss_weight:${test_path}}",
-            "sample_wise": "${extract_sample_wise:${test_path}}",
-            "tag": "${extract_tag:${test_path}}",
-            "full_config": "${extract_config:${test_path}}",
+            "batch_from_file": "${extract_batch:${test_path_with_file}}",
+            "batch_from_dir": "${extract_batch:${test_path_directory}}",
+            "lr_from_file": "${extract_lr:${test_path_with_file}}",
+            "lr_from_dir": "${extract_lr:${test_path_directory}}",
+            "loss_from_file": "${extract_loss:${test_path_with_file}}",
+            "loss_from_dir": "${extract_loss:${test_path_directory}}",
+            "loss_weight_from_file": "${extract_loss_weight:${test_path_with_file}}",
+            "loss_weight_from_dir": "${extract_loss_weight:${test_path_directory}}",
+            "sample_wise_from_file": "${extract_sample_wise:${test_path_with_file}}",
+            "sample_wise_from_dir": "${extract_sample_wise:${test_path_directory}}",
+            "tag_from_file": "${extract_tag:${test_path_with_file}}",
+            "tag_from_dir": "${extract_tag:${test_path_directory}}",
+            "full_config_from_file": "${extract_config:${test_path_with_file}}",
+            "full_config_from_dir": "${extract_config:${test_path_directory}}",
             "data_timestamp": "${extract_data_timestamp:${test_data_path}}",
             "data_config": "${extract_data_config:${test_data_path}}",
             "model_config": "${extract_model_config:128,2e-05,SE_qwen}",
