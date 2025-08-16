@@ -1,5 +1,5 @@
 model:
-  name: "Qwen/Qwen3-1.7B"
+  name: "Qwen/Qwen3-1.7B-Base"
   
 seed: 42
 batch_size: 128  # 总批次大小，会根据设备数自动分配
