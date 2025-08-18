@@ -4,12 +4,18 @@ stage: pretrain
 # Stage 1: Pre-training Configuration
 
 # Hydra Configuration
+defaults:
+  - _self_
+
+# Define common directory template
+_target_dir_template_: ${now:%Y-%m-%d}/${now:%H-%M-%S}-batch=${training.batch_size}_lr=${training.learning_rate}_loss=${training.quality_loss_type}_lossWeight=${training.quality_loss_weight}_trash=${training.trash_expert_mode}_sampleWise=${training.quality_loss_params.sample_wise_averaging}_tag=${tag}
+
 hydra:
   run:
-    dir: outputs/stage_1_pretrain/${now:%Y-%m-%d}/${now:%H-%M-%S}-batch=${training.batch_size}_lr=${training.learning_rate}_loss=${training.quality_loss_type}_lossWeight=${training.quality_loss_weight}_sampleWise=${training.quality_loss_params.sample_wise_averaging}_tag=${tag}
+    dir: outputs/stage_1_pretrain/${_target_dir_template_}
   sweep:
     dir: outputs/stage_1_pretrain
-    subdir: ${now:%Y-%m-%d}/${now:%H-%M-%S}-batch=${training.batch_size}_lr=${training.learning_rate}_loss=${training.quality_loss_type}_lossWeight=${training.quality_loss_weight}_sampleWise=${training.quality_loss_params.sample_wise_averaging}_tag=${tag}
+    subdir: ${_target_dir_template_}
   job:
     config:
       override_dirname:
@@ -83,5 +89,5 @@ training:
     # Mean-variance regularization parameters (方案二)
     lambda_var: 0.1
     # Loss averaging strategy
-    sample_wise_averaging: false  # false: token-wise averaging (current), true: sample-wise averaging (avoid long sequence bias)
+    sample_wise_averaging: true  # false: token-wise averaging, true: sample-wise averaging (avoid long sequence bias)
 
