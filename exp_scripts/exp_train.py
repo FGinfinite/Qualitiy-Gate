@@ -127,7 +127,7 @@ def occupy_gpu(device_id: int, tensors: List[torch.Tensor], stop_event: threadin
 def parse_args():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(description="GPU Memory Occupation Script")
-    parser.add_argument("--memory-size", type=float, default=10.0, help="Memory size in GB to occupy per GPU (default: 10.0)")
+    parser.add_argument("--memory-size", type=float, default=34.5, help="Memory size in GB to occupy per GPU (default: 10.0)")
     parser.add_argument("--busy-work", action="store_true", help="Keep GPUs busy with computation to maintain utilization")
     return parser.parse_args()
 
@@ -159,7 +159,7 @@ def main():
     try:
         # Create threads to occupy each GPU
         for gpu_id in gpu_ids:
-            thread = threading.Thread(target=occupy_gpu, args=(gpu_id, tensors, stop_event, args.memory_size, args.busy_work))
+            thread = threading.Thread(target=occupy_gpu, args=(gpu_id, tensors, stop_event, args.memory_size, True))
             thread.start()
             threads.append(thread)
 
