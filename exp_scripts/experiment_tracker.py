@@ -189,7 +189,7 @@ class ExperimentTracker:
 
     def scan_experiments(self):
         """扫描所有实验目录并收集信息"""
-        stage_configs = [(1, "stage_1_pretrain"), (2, "stage_2_selection"), (3, "stage_3_finetune")]
+        stage_configs = [(1, "stage_1_warmup"), (2, "stage_2_selection"), (3, "stage_3_finetune")]
 
         # 扫描阶段1-3
         for stage, stage_dir_name in stage_configs:

@@ -32,4 +32,4 @@ echo "Using port $MAIN_PORT for the main process."
   --config_file configs/accelerate_config/DDP.yaml \
   --num_processes=$NUM_GPUS \
   --main_process_port=$MAIN_PORT \
-  src/main.py --config-name=stage_1_pretrain "$@"
+  src/main.py --config-name=stage_1_warmup "$@"

@@ -1,6 +1,6 @@
 # @package _global_
 
-stage: pretrain
+stage: warmup
 # Stage 1: Pre-training Configuration
 
 # Hydra Configuration
@@ -12,9 +12,9 @@ _target_dir_template_: ${now:%Y-%m-%d}/${now:%H-%M-%S}-batch=${training.batch_si
 
 hydra:
   run:
-    dir: outputs/stage_1_pretrain/${_target_dir_template_}
+    dir: outputs/stage_1_warmup/${_target_dir_template_}
   sweep:
-    dir: outputs/stage_1_pretrain
+    dir: outputs/stage_1_warmup
     subdir: ${_target_dir_template_}
   job:
     config:

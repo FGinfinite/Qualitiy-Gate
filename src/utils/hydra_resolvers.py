@@ -14,11 +14,11 @@ def extract_config_from_path(checkpoint_path: str) -> str:
 
     Parses paths with adaptive parameter extraction, supporting formats like:
     - New format with file:
-      outputs/stage_1_pretrain/2025-08-10/03-42-54-batch=8_lr=0.001_loss=beta_moment_matching_lossWeight=1_sampleWise=false_tag=none/full_rank_weights.pt
+      outputs/stage_1_warmup/2025-08-10/03-42-54-batch=8_lr=0.001_loss=beta_moment_matching_lossWeight=1_sampleWise=false_tag=none/full_rank_weights.pt
     - New format without file:
-      outputs/stage_1_pretrain/2025-08-15/17-27-15-batch=16_lr=0.001_loss=sigmoid_lossWeight=1_sampleWise=True_tag=none
+      outputs/stage_1_warmup/2025-08-15/17-27-15-batch=16_lr=0.001_loss=sigmoid_lossWeight=1_sampleWise=True_tag=none
     - Old format:
-      outputs/stage_1_pretrain/2025-08-10/03-42-54-batch=8_lr=0.001_loss=beta_moment_matching_tag=none/full_rank_weights.pt
+      outputs/stage_1_warmup/2025-08-10/03-42-54-batch=8_lr=0.001_loss=beta_moment_matching_tag=none/full_rank_weights.pt
 
     Returns a formatted string like:
     batch=8_lr=0.001_loss=beta_moment_matching_lossWeight=1_sampleWise=false_tag=none
@@ -31,8 +31,8 @@ def extract_config_from_path(checkpoint_path: str) -> str:
     """
     try:
         # Handle both directory and file paths
-        # For paths like: outputs/stage_1_pretrain/2025-08-15/17-27-15-batch=16_lr=0.001_loss=sigmoid_lossWeight=1_sampleWise=True_tag=none
-        # or: outputs/stage_1_pretrain/2025-08-15/17-27-15-batch=16_lr=0.001_loss=sigmoid_lossWeight=1_sampleWise=True_tag=none/full_rank_weights.pt
+        # For paths like: outputs/stage_1_warmup/2025-08-15/17-27-15-batch=16_lr=0.001_loss=sigmoid_lossWeight=1_sampleWise=True_tag=none
+        # or: outputs/stage_1_warmup/2025-08-15/17-27-15-batch=16_lr=0.001_loss=sigmoid_lossWeight=1_sampleWise=True_tag=none/full_rank_weights.pt
 
         path_parts = checkpoint_path.strip("/").split("/")
 
@@ -257,9 +257,9 @@ def register_custom_resolvers():
 if __name__ == "__main__":
     # Test the resolver functions with both new formats
     test_path_with_file = (
-        "outputs/stage_1_pretrain/2025-08-10/03-42-54-batch=8_lr=0.001_loss=beta_moment_matching_lossWeight=1_sampleWise=false_tag=none/full_rank_weights.pt"
+        "outputs/stage_1_warmup/2025-08-10/03-42-54-batch=8_lr=0.001_loss=beta_moment_matching_lossWeight=1_sampleWise=false_tag=none/full_rank_weights.pt"
     )
-    test_path_directory = "outputs/stage_1_pretrain/2025-08-15/17-27-15-batch=16_lr=0.001_loss=sigmoid_lossWeight=1_sampleWise=True_tag=none"
+    test_path_directory = "outputs/stage_1_warmup/2025-08-15/17-27-15-batch=16_lr=0.001_loss=sigmoid_lossWeight=1_sampleWise=True_tag=none"
     test_data_path = (
         "outputs/stage_2_selection/2025-08-11/03-52-40-batch=8_lr=0.001_loss=beta_moment_matching_lossWeight=1_sampleWise=false_tag=none/selected_data.jsonl"
     )

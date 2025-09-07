@@ -29,7 +29,7 @@ hydra:
           - hydra.sweep.subdir
 
 # Path to the full rank weights from stage 1
-model_checkpoint_path: "outputs/stage_1_pretrain/2025-08-15/17-27-15-batch=16_lr=0.001_loss=sigmoid_lossWeight=1_sampleWise=True_tag=none"
+model_checkpoint_path: "outputs/stage_1_warmup/2025-08-15/17-27-15-batch=16_lr=0.001_loss=sigmoid_lossWeight=1_sampleWise=True_tag=none"
 
 # The final output path for the selected data
 output_path: "${hydra:run.dir}/selected_data.jsonl"

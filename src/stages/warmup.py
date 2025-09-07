@@ -193,7 +193,7 @@ def get_model_and_tokenizer(
 # ---------------------------------------------------------------------------
 
 
-def pretrain(cfg: DictConfig) -> None:
+def warmup(cfg: DictConfig) -> None:
     """
     使用预转换的 Select-MoE 模型进行训练，并使用 PEFT 进行微调。
     """
