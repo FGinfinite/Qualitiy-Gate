@@ -90,4 +90,7 @@ training:
     lambda_var: 0.1
     # Loss averaging strategy
     sample_wise_averaging: true  # false: token-wise averaging, true: sample-wise averaging (avoid long sequence bias)
+    # Full sequence prediction settings
+    full_sequence_prediction: true   # Enable full sequence prediction (vs assistant-only SFT)
+    mask_special_tokens: true        # Mask special format tokens like <|user|>, <|assistant|>
 

@@ -256,6 +256,8 @@ def warmup(cfg: DictConfig) -> None:
         max_seq_length=cfg.dataset.max_sequence_length,
         processing_num_workers=getattr(cfg.dataset, "processing_num_workers", 10),
         overwrite_cache=getattr(cfg.dataset, "overwrite_cache", False),
+        full_sequence_prediction=getattr(cfg.training.quality_loss_params, "full_sequence_prediction", False),
+        mask_special_tokens=getattr(cfg.training.quality_loss_params, "mask_special_tokens", False),
     )
 
     # 6. 输出数据统计信息

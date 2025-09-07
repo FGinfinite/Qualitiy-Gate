@@ -257,6 +257,10 @@ def finetune(cfg: DictConfig) -> None:
             "fsdp": "full_shard auto_wrap",
             "fsdp_transformer_layer_cls_to_wrap": "Qwen3DecoderLayer",
         },
+        "Qwen/Qwen2.5-1.5B": {
+            "fsdp": "full_shard auto_wrap",
+            "fsdp_transformer_layer_cls_to_wrap": "Qwen2DecoderLayer",
+        },
     }
 
     # 根据设备数决定是否使用FSDP

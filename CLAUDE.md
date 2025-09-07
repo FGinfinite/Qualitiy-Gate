@@ -6,9 +6,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Select-MoE is a data selection framework using Mixture-of-Experts (MoE) models. The project implements a four-stage pipeline:
 
-1. **Stage 1 (Pretrain)**: Train a Select-MoE router to learn data quality discrimination
+1. **Stage 1 (Warmup)**: Train a Select-MoE router to learn data quality discrimination
 2. **Stage 2 (Selection)**: Use the trained router to score and filter training data
-3. **Stage 3 (Finetune)**: Fine-tune target models (Llama-2-7B) with selected data using LoRA
+3. **Stage 3 (Finetune)**: Fine-tune target models (Llama-2-7B, Qwen2.5-1.5B) with selected data using LoRA
 4. **Stage 4 (Evaluate)**: Evaluate model performance using lm-eval
 
 ## Key Architecture Components
@@ -36,6 +36,11 @@ Select-MoE is a data selection framework using Mixture-of-Experts (MoE) models. 
 ### Data Processing (`src/data/`)
 - Dataset loaders for training and evaluation data
 - Support for multiple datasets: CoT, Dolly, FLAN-v2, OASST1
+- **Flexible Data Encoding**: Support for multiple encoding modes
+  - **Full Sequence Prediction**: Learn to predict both user questions and assistant responses
+  - **Assistant-Only SFT**: Traditional supervised fine-tuning on assistant responses only
+  - **Special Token Masking**: Option to mask format tokens like `<|user|>`, `<|assistant|>`
+  - **Sample-wise Averaging**: Prevent bias toward longer sequences in loss computation
 
 ### Data Selection Module (`src/selection/`)
 - **Decoupled Selection Logic**: Clean separation between router computation and data selection algorithms
@@ -104,7 +109,7 @@ python scripts/compare_converted_model.py --converted-model ./converted_models/s
 
 ### Training Pipeline
 ```bash
-# Stage 1: Router pretraining (set CUDA_VISIBLE_DEVICES first)
+# Stage 1: Router warmup training (set CUDA_VISIBLE_DEVICES first)
 CUDA_VISIBLE_DEVICES=0,1,2,3 bash scripts/run_stage_1.sh
 
 # Stage 2: Router data computation (inference only)
@@ -192,7 +197,7 @@ accelerate launch -m lm_eval --model hf \
 
 ## Important Configuration Files
 
-- `configs/stage_1_pretrain.yaml` - Router pretraining configuration
+- `configs/stage_1_warmup.yaml` - Router warmup training configuration
 - `configs/stage_2_selection.yaml` - Data selection configuration  
 - `configs/stage_3_finetune.yaml` - Target model fine-tuning configuration
 - `configs/stage_4_evaluate.yaml` - Model evaluation configuration
@@ -200,7 +205,7 @@ accelerate launch -m lm_eval --model hf \
 
 ## Key Parameters
 
-### Stage 1 (Pretrain)
+### Stage 1 (Warmup)
 - `training.peft_mode`: Training mode (`lora` or `full_rank`)
   - `lora`: Low-rank adaptation using LoRA adapters for specified modules
   - `full_rank`: Full-rank training of router parameters (quality gate and MoE gate only)
@@ -226,6 +231,10 @@ accelerate launch -m lm_eval --model hf \
     - `w_var`: Weight for variance loss (default: 1.0)
   - **Mean-Variance Regularization**:
     - `lambda_var`: Variance regularization weight (default: 0.1)
+  - **Data Encoding Configuration**:
+    - `full_sequence_prediction`: Enable full sequence prediction vs assistant-only SFT (default: true)
+    - `mask_special_tokens`: Mask special format tokens like <|user|>, <|assistant|> (default: true)
+    - `sample_wise_averaging`: Use sample-wise vs token-wise loss averaging (default: true)
 
 ### Stage 2 (Router Data Computation)
 - `model_checkpoint_path`: Path to Stage 1 output weights
@@ -254,9 +263,10 @@ accelerate launch -m lm_eval --model hf \
 
 ## Memory Requirements
 
-- **Stage 1**: 
+- **Stage 1 (Warmup)**: 
   - `lora` mode: LoRA fine-tuning requires ~8GB GPU memory
   - `full_rank` mode: Full-rank router training requires ~16GB GPU memory
+  - Supports both Qwen2.5-1.5B and larger models with FSDP
 - **Stage 2**: 
   - Serial mode: K-means clustering with GPU acceleration requires moderate GPU memory (~4-8GB depending on dataset size)
   - Parallel mode: Multi-GPU parallel K-means requires ~2-4GB per GPU (distributed across multiple devices)
@@ -379,7 +389,8 @@ Configuration files for different pipeline stages using Hydra framework:
   - `SINGLE.yaml` - Single GPU configuration
 - `training/` - Model-specific training configurations:
   - `llama_2_7b.yaml` - Llama-2-7B training parameters
-  - `qwen_3_1.7b.yaml` - Qwen-3-1.7B training parameters (newly added)
+  - `qwen_2.5_1.5b.yaml` - Qwen2.5-1.5B training parameters
+  - `qwen_3_1.7b.yaml` - Qwen-3-1.7B training parameters
 
 ### 📂 src/
 Main source code organized by functionality:
@@ -413,7 +424,7 @@ Decoupled data selection module with consolidated selection algorithms:
 
 #### 📂 src/stages/
 Pipeline stage implementations following the four-stage architecture:
-- `pretrain.py` - Stage 1 implementation: Select-MoE router pretraining with quality loss
+- `warmup.py` - Stage 1 implementation: Select-MoE router warmup training with quality loss
 - `selection.py` - Stage 2 implementation: **router inference and data computation only** (selection logic moved to `src/selection/`)
 - `finetune.py` - Stage 3 implementation: target model LoRA fine-tuning with selected data
 - `__init__.py` - Stages package initialization and exports
@@ -431,7 +442,7 @@ Utility functions for various system operations:
 
 ### 📂 scripts/
 Executable scripts for various operations:
-- `run_stage_1.sh` - Stage 1 router pretraining execution script
+- `run_stage_1.sh` - Stage 1 router warmup training execution script
 - `run_stage_2.sh` - Stage 2 router data computation execution script (inference only)
 - `run_stage_3.sh` - Stage 3 target model fine-tuning execution script
 - `eval.sh` - Stage 4 model evaluation execution script
@@ -440,6 +451,11 @@ Executable scripts for various operations:
 - `convert_olmoe_to_select_moe.py` - Model conversion from OLMoE to Select-MoE format
 - `compare_converted_model.py` - Model conversion verification and comparison
 - `convert.sh` - Shell script wrapper for model conversion operations
+
+### 📂 exp_scripts/
+Experimental and analysis scripts:
+- `make_result_table.py` - Generate evaluation result tables from lm-eval outputs
+- `test_encoding_modes.py` - Test different data encoding modes and compare results
 
 ### 📂 docs/
 Comprehensive project documentation:
@@ -512,7 +528,7 @@ LESS (Low-rank Expert Selection System) reference implementation:
 - `scripts/run_stage_*.sh` - Stage-specific execution scripts with parameter overrides
 
 ### Recommended Workflow
-1. **Stage 1**: Train Select-MoE router using `scripts/run_stage_1.sh`
+1. **Stage 1**: Train Select-MoE router using `scripts/run_stage_1.sh` (warmup training)
 2. **Stage 2**: Compute router data using `scripts/run_stage_2.sh` 
 3. **Stage 2b/2c**: Apply data selection algorithms using standalone scripts:
    - Single experiment: `scripts/continue_selection.py`

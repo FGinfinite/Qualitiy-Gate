@@ -27,7 +27,7 @@ seed: 42
 
 defaults:
   - _self_
-  - training: qwen_3_1.7b
+  - training: qwen_2.5_1.5b
 
 
 output_dir: ${hydra:run.dir}
@@ -44,7 +44,7 @@ dataset:
   subset_ratio: 1.0  # Use 100% of data in full mode
   # For subset mode: load from selected data file
   data_path: "outputs/stage_2_selection/2025-08-11/03-52-40-batch=8_lr=0.001_loss=beta_moment_matching_tag=none/selected_data.jsonl"
-  max_sequence_length: 2048
+  max_sequence_length: 1024
   processing_num_workers: 10
   overwrite_cache: false
   mode: "subset" # "full" or "subset"

@@ -104,6 +104,7 @@ huggingface-cli download cais/mmlu --repo-type dataset
 # 下载预训练模型
 huggingface-cli download allenai/OLMoE-1B-7B-0125
 huggingface-cli download meta-llama/Llama-2-7b-hf
+huggingface-cli download Qwen/Qwen2.5-1.5B
 ```
 
 ## 📋 完整执行流程
