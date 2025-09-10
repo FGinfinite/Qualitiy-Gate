@@ -8,7 +8,7 @@ import torch
 from omegaconf import DictConfig
 
 from src.clustering import ClusterBasedSelection
-from src.data.dataset_loader import load_local_datasets
+from src.data.dataset_loader import load_hf_datasets, load_local_datasets
 
 
 def cluster_based_selection(
@@ -89,30 +89,62 @@ def load_all_router_data(router_data_dir: str) -> Dict[str, Dict[str, Any]]:
     return all_router_data
 
 
+def get_dataset_config(dataset_name: str) -> Dict[str, Any]:
+    """
+    数据集配置工厂函数
+
+    返回数据集的配置信息，包括数据源类型和加载参数
+
+    Args:
+        dataset_name: 数据集名称
+
+    Returns:
+        数据集配置字典，包含:
+        - source_type: "local" 或 "hf"
+        - config: 对应的加载配置
+    """
+    # 数据集名称到配置的映射表
+    # 添加新数据集时，只需在这里添加相应的映射即可
+    dataset_configs = {
+        # 本地数据集
+        "cot": {"source_type": "local", "config": {"data_dir": "dataset/train/processed", "dataset_names": ["cot"]}},
+        "dolly": {"source_type": "local", "config": {"data_dir": "dataset/train/processed", "dataset_names": ["dolly"]}},
+        "flan_v2": {"source_type": "local", "config": {"data_dir": "dataset/train/processed", "dataset_names": ["flan_v2"]}},
+        "oasst1": {"source_type": "local", "config": {"data_dir": "dataset/train/processed", "dataset_names": ["oasst1"]}},
+        # HuggingFace数据集
+        "openhermes": {
+            "source_type": "hf",
+            "config": {"datasets": [{"name": "teknium/OpenHermes-2.5", "dataset_name": "openhermes", "subset": None, "split": "train"}]},
+        },
+        # 未来添加新的HF数据集示例:
+        # "alpaca": {
+        #     "source_type": "hf",
+        #     "config": {
+        #         "datasets": [{
+        #             "name": "tatsu-lab/alpaca",
+        #             "dataset_name": "alpaca",
+        #             "subset": None,
+        #             "split": "train"
+        #         }]
+        #     }
+        # }
+    }
+
+    return dataset_configs.get(dataset_name, {})
+
+
 def load_original_dataset_mapping(router_data_dir: str, data_dir: str = None) -> Dict[str, Dict[str, Any]]:
-    """加载原始数据集的消息映射"""
+    """
+    使用工厂函数加载原始数据集的消息映射
+
+    Args:
+        router_data_dir: router_data文件目录
+        data_dir: 数据目录路径（如果指定，会覆盖默认推断）
+
+    Returns:
+        数据集映射字典 {dataset_name: {sample_id: messages}}
+    """
     log = logging.getLogger(__name__)
-
-    # 推断数据集目录
-    if data_dir is None:
-        current_dir = router_data_dir
-        project_root = None
-        for _ in range(10):  # 最多向上10层
-            current_dir = os.path.dirname(current_dir)
-            if os.path.exists(os.path.join(current_dir, "dataset", "train", "processed")):
-                project_root = current_dir
-                break
-
-        if project_root is None:
-            project_root = os.getcwd()
-
-        data_dir = os.path.join(project_root, "dataset", "train", "processed")
-
-    if not os.path.exists(data_dir):
-        log.warning(f"推断的数据集目录不存在: {data_dir}")
-        return {}
-
-    log.info(f"使用标准数据加载器从目录加载数据: {data_dir}")
 
     # 获取router_data中的数据集名称
     dataset_names = []
@@ -127,38 +159,83 @@ def load_original_dataset_mapping(router_data_dir: str, data_dir: str = None) ->
 
     log.info(f"需要加载的数据集: {dataset_names}")
 
-    try:
-        # 使用标准数据加载器加载所有数据集
-        combined_dataset = load_local_datasets(
-            data_dir=data_dir,
-            dataset_names=dataset_names,
-            sample_percentage=1.0,  # 加载全部数据
-            seed=0,
-        )
+    # 根据数据集名称确定加载策略
+    dataset_mapping = {}
 
-        log.info(f"标准加载器成功加载 {len(combined_dataset)} 个样本")
+    for dataset_name in dataset_names:
+        log.info(f"处理数据集: {dataset_name}")
 
-        # 将数据按ID组织为映射字典
-        dataset_mapping = {name: {} for name in dataset_names}
+        # 获取数据集配置
+        dataset_config = get_dataset_config(dataset_name)
 
-        for item in combined_dataset:
-            dataset_name = item.get("dataset")
-            item_id = item.get("id")
-            messages = item.get("messages", [])
+        if not dataset_config:
+            log.warning(f"未知数据集: {dataset_name}，请在get_dataset_config()中添加配置")
+            dataset_mapping[dataset_name] = {}
+            continue
 
-            if dataset_name and item_id and dataset_name in dataset_mapping:
-                dataset_mapping[dataset_name][item_id] = messages
+        source_type = dataset_config["source_type"]
+        config = dataset_config["config"]
 
-        # 输出加载统计
-        for dataset_name in dataset_names:
-            count = len(dataset_mapping[dataset_name])
-            log.info(f"数据集 '{dataset_name}': 映射了 {count} 个样本")
+        try:
+            if source_type == "local":
+                # 加载本地数据集
+                effective_data_dir = data_dir or config["data_dir"]
 
-        return dataset_mapping
+                # 推断项目根目录
+                if not os.path.isabs(effective_data_dir):
+                    current_dir = router_data_dir
+                    project_root = None
+                    for _ in range(10):
+                        current_dir = os.path.dirname(current_dir)
+                        if os.path.exists(os.path.join(current_dir, effective_data_dir)):
+                            project_root = current_dir
+                            break
 
-    except Exception as e:
-        log.error(f"使用标准数据加载器加载失败: {e}")
-        return {}
+                    if project_root:
+                        effective_data_dir = os.path.join(project_root, effective_data_dir)
+                    else:
+                        effective_data_dir = os.path.join(os.getcwd(), effective_data_dir)
+
+                log.info(f"从本地加载数据集 '{dataset_name}': {effective_data_dir}")
+                combined_dataset = load_local_datasets(data_dir=effective_data_dir, dataset_names=config["dataset_names"], sample_percentage=1.0, seed=0)
+
+            elif source_type == "hf":
+                # 加载HuggingFace数据集
+                log.info(f"从HuggingFace加载数据集 '{dataset_name}'")
+                combined_dataset = load_hf_datasets(hf_config={"datasets": config["datasets"]}, sample_percentage=1.0, seed=0)
+            else:
+                log.error(f"不支持的数据源类型: {source_type}")
+                dataset_mapping[dataset_name] = {}
+                continue
+
+            # 组织数据映射
+            single_dataset_mapping = _organize_dataset_mapping(combined_dataset, [dataset_name], log)
+            dataset_mapping.update(single_dataset_mapping)
+
+        except Exception as e:
+            log.error(f"加载数据集 '{dataset_name}' 失败: {e}")
+            dataset_mapping[dataset_name] = {}
+
+    return dataset_mapping
+
+
+def _organize_dataset_mapping(combined_dataset, dataset_names: List[str], log) -> Dict[str, Dict[str, Any]]:
+    """将数据按ID组织为映射字典"""
+    dataset_mapping = {name: {} for name in dataset_names}
+
+    for item in combined_dataset:
+        dataset_name = item.get("dataset")
+        item_id = item.get("id")
+        messages = item.get("messages", [])
+
+        if dataset_name and item_id and dataset_name in dataset_mapping:
+            dataset_mapping[dataset_name][item_id] = messages
+
+    # 输出加载统计
+    for dataset_name, mapping in dataset_mapping.items():
+        log.info(f"数据集 '{dataset_name}' 包含 {len(mapping)} 个样本映射")
+
+    return dataset_mapping
 
 
 def rebuild_scored_data_with_messages(all_router_data: Dict[str, Dict[str, Any]], dataset_mapping: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:

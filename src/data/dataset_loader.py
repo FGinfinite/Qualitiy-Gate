@@ -104,6 +104,124 @@ def load_local_datasets(
     return combined_dataset
 
 
+def convert_openhermes_format(example: Dict, dataset_name: str = "openhermes") -> Dict:
+    """
+    转换OpenHermes-2.5格式到项目标准格式
+
+    关键处理：
+    - 完全过滤空的system消息，避免生成无意义的特殊token
+    - 角色映射：human→user, gpt→assistant, system→system
+    - 字段映射：conversations→messages, from→role, value→content
+
+    Args:
+        example: OpenHermes-2.5格式的数据样本
+        dataset_name: 数据集名称，用于生成dataset字段
+
+    Returns:
+        转换后的标准格式数据
+    """
+    if "conversations" not in example:
+        raise ValueError("OpenHermes数据必须包含'conversations'字段")
+
+    messages = []
+    for msg in example["conversations"]:
+        # 角色映射
+        role_map = {"human": "user", "gpt": "assistant", "system": "system"}
+
+        if msg["from"] not in role_map:
+            continue  # 跳过不支持的角色
+
+        role = role_map[msg["from"]]
+        content = msg["value"]
+
+        # 关键：完全过滤空的system消息
+        if role == "system" and not content.strip():
+            continue  # 跳过空system消息，不添加到messages中
+
+        messages.append({"role": role, "content": content.strip() if content else ""})
+
+    if not messages:
+        raise ValueError("转换后没有有效的消息")
+
+    # 生成唯一ID
+    example_id = f"{dataset_name}_{example.get('id', hash(str(example)) % 1000000)}"
+
+    return {"dataset": dataset_name, "id": example_id, "messages": messages}
+
+
+def load_hf_datasets(
+    hf_config: Dict,
+    sample_percentage: float = 1.0,
+    seed: int = 0,
+) -> Dataset:
+    """
+    从HuggingFace加载数据集并转换格式
+
+    Args:
+        hf_config: HF数据集配置，包含datasets列表
+        sample_percentage: 采样比例
+        seed: 随机种子
+
+    Returns:
+        转换后的合并数据集
+    """
+    if not hf_config or "datasets" not in hf_config:
+        raise ValueError("HF配置必须包含'datasets'字段")
+
+    all_datasets = []
+
+    for dataset_config in hf_config["datasets"]:
+        dataset_name = dataset_config["name"]
+        internal_name = dataset_config.get("dataset_name", dataset_name.split("/")[-1])
+        subset = dataset_config.get("subset", None)
+        split = dataset_config.get("split", "train")
+
+        try:
+            # 加载HF数据集
+            print(f"正在从HuggingFace加载数据集 '{dataset_name}'...")
+            if subset:
+                dataset = load_dataset(dataset_name, subset, split=split)
+            else:
+                dataset = load_dataset(dataset_name, split=split)
+
+            # 采样
+            if sample_percentage < 1.0:
+                sample_size = int(len(dataset) * sample_percentage)
+                with temp_seed(seed):
+                    indices = np.random.permutation(len(dataset))[:sample_size]
+                dataset = dataset.select(indices)
+
+            # 转换格式
+            if "openhermes" in dataset_name.lower():
+                # OpenHermes-2.5 格式转换
+                convert_fn = partial(convert_openhermes_format, dataset_name=internal_name)
+            else:
+                # 其他HF数据集可以在这里添加转换逻辑
+                raise ValueError(f"暂不支持数据集格式: {dataset_name}")
+
+            dataset = dataset.map(
+                convert_fn,
+                desc=f"转换数据集格式 - {internal_name}",
+                load_from_cache_file=False,  # 强制重新处理确保格式正确
+            )
+
+            all_datasets.append(dataset)
+            print(f"已加载HF数据集 '{internal_name}': {len(dataset)} 个样本")
+
+        except Exception as e:
+            print(f"加载HF数据集 '{dataset_name}' 失败: {e}")
+            continue
+
+    if not all_datasets:
+        raise ValueError("没有成功加载任何HF数据集")
+
+    # 合并所有数据集
+    combined_dataset = concatenate_datasets(all_datasets)
+    print(f"已合并 {len(hf_config['datasets'])} 个HF数据集，总共 {len(combined_dataset)} 个样本")
+
+    return combined_dataset
+
+
 def encode_with_messages_format(example: Dict, tokenizer: AutoTokenizer, max_seq_length: int) -> Dict:
     """
     使用messages格式编码数据，基于LESS库的实现
@@ -356,30 +474,48 @@ def encode_data(
 
 def load_and_prepare_dataset(cfg: DictConfig) -> Dataset:
     """
-    加载和准备数据集的主要函数
+    加载和准备数据集的主要函数，支持本地和HF数据源
 
     Args:
-        cfg: 配置对象
+        cfg: 配置对象，使用dataset_from参数控制数据源选择
+             dataset_from="local": 使用本地数据集
+             dataset_from="hf": 使用HuggingFace数据集
 
     Returns:
         准备好的数据集
     """
     # 从配置中获取参数
-    data_dir = cfg.dataset.data_dir
-    dataset_names = getattr(cfg.dataset, "dataset_names", None)
     sample_percentage = getattr(cfg.dataset, "subset_ratio", 1.0)
     seed = getattr(cfg, "seed", 42)  # 使用全局种子
     shuffle = getattr(cfg.dataset, "shuffle", True)
+    dataset_from = getattr(cfg.dataset, "dataset_from", "local")
 
-    # 加载本地数据集
     log = logging.getLogger(__name__)
-    log.info(f"正在从 {data_dir} 加载数据集...")
-    dataset = load_local_datasets(
-        data_dir=data_dir,
-        dataset_names=dataset_names,
-        sample_percentage=sample_percentage,
-        seed=seed,
-    )
+
+    # 根据dataset_from参数选择数据源
+    if dataset_from == "local":
+        # 使用本地数据集
+        local_config = cfg.dataset.local
+        log.info(f"使用本地数据集，从 {local_config.data_dir} 加载数据集...")
+        dataset = load_local_datasets(
+            data_dir=local_config.data_dir,
+            dataset_names=local_config.dataset_names,
+            sample_percentage=sample_percentage,
+            seed=seed,
+        )
+
+    elif dataset_from == "hf":
+        # 使用HuggingFace数据集
+        hf_config = {"datasets": cfg.dataset.hf.datasets}
+        log.info("使用HuggingFace数据集...")
+        dataset = load_hf_datasets(
+            hf_config=hf_config,
+            sample_percentage=sample_percentage,
+            seed=seed,
+        )
+
+    else:
+        raise ValueError(f"不支持的数据源类型: {dataset_from}，支持的类型: 'local', 'hf'")
 
     # 打乱数据集
     if shuffle:

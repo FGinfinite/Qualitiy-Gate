@@ -34,8 +34,11 @@ Select-MoE is a data selection framework using Mixture-of-Experts (MoE) models. 
 - Integrated with accelerate for distributed training
 
 ### Data Processing (`src/data/`)
-- Dataset loaders for training and evaluation data
-- Support for multiple datasets: CoT, Dolly, FLAN-v2, OASST1
+- **Multi-Source Data Loading**: Support for both local and HuggingFace datasets
+  - **Local datasets**: CoT, Dolly, FLAN-v2, OASST1 from preprocessed files
+  - **HuggingFace datasets**: OpenHermes-2.5 and other online datasets
+- **Unified Configuration Interface**: Single `dataset_from` parameter to switch between data sources
+- **Format Conversion**: Automatic conversion from various dataset formats to project standard
 - **Flexible Data Encoding**: Support for multiple encoding modes
   - **Full Sequence Prediction**: Learn to predict both user questions and assistant responses
   - **Assistant-Only SFT**: Traditional supervised fine-tuning on assistant responses only
@@ -45,6 +48,9 @@ Select-MoE is a data selection framework using Mixture-of-Experts (MoE) models. 
 ### Data Selection Module (`src/selection/`)
 - **Decoupled Selection Logic**: Clean separation between router computation and data selection algorithms
 - **Consolidated Functions**: Single source of truth for all data selection utilities
+- **Multi-Source Data Support**: Seamless support for both local and HuggingFace datasets in selection process
+- **Dataset Configuration Factory**: Centralized configuration management for different data sources
+- **Automatic Dataset Mapping**: Intelligent loading and mapping of original datasets for selection algorithms
 - **Clustering Integration**: Seamless integration with GPU-accelerated clustering algorithms
 - **Router Data Processing**: Utilities for loading and processing router inference outputs
 - **Multi-Script Support**: Shared functions used by both standalone and batch selection scripts
@@ -204,6 +210,16 @@ accelerate launch -m lm_eval --model hf \
 - `configs/accelerate_config_*.yaml` - Distributed training configurations
 
 ## Key Parameters
+
+### Data Source Configuration (All Stages)
+- `dataset.dataset_from`: Data source selection (`"local"` or `"hf"`)
+  - `"local"`: Use local preprocessed datasets from filesystem
+  - `"hf"`: Use HuggingFace datasets downloaded online
+- `dataset.local`: Configuration for local datasets
+  - `data_dir`: Directory path to processed data files  
+  - `dataset_names`: List of dataset names to load
+- `dataset.hf`: Configuration for HuggingFace datasets
+  - `datasets`: List of dataset configurations with name, internal name, subset, split
 
 ### Stage 1 (Warmup)
 - `training.peft_mode`: Training mode (`lora` or `full_rank`)
@@ -400,7 +416,12 @@ Main source code organized by functionality:
 - `__init__.py` - Model package initialization and exports
 
 #### 📂 src/data/
-- `dataset_loader.py` - Multi-dataset loading and preprocessing (CoT, Dolly, FLAN-v2, OASST1)
+- `dataset_loader.py` - Multi-source dataset loading and preprocessing
+  - **Multi-Source Support**: Unified interface for local and HuggingFace datasets
+  - **Local Dataset Loading**: CoT, Dolly, FLAN-v2, OASST1 from preprocessed files
+  - **HuggingFace Integration**: OpenHermes-2.5 and other HF datasets with format conversion
+  - **Format Conversion Functions**: `convert_openhermes_format()` for OpenHermes-2.5 data transformation
+  - **Unified Configuration**: Single entry point with `dataset_from` parameter switching
 - `__init__.py` - Data package initialization and exports
 
 #### 📂 src/clustering/
@@ -412,11 +433,12 @@ GPU-accelerated clustering algorithms for intelligent data selection:
 - `__init__.py` - Clustering package initialization and exports
 
 #### 📂 src/selection/
-Decoupled data selection module with consolidated selection algorithms:
+Decoupled data selection module with consolidated selection algorithms and multi-source dataset support:
 - `data_selection.py` - Core data selection functions and utilities
   - `cluster_based_selection()` - Main clustering-based selection algorithm
   - `load_all_router_data()` - Load router data from multiple datasets
-  - `load_original_dataset_mapping()` - Load original dataset message mappings
+  - `get_dataset_config()` - **Dataset configuration factory** for different data sources
+  - `load_original_dataset_mapping()` - Load original dataset message mappings with multi-source support
   - `rebuild_scored_data_with_messages()` - Rebuild scored data with complete messages
   - `rebuild_logits_data()` - Process MoE logits for clustering algorithms
   - `parse_clustering_params()` - Parse and validate clustering configuration
@@ -456,6 +478,7 @@ Executable scripts for various operations:
 Experimental and analysis scripts:
 - `make_result_table.py` - Generate evaluation result tables from lm-eval outputs
 - `test_encoding_modes.py` - Test different data encoding modes and compare results
+- `gpu_memory.py` - GPU memory usage monitoring and reporting tool with CUDA_VISIBLE_DEVICES mapping
 
 ### 📂 docs/
 Comprehensive project documentation:

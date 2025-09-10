@@ -38,16 +38,33 @@ tag: "none"
 
 # Dataset configuration
 dataset:
-  data_dir: "dataset/train/processed"
-  dataset_names:
-    - "cot"
-    - "dolly"
-    - "flan_v2"
-    - "oasst1"
+  # Data source selection: "local" or "hf" (should match stage 1 configuration)
+  dataset_from: "hf"  # Options: "local" (本地数据集), "hf" (HuggingFace数据集)
+  
+  # Local dataset configuration (used when dataset_from="local")
+  local:
+    data_dir: "dataset/train/processed"
+    dataset_names:
+      - "cot"
+      - "dolly"
+      - "flan_v2"
+      - "oasst1"
+  
+  # HuggingFace dataset configuration (used when dataset_from="hf")
+  hf:
+    datasets:
+      - name: "teknium/OpenHermes-2.5"
+        dataset_name: "openhermes"
+        subset: null
+        split: "train"
+  
+  # Common parameters
   shuffle: false
-  max_sequence_length: 2048
+  max_sequence_length: 1024
   # 1.0 means using the full dataset
   subset_ratio: 1 
+  processing_num_workers: 10
+  overwrite_cache: false
 
 # Data selection percentage (0.05 means select top 5% of the data)
 selection_percentage: 0.05

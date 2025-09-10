@@ -364,6 +364,9 @@ mv data dataset
 export HF_ENDPOINT=https://hf-mirror.com
 huggingface-cli download hails/mmlu_no_train --repo-type dataset 
 huggingface-cli download cais/mmlu --repo-type dataset
+
+huggingface-cli download teknium/OpenHermes-2.5 --repo-type dataset
+
 ```
 
 ### 7. 模型准备

@@ -39,15 +39,30 @@ output_dir: ${hydra:run.dir}
 
 # Dataset configuration
 dataset:
-  data_dir: "dataset/train/processed"
-  dataset_names:
-    - "cot"
-    - "dolly"
-    - "flan_v2"
-    - "oasst1"
-  subset_ratio: 0.05
+  # Data source selection: "local" or "hf"
+  dataset_from: "hf"  # Options: "local" (本地数据集), "hf" (HuggingFace数据集)
+  
+  # Local dataset configuration (used when dataset_from="local")
+  local:
+    data_dir: "dataset/train/processed"
+    dataset_names:
+      - "cot"
+      - "dolly"
+      - "flan_v2"
+      - "oasst1"
+  
+  # HuggingFace dataset configuration (used when dataset_from="hf")
+  hf:
+    datasets:
+      - name: "teknium/OpenHermes-2.5"
+        dataset_name: "openhermes"
+        subset: null
+        split: "train"
+  
+  # Common parameters
+  subset_ratio: 0.025
   shuffle: true
-  max_sequence_length: 2048
+  max_sequence_length: 1024
   processing_num_workers: 10
   overwrite_cache: false
 
@@ -56,7 +71,7 @@ training:
   batch_size: 16  # 总批次大小，会根据设备数自动分配
   per_device_batch_size: 1  # 每设备批次大小，可配置
   learning_rate: 3e-4
-  epochs: 4
+  epochs: 2
   optimizer: "AdamW"
   scheduler: "linear"
   peft_mode: "full_rank"  # Options: "lora" (低秩微调), "full_rank" (路由参数全秩微调)

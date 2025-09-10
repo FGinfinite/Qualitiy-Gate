@@ -34,13 +34,27 @@ output_dir: ${hydra:run.dir}
 
 # Dataset configuration
 dataset:
-  # For full mode: load from processed datasets
-  data_dir: "dataset/train/processed"
-  dataset_names:
-    - "cot"
-    - "dolly"
-    - "flan_v2"
-    - "oasst1"
+  # Data source selection for full mode: "local" or "hf"
+  dataset_from: "hf"  # Options: "local" (本地数据集), "hf" (HuggingFace数据集)
+  
+  # Local dataset configuration (used when dataset_from="local" and mode="full")
+  local:
+    data_dir: "dataset/train/processed"
+    dataset_names:
+      - "cot"
+      - "dolly"
+      - "flan_v2"
+      - "oasst1"
+  
+  # HuggingFace dataset configuration (used when dataset_from="hf" and mode="full")
+  hf:
+    datasets:
+      - name: "teknium/OpenHermes-2.5"
+        dataset_name: "openhermes"
+        subset: null
+        split: "train"
+  
+  # Common parameters
   subset_ratio: 1.0  # Use 100% of data in full mode
   # For subset mode: load from selected data file
   data_path: "outputs/stage_2_selection/2025-08-11/03-52-40-batch=8_lr=0.001_loss=beta_moment_matching_tag=none/selected_data.jsonl"
