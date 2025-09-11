@@ -14,8 +14,8 @@ class DatasetServerManager:
     """数据集服务器管理器"""
 
     def __init__(self, config: Optional = None):
-        from .client import SharedDatasetClient
-        from .config import default_config
+        from share_dataset.client import SharedDatasetClient
+        from share_dataset.config import default_config
 
         self.config = config or default_config
         self.client = SharedDatasetClient(self.config)
