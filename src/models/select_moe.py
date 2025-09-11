@@ -154,7 +154,7 @@ class TrashExpert(nn.Module):
             mean = hidden_states.mean(dim=-1, keepdim=True)
             std = hidden_states.std(dim=-1, keepdim=True) + 1e-8  # 添加小epsilon避免零标准差
             noise = torch.randn_like(hidden_states) * std + mean
-            return noise
+            return noise.detach()
         else:  # "custom"或未来扩展
             return torch.zeros_like(hidden_states)
 

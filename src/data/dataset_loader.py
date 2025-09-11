@@ -153,6 +153,8 @@ def load_hf_datasets(
     hf_config: Dict,
     sample_percentage: float = 1.0,
     seed: int = 0,
+    use_shared_memory: bool = False,
+    shared_memory_config: Optional[Dict] = None,
 ) -> Dataset:
     """
     从HuggingFace加载数据集并转换格式
@@ -161,12 +163,55 @@ def load_hf_datasets(
         hf_config: HF数据集配置，包含datasets列表
         sample_percentage: 采样比例
         seed: 随机种子
+        use_shared_memory: 是否使用共享内存加速
+        shared_memory_config: 共享内存配置
 
     Returns:
         转换后的合并数据集
     """
     if not hf_config or "datasets" not in hf_config:
         raise ValueError("HF配置必须包含'datasets'字段")
+
+    log = logging.getLogger(__name__)
+
+    # 尝试共享内存加载（可选）
+    if use_shared_memory:
+        try:
+            from share_dataset import SharedDatasetClient, LoadResult
+
+            client = SharedDatasetClient()
+            for dataset_config in hf_config["datasets"]:
+                dataset_name = dataset_config["name"]
+
+                # 只支持OpenHermes数据集的共享内存加载
+                if "openhermes" in dataset_name.lower():
+                    log.info(f"尝试从共享内存加载数据集: {dataset_name}")
+
+                    result = client.load_shared_dataset(dataset_config)
+                    if result.status == LoadResult.SUCCESS:
+                        log.info(f"共享内存加载成功! 耗时: {result.load_time:.4f}秒, {result.message}")
+
+                        dataset = result.dataset
+
+                        # 应用采样（如果需要）
+                        if sample_percentage < 1.0:
+                            original_size = len(dataset)
+                            sample_size = int(original_size * sample_percentage)
+                            with temp_seed(seed):
+                                indices = np.random.permutation(original_size)[:sample_size]
+                            dataset = dataset.select(indices)
+                            log.info(f"采样后数据集大小: {len(dataset)}")
+
+                        # 由于从共享内存加载的数据已经是转换后的格式，直接返回
+                        log.info(f"从共享内存成功加载完整数据集，共 {len(dataset)} 个样本")
+                        return dataset
+                    else:
+                        log.info(f"共享内存加载失败: {result.message}，回退到传统加载方式")
+
+        except ImportError:
+            log.debug("共享内存模块不可用，回退到传统加载方式")
+        except Exception as e:
+            log.warning(f"共享内存加载出错: {e}，回退到传统加载方式")
 
     all_datasets = []
 
@@ -202,7 +247,7 @@ def load_hf_datasets(
             dataset = dataset.map(
                 convert_fn,
                 desc=f"转换数据集格式 - {internal_name}",
-                load_from_cache_file=False,  # 强制重新处理确保格式正确
+                load_from_cache_file=True,  # 使用缓存提升性能
             )
 
             all_datasets.append(dataset)
@@ -490,6 +535,10 @@ def load_and_prepare_dataset(cfg: DictConfig) -> Dataset:
     shuffle = getattr(cfg.dataset, "shuffle", True)
     dataset_from = getattr(cfg.dataset, "dataset_from", "local")
 
+    # 共享内存相关配置
+    use_shared_memory = getattr(cfg.dataset, "use_shared_memory", False)
+    shared_memory_config = getattr(cfg.dataset, "shared_memory", None)
+
     log = logging.getLogger(__name__)
 
     # 根据dataset_from参数选择数据源
@@ -512,6 +561,8 @@ def load_and_prepare_dataset(cfg: DictConfig) -> Dataset:
             hf_config=hf_config,
             sample_percentage=sample_percentage,
             seed=seed,
+            use_shared_memory=use_shared_memory,
+            shared_memory_config=shared_memory_config,
         )
 
     else:

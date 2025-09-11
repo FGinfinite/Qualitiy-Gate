@@ -1,0 +1,53 @@
+# @package _global_
+
+stage: random_selection
+
+# Hydra settings to create a timestamped output directory
+hydra:
+  run:
+    dir: outputs/random_selection/${now:%Y-%m-%d}/${now:%H-%M-%S}
+  sweep:
+    dir: outputs/random_selection
+    subdir: ${now:%Y-%m-%d}/${now:%H-%M-%S}
+  job:
+    config:
+      override_dirname:
+        kv_sep: "="
+        item_sep: ","
+        exclude_keys:
+          - hydra.run.dir
+          - hydra.sweep.dir
+          - hydra.sweep.subdir
+
+# Dataset configuration
+dataset:
+  # Data source: "local" or "hf"
+  dataset_from: "hf"
+  
+  # Local dataset configuration
+  local:
+    data_dir: "dataset/train/processed"
+    dataset_names: ["cot", "dolly", "flan_v2", "oasst1"]  # List of dataset names to randomly select from
+  
+  # HuggingFace dataset configuration (alternative)
+  hf:
+    datasets:
+      - name: "teknium/OpenHermes-2.5"
+        dataset_name: "openhermes"
+        subset: null
+        split: "train"
+
+# Data selection parameters
+selection_percentage: 0.05  # Select 5% of total data randomly
+seed: 42  # Random seed for reproducible results
+
+# Optional: Sample percentage from each dataset before random selection
+# Set to 1.0 to use all data, or smaller values for faster processing
+sample_percentage: 1.0
+
+# Output configuration
+output_filename: "dataset/selected_data/randomly_selected_data.jsonl"
+
+# Logging configuration
+logging:
+  verbose: false  # Enable detailed logging output

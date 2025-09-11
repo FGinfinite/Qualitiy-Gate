@@ -65,6 +65,12 @@ dataset:
   max_sequence_length: 1024
   processing_num_workers: 10
   overwrite_cache: false
+  
+  # Shared memory configuration (共享内存配置)
+  use_shared_memory: false  # 是否启用共享内存加速数据集加载
+  shared_memory:
+    server_timeout: 30      # 服务器响应超时时间（秒）
+    auto_start: false       # 是否自动启动服务器（暂未实现）
 
 # Training configuration
 training:
