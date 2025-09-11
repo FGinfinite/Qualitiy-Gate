@@ -79,30 +79,44 @@ def validate_batch_size_configuration(total_batch_size: int, per_device_batch_si
 
     Returns:
         gradient_accumulation_steps: 梯度累积步数
-
-    Raises:
-        SystemExit: 当批次大小配置无效时退出
     """
     effective_batch_size = per_device_batch_size * world_size
 
-    if total_batch_size % effective_batch_size != 0:
-        log.error("批次大小配置错误:")
-        log.error(f"  总批次大小: {total_batch_size}")
-        log.error(f"  每设备批次大小: {per_device_batch_size}")
-        log.error(f"  世界大小: {world_size}")
-        log.error(f"  有效批次大小: {effective_batch_size}")
-        log.error(f"总批次大小 ({total_batch_size}) 必须能被有效批次大小 ({effective_batch_size}) 整除")
-        log.error("请调整 training.batch_size 或 training.per_device_batch_size 配置")
-        raise SystemExit(1)
+    if total_batch_size % effective_batch_size == 0:
+        # 完全整除的情况
+        gradient_accumulation_steps = total_batch_size // effective_batch_size
+        actual_total_batch_size = total_batch_size
+    else:
+        # 无法整除的情况，选择最接近目标的配置
+        target_grad_steps = total_batch_size / effective_batch_size
+        grad_steps_floor = int(target_grad_steps)
+        grad_steps_ceil = grad_steps_floor + 1
 
-    gradient_accumulation_steps = total_batch_size // effective_batch_size
+        # 计算两种选择的实际批次大小
+        actual_batch_floor = grad_steps_floor * effective_batch_size
+        actual_batch_ceil = grad_steps_ceil * effective_batch_size
 
-    log.info("批次大小配置验证通过:")
-    log.info(f"  总批次大小: {total_batch_size}")
+        # 选择更接近目标的配置
+        diff_floor = abs(total_batch_size - actual_batch_floor)
+        diff_ceil = abs(total_batch_size - actual_batch_ceil)
+
+        if diff_floor <= diff_ceil:
+            gradient_accumulation_steps = grad_steps_floor
+            actual_total_batch_size = actual_batch_floor
+        else:
+            gradient_accumulation_steps = grad_steps_ceil
+            actual_total_batch_size = actual_batch_ceil
+
+    log.info("批次大小配置验证完成:")
+    log.info(f"  目标总批次大小: {total_batch_size}")
+    log.info(f"  实际总批次大小: {actual_total_batch_size}")
     log.info(f"  每设备批次大小: {per_device_batch_size}")
     log.info(f"  世界大小: {world_size}")
     log.info(f"  有效批次大小: {effective_batch_size}")
     log.info(f"  梯度累积步数: {gradient_accumulation_steps}")
+
+    if actual_total_batch_size != total_batch_size:
+        log.warning(f"实际批次大小 ({actual_total_batch_size}) 与目标 ({total_batch_size}) 不同，差异: {abs(actual_total_batch_size - total_batch_size)}")
 
     return gradient_accumulation_steps
 
