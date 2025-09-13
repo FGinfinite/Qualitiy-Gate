@@ -104,7 +104,7 @@ def load_local_datasets(
     return combined_dataset
 
 
-def convert_openhermes_format(example: Dict, dataset_name: str = "openhermes") -> Dict:
+def convert_openhermes_format(example: Dict, dataset_name: str = "openhermes", example_index: int = None) -> Dict:
     """
     转换OpenHermes-2.5格式到项目标准格式
 
@@ -116,6 +116,7 @@ def convert_openhermes_format(example: Dict, dataset_name: str = "openhermes") -
     Args:
         example: OpenHermes-2.5格式的数据样本
         dataset_name: 数据集名称，用于生成dataset字段
+        example_index: 样本在数据集中的索引，用于生成唯一ID
 
     Returns:
         转换后的标准格式数据
@@ -143,9 +144,14 @@ def convert_openhermes_format(example: Dict, dataset_name: str = "openhermes") -
     if not messages:
         raise ValueError("转换后没有有效的消息")
 
-    # 生成唯一ID
-    example_id = f"{dataset_name}_{example.get('id', hash(str(example)) % 1000000)}"
-
+    # 生成简单而可靠的ID
+    original_id = example.get("id")
+    if original_id is not None and str(original_id).strip() != "":
+        # 如果有有效的原始ID，使用它
+        example_id = f"{dataset_name}_{original_id}"
+    else:
+        # 使用数据集索引生成ID（推荐方案，简单且可靠）
+        example_id = f"{dataset_name}_{example_index:06d}"
     return {"dataset": dataset_name, "id": example_id, "messages": messages}
 
 
@@ -177,7 +183,7 @@ def load_hf_datasets(
     # 尝试共享内存加载（可选）
     if use_shared_memory:
         try:
-            from share_dataset import SharedDatasetClient, LoadResult
+            from share_dataset import LoadResult, SharedDatasetClient
 
             client = SharedDatasetClient()
             for dataset_config in hf_config["datasets"]:
@@ -238,17 +244,22 @@ def load_hf_datasets(
 
             # 转换格式
             if "openhermes" in dataset_name.lower():
-                # OpenHermes-2.5 格式转换
-                convert_fn = partial(convert_openhermes_format, dataset_name=internal_name)
+                # OpenHermes-2.5 格式转换，使用带索引的转换函数
+                def convert_with_index(example, idx):
+                    return convert_openhermes_format(
+                        example, dataset_name=internal_name, example_index=idx
+                    )
+
+                dataset = dataset.map(
+                    convert_with_index,
+                    with_indices=True,  # 传递索引
+                    desc=f"转换数据集格式 - {internal_name}",
+                    load_from_cache_file=True,  # 使用缓存提升性能
+                )
             else:
                 # 其他HF数据集可以在这里添加转换逻辑
                 raise ValueError(f"暂不支持数据集格式: {dataset_name}")
 
-            dataset = dataset.map(
-                convert_fn,
-                desc=f"转换数据集格式 - {internal_name}",
-                load_from_cache_file=True,  # 使用缓存提升性能
-            )
 
             all_datasets.append(dataset)
             print(f"已加载HF数据集 '{internal_name}': {len(dataset)} 个样本")

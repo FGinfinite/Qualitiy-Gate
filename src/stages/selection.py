@@ -10,7 +10,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers import AutoTokenizer, set_seed
 
-from src.data import load_local_datasets
+from src.data import load_and_prepare_dataset
 from src.models.select_moe import SelectMoeForCausalLM, register_select_moe
 from src.training.full_rank_finetuning import load_full_rank_weights
 
@@ -197,13 +197,8 @@ def select(cfg: DictConfig) -> None:
     log.info(f"✓ MoE专家数量: {dummy_outputs.router_logits[0]['moe_logits'].shape[-1]}")
 
     # 3. 加载和准备数据集
-    log.info(f"加载数据集: {cfg.dataset.dataset_names}")
-    dataset = load_local_datasets(
-        data_dir=cfg.dataset.data_dir,
-        dataset_names=cfg.dataset.dataset_names,
-        sample_percentage=cfg.dataset.subset_ratio,
-        seed=cfg.seed,
-    )
+    log.info(f"正在加载数据集...")
+    dataset = load_and_prepare_dataset(cfg)
 
     if cfg.dataset.shuffle:
         log.info("对数据集进行shuffle...")
@@ -214,15 +209,27 @@ def select(cfg: DictConfig) -> None:
 
     # 4. 数据评分和路由logits记录
     scored_data = []
+
+    # 确定数据集名称列表
+    if cfg.dataset.dataset_from == "local":
+        dataset_names_list = cfg.dataset.local.dataset_names
+    elif cfg.dataset.dataset_from == "hf":
+        dataset_names_list = [ds.dataset_name for ds in cfg.dataset.hf.datasets]
+    else:
+        raise ValueError(f"不支持的数据源: {cfg.dataset.dataset_from}")
+
+    log.info(f"数据集来源: {cfg.dataset.dataset_from}")
+    log.info(f"数据集名称: {dataset_names_list}")
+
     all_router_data_by_dataset = {
         name: {
             "quality_score": [],  # 质量门分数
             "moe_logits": [],  # MoE路由logits
             "sample_ids": [],  # 样本ID
         }
-        for name in cfg.dataset.dataset_names
+        for name in dataset_names_list
     }
-    dataset_sample_counts = {name: 0 for name in cfg.dataset.dataset_names}
+    dataset_sample_counts = {name: 0 for name in dataset_names_list}
 
     # 创建数据加载器
     def collate_fn(batch):
@@ -379,7 +386,7 @@ def select(cfg: DictConfig) -> None:
     router_data_dir = os.path.join(output_dir, "router_data")
     os.makedirs(router_data_dir, exist_ok=True)
 
-    for dataset_name in cfg.dataset.dataset_names:
+    for dataset_name in dataset_names_list:
         dataset_router_data = all_router_data_by_dataset[dataset_name]
 
         if dataset_router_data["quality_score"] and dataset_router_data["moe_logits"]:
