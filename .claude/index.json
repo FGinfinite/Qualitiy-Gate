@@ -1,0 +1,137 @@
+{
+  "timestamp": "2025-09-14T22:43:47+08:00",
+  "project_name": "Select-MoE",
+  "project_summary": "Select-MoE数据选择框架 - 使用混合专家模型进行数据选择的四阶段流水线框架",
+  "scan_coverage": {
+    "total_estimated_files": 150,
+    "scanned_files": 45,
+    "coverage_percentage": 30.0,
+    "scan_strategy": "模块优先扫描"
+  },
+  "modules": [
+    {
+      "path": "src/models",
+      "name": "核心模型模块",
+      "description": "Select-MoE模型实现，包含两层路由架构",
+      "entry_points": ["src/models/select_moe.py"],
+      "key_files": ["src/models/__init__.py"],
+      "interfaces": ["SelectMoeForCausalLM", "SelectMoeConfig"],
+      "dependencies": ["transformers", "torch"],
+      "has_tests": false,
+      "coverage": "高"
+    },
+    {
+      "path": "src/data",
+      "name": "数据处理模块",
+      "description": "多源数据加载和预处理，支持本地和HuggingFace数据集",
+      "entry_points": ["src/data/dataset_loader.py"],
+      "key_files": ["src/data/__init__.py"],
+      "interfaces": ["load_local_datasets", "load_hf_datasets", "encode_data"],
+      "dependencies": ["datasets", "transformers"],
+      "has_tests": false,
+      "coverage": "中等"
+    },
+    {
+      "path": "src/clustering",
+      "name": "聚类算法模块",
+      "description": "GPU加速聚类算法，支持K-Means和多GPU并行处理",
+      "entry_points": ["src/clustering/cluster_selection.py"],
+      "key_files": ["src/clustering/kmeans_clustering.py", "src/clustering/gpu_metrics.py", "src/clustering/parallel_kmeans.py"],
+      "interfaces": ["ClusterBasedSelection", "GPUKMeansClustering"],
+      "dependencies": ["torch", "cuml"],
+      "has_tests": false,
+      "coverage": "高"
+    },
+    {
+      "path": "src/selection",
+      "name": "数据选择模块",
+      "description": "解耦的数据选择逻辑，支持聚类选择和多源数据集",
+      "entry_points": ["src/selection/data_selection.py"],
+      "key_files": ["src/selection/__init__.py"],
+      "interfaces": ["cluster_based_selection", "load_all_router_data"],
+      "dependencies": ["torch", "datasets"],
+      "has_tests": false,
+      "coverage": "高"
+    },
+    {
+      "path": "src/stages",
+      "name": "四阶段流水线模块",
+      "description": "实现Warmup训练、Selection选择、Finetune微调、Evaluate评估四个阶段",
+      "entry_points": ["src/stages/warmup.py", "src/stages/selection.py", "src/stages/finetune.py"],
+      "key_files": ["src/stages/__init__.py"],
+      "interfaces": ["warmup", "selection", "finetune"],
+      "dependencies": ["accelerate", "peft", "transformers"],
+      "has_tests": false,
+      "coverage": "高"
+    },
+    {
+      "path": "configs",
+      "name": "配置文件模块",
+      "description": "Hydra配置管理，包含各阶段配置和加速器配置",
+      "entry_points": ["configs/stage_1_warmup.yaml", "configs/stage_2_selection.yaml", "configs/stage_3_finetune.yaml"],
+      "key_files": ["configs/accelerate_config/", "configs/training/"],
+      "interfaces": ["stage配置", "模型配置", "加速器配置"],
+      "dependencies": ["hydra-core"],
+      "has_tests": false,
+      "coverage": "高"
+    },
+    {
+      "path": "scripts",
+      "name": "执行脚本模块",
+      "description": "各阶段执行脚本和工具脚本，支持参数覆盖",
+      "entry_points": ["scripts/run_stage_1.sh", "scripts/run_stage_2.sh", "scripts/run_stage_3.sh"],
+      "key_files": ["scripts/continue_selection.py", "scripts/batch_selection.py"],
+      "interfaces": ["Shell脚本接口", "Python脚本接口"],
+      "dependencies": ["bash", "python"],
+      "has_tests": false,
+      "coverage": "高"
+    },
+    {
+      "path": "docs",
+      "name": "文档模块",
+      "description": "项目文档和使用指南",
+      "entry_points": ["docs/docs.md"],
+      "key_files": ["docs/README_continue_selection.md", "docs/custom_loss_fn.md", "docs/router_data_format.md"],
+      "interfaces": ["文档接口"],
+      "dependencies": [],
+      "has_tests": false,
+      "coverage": "中等"
+    }
+  ],
+  "ignored_patterns": [
+    "__pycache__/**",
+    "*.py[oc]",
+    "build/**",
+    "dist/**",
+    ".venv/**",
+    "outputs/**",
+    "converted_models/**",
+    "dataset/**",
+    "LESS/**",
+    ".ruff_cache/**",
+    "*.lock",
+    "*.log"
+  ],
+  "ignored_stats": {
+    "ignored_files_count": 105,
+    "top_ignored_directories": ["dataset", "outputs", "LESS", "__pycache__", ".ruff_cache"]
+  },
+  "gaps": [
+    "缺乏单元测试覆盖",
+    "examples模块未深度扫描",
+    "ref_model参考模块未扫描",
+    "工具模块(src/utils)需要更详细的接口文档"
+  ],
+  "next_scan_recommendations": [
+    "优先补扫：examples/comprehensive_analysis.py",
+    "优先补扫：src/utils/工具函数详细接口",
+    "优先补扫：ref_model/参考模型实现",
+    "建议添加：单元测试框架和测试用例"
+  ],
+  "truncated": false,
+  "scan_limits": {
+    "hit_file_limit": false,
+    "hit_time_limit": false,
+    "hit_tool_limit": false
+  }
+}
