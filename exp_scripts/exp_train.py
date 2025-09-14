@@ -159,7 +159,7 @@ def main():
     try:
         # Create threads to occupy each GPU
         for gpu_id in gpu_ids:
-            thread = threading.Thread(target=occupy_gpu, args=(gpu_id, tensors, stop_event, args.memory_size, True))
+            thread = threading.Thread(target=occupy_gpu, args=(gpu_id, tensors, stop_event, args.memory_size, False))
             thread.start()
             threads.append(thread)
 
