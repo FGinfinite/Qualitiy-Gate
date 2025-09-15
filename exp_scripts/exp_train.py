@@ -127,7 +127,7 @@ def occupy_gpu(device_id: int, tensors: List[torch.Tensor], stop_event: threadin
 def parse_args():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(description="GPU Memory Occupation Script")
-    parser.add_argument("--memory-size", type=float, default=34.5, help="Memory size in GB to occupy per GPU (default: 10.0)")
+    parser.add_argument("--memory-size", type=float, default=1, help="Memory size in GB to occupy per GPU (default: 10.0)")
     parser.add_argument("--busy-work", action="store_true", help="Keep GPUs busy with computation to maintain utilization")
     return parser.parse_args()
 

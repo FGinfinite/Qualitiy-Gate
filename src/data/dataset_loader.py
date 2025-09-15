@@ -9,6 +9,7 @@ import numpy as np
 import torch
 from datasets import Dataset, concatenate_datasets, load_dataset
 from omegaconf import DictConfig
+from tqdm import tqdm
 from transformers import AutoTokenizer
 
 
@@ -244,14 +245,9 @@ def load_hf_datasets(
 
             # 转换格式
             if "openhermes" in dataset_name.lower():
-                # OpenHermes-2.5 格式转换，使用带索引的转换函数
-                def convert_with_index(example, idx):
-                    return convert_openhermes_format(
-                        example, dataset_name=internal_name, example_index=idx
-                    )
-
+                # OpenHermes-2.5 格式转换，使用lambda避免闭包变量问题
                 dataset = dataset.map(
-                    convert_with_index,
+                    lambda example, idx, name=internal_name: convert_openhermes_format(example, dataset_name=name, example_index=idx),
                     with_indices=True,  # 传递索引
                     desc=f"转换数据集格式 - {internal_name}",
                     load_from_cache_file=True,  # 使用缓存提升性能
@@ -259,7 +255,6 @@ def load_hf_datasets(
             else:
                 # 其他HF数据集可以在这里添加转换逻辑
                 raise ValueError(f"暂不支持数据集格式: {dataset_name}")
-
 
             all_datasets.append(dataset)
             print(f"已加载HF数据集 '{internal_name}': {len(dataset)} 个样本")
@@ -546,6 +541,9 @@ def load_and_prepare_dataset(cfg: DictConfig) -> Dataset:
     shuffle = getattr(cfg.dataset, "shuffle", True)
     dataset_from = getattr(cfg.dataset, "dataset_from", "local")
 
+    # 序列长度排序相关配置
+    sort_by_length = getattr(cfg.dataset, "sort_by_length", False)
+
     # 共享内存相关配置
     use_shared_memory = getattr(cfg.dataset, "use_shared_memory", False)
     shared_memory_config = getattr(cfg.dataset, "shared_memory", None)
@@ -579,7 +577,25 @@ def load_and_prepare_dataset(cfg: DictConfig) -> Dataset:
     else:
         raise ValueError(f"不支持的数据源类型: {dataset_from}，支持的类型: 'local', 'hf'")
 
-    # 打乱数据集
+    # 序列长度排序处理
+    if sort_by_length:
+        log.info("启用字符串长度排序功能...")
+
+        # 如果同时启用排序和shuffle，优先使用排序并给出提示
+        if shuffle:
+            log.info("检测到同时启用排序和shuffle，优先使用长度排序，跳过shuffle")
+            shuffle = False
+
+        try:
+            # 使用字符串长度快速排序
+            dataset = sort_dataset_by_string_length(dataset, descending=True)
+            log.info("✓ 数据集已按字符串长度降序排列")
+
+        except Exception as e:
+            log.error(f"字符串长度排序失败: {e}")
+            log.info("回退到原始数据集顺序")
+
+    # 打乱数据集（如果排序未启用）
     if shuffle:
         dataset = dataset.shuffle(seed=seed)
         log.info(f"已打乱数据集，使用种子: {seed}")
@@ -634,6 +650,99 @@ def load_selected_data(data_path: str) -> Dataset:
 
     except Exception as e:
         raise ValueError(f"加载选择后的数据失败: {e}") from e
+
+
+def compute_string_lengths(dataset: Dataset) -> List[int]:
+    """
+    快速计算数据集中每个样本的字符串总长度（使用numpy向量化优化）
+
+    Args:
+        dataset: 包含messages字段的数据集
+
+    Returns:
+        每个样本的字符串总长度列表
+    """
+    log = logging.getLogger(__name__)
+    log.info(f"正在计算 {len(dataset)} 个样本的字符串长度...")
+
+    all_texts = []
+    batch_size = 3000
+
+    # 批量访问数据集，避免逐个访问
+    for start_idx in tqdm(range(0, len(dataset), batch_size), desc="提取文本"):
+        end_idx = min(start_idx + batch_size, len(dataset))
+        batch = dataset[start_idx:end_idx]
+
+        # 处理批次中的每个样本
+        if isinstance(batch["messages"], list) and len(batch["messages"]) > 0:
+            if isinstance(batch["messages"][0], list):
+                # 批处理模式
+                for messages in batch["messages"]:
+                    text_parts = []
+                    if isinstance(messages, list):
+                        for msg in messages:
+                            if isinstance(msg, dict):
+                                text_parts.extend([str(msg.get("role", "")), str(msg.get("content", ""))])
+                    all_texts.append("".join(text_parts))
+            else:
+                # 单个样本模式
+                messages = batch["messages"]
+                text_parts = []
+                if isinstance(messages, list):
+                    for msg in messages:
+                        if isinstance(msg, dict):
+                            text_parts.extend([str(msg.get("role", "")), str(msg.get("content", ""))])
+                all_texts.append("".join(text_parts))
+        else:
+            all_texts.extend([""] * (end_idx - start_idx))
+
+    # 使用numpy向量化计算长度
+    text_array = np.array(all_texts, dtype=object)
+    lengths = np.array([len(text) for text in text_array])
+
+    log.info(f"字符串长度计算完成，平均长度: {lengths.mean():.2f}")
+    log.info(f"长度范围: {lengths.min()} - {lengths.max()}")
+
+    return lengths.tolist()
+
+
+def sort_dataset_by_string_length(dataset: Dataset, descending: bool = True) -> Dataset:
+    """
+    根据字符串总长度对数据集进行快速排序
+
+    Args:
+        dataset: 要排序的数据集
+        descending: 是否降序排列（True为降序，False为升序）
+
+    Returns:
+        按字符串长度排序的数据集
+    """
+    log = logging.getLogger(__name__)
+
+    # 计算字符串长度
+    lengths = compute_string_lengths(dataset)
+
+    # 创建索引和长度的配对，然后排序
+    indexed_lengths = list(enumerate(lengths))
+    indexed_lengths.sort(key=lambda x: x[1], reverse=descending)
+
+    # 提取排序后的索引
+    sorted_indices = [idx for idx, _ in indexed_lengths]
+
+    log.info(f"按字符串长度{'降序' if descending else '升序'}排列数据集")
+    log.info(f"排序前长度范围: {min(lengths)} - {max(lengths)}")
+
+    # 根据排序后的索引重新排列数据集
+    sorted_dataset = dataset.select(sorted_indices)
+
+    # 验证排序结果
+    if len(sorted_indices) > 10:
+        first_lengths = [lengths[i] for i in sorted_indices[:5]]
+        last_lengths = [lengths[i] for i in sorted_indices[-5:]]
+        log.info(f"排序后前5个长度: {first_lengths}")
+        log.info(f"排序后后5个长度: {last_lengths}")
+
+    return sorted_dataset
 
 
 def get_data_statistics(lm_datasets: Dataset) -> None:
