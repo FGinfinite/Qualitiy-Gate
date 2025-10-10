@@ -70,7 +70,7 @@ dataset:
   sort_by_length: true  # 是否按字符串长度降序排列数据（推荐开启以优化推理效率）
 
 # Data selection percentage (0.05 means select top 5% of the data)
-selection_percentage: 0.05
+selection_percentage: 0.0125
 
 # Clustering method: currently only "kmeans" is supported
 clustering_method: "kmeans"

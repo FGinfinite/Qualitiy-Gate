@@ -33,3 +33,5 @@ outputs*/
 run.sh
 run2.sh
 run3.sh
+
+.env

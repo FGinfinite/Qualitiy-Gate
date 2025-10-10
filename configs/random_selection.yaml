@@ -38,7 +38,7 @@ dataset:
         split: "train"
 
 # Data selection parameters
-selection_percentage: 0.05  # Select 5% of total data randomly
+selection_percentage: 0.0125  # Select 5% of total data randomly
 seed: 42  # Random seed for reproducible results
 
 # Optional: Sample percentage from each dataset before random selection

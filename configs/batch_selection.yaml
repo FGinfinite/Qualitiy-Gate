@@ -25,7 +25,7 @@ output_dir: ${hydra:run.dir}
 root_dir: "outputs/stage_2_selection"
 
 # Data selection percentage (0.05 means select top 5% of the data)
-selection_percentage: 0.05
+selection_percentage: 0.0125
 
 # Optional: Original dataset directory path (auto-inferred if not specified)
 data_dir: null

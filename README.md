@@ -340,11 +340,6 @@ bash scripts/run_stage_3.sh training.lora.r=128 training.batch_size=64
 export CUDA_VISIBLE_DEVICES=0,1,2,3  # 指定使用的GPU
 ```
 
-### 内存需求
-- **阶段1**: Select-MoE 全参数训练，建议至少 16GB GPU 内存
-- **阶段2**: 聚类数据选择，建议 4-8GB GPU 内存（取决于数据集规模）
-- **阶段3**: Llama-2-7B LoRA 训练，建议 24GB 以上 GPU 内存
-
 ### 路径依赖
 注意各阶段之间的路径依赖关系，确保使用正确的输入路径：
 - 阶段2 需要阶段1 的 `full_rank_weights.pt`
