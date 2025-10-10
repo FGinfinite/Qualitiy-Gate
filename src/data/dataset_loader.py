@@ -245,12 +245,16 @@ def load_hf_datasets(
 
             # 转换格式
             if "openhermes" in dataset_name.lower():
+                # 获取需要移除的列（保留 dataset 和 id）
+                columns_to_remove = [col for col in dataset.column_names if col not in ["dataset", "id"]]
+
                 # OpenHermes-2.5 格式转换，使用lambda避免闭包变量问题
                 dataset = dataset.map(
                     lambda example, idx, name=internal_name: convert_openhermes_format(example, dataset_name=name, example_index=idx),
                     with_indices=True,  # 传递索引
                     desc=f"转换数据集格式 - {internal_name}",
                     load_from_cache_file=True,  # 使用缓存提升性能
+                    remove_columns=columns_to_remove,  # 移除所有原始字段
                 )
             else:
                 # 其他HF数据集可以在这里添加转换逻辑
