@@ -6,7 +6,7 @@ Select-MoE实验进度跟踪脚本
 帮助识别哪些实验已完成并跟踪流水线进度。
 
 使用方法:
-    python experiment_tracker.py [--outputs-dir outputs] [--verbose] [--format table|tree] [--save-report]
+    python experiment_tracker.py [--outputs-dir outputs] [--verbose] [--format table|tree] [--save-report] [--short-path] [--suggest]
 """
 
 import argparse
@@ -40,8 +40,9 @@ class ExperimentInfo:
 class ExperimentTracker:
     """实验进度跟踪主类"""
 
-    def __init__(self, outputs_dir: str = "outputs"):
+    def __init__(self, outputs_dir: str = "outputs", short_path: bool = False):
         self.outputs_dir = Path(outputs_dir)
+        self.short_path = short_path
         self.stage_1_exps: Dict[str, ExperimentInfo] = {}
         self.stage_2_exps: Dict[str, ExperimentInfo] = {}
         self.stage_3_exps: Dict[str, ExperimentInfo] = {}
@@ -148,8 +149,8 @@ class ExperimentTracker:
                 exp_name_encoded = exp_name_encoded[:-2]
 
             # 恢复阶段3的实验名称格式
-            # 输入: 09-48-18-MODEL=__batch=128_lr=2e-05_tag=SE_finetune__-DATA=__19-57-09-batch=16_lr=0.0001_loss=sigmoid_lossWeight=1_sampleWise=True_tag=none
-            # 输出: 09-48-18-MODEL=<|batch=128_lr=2e-05_tag=SE_finetune|>-DATA=<|19-57-09-batch=16_lr=0.0001_loss=sigmoid_lossWeight=1_sampleWise=True_tag=none|>
+            # 输入: 09-48-18-MODEL=__batch=128_lr=2e-05_tag=SE_finetune__-DATA=__19-57-09-batch=16_lr=0.0001_loss=...
+            # 输出: 09-48-18-MODEL=<|batch=128_lr=2e-05_tag=SE_finetune|>-DATA=<|19-57-09-batch=16_lr=0.0001_loss=...|>
 
             exp_name = exp_name_encoded
             # 使用循环替换所有 =__...__ 模式，处理末尾没有 __ 的情况
@@ -362,6 +363,18 @@ class ExperimentTracker:
 
         return table
 
+    def get_display_path(self, exp: ExperimentInfo) -> str:
+        """根据short_path设置返回实验路径显示名称"""
+        if self.short_path:
+            return exp.name
+        else:
+            # 返回相对于outputs目录的完整路径
+            return str(exp.path.relative_to(self.outputs_dir.parent))
+
+    def get_full_relative_path(self, exp: ExperimentInfo) -> str:
+        """始终返回完整相对路径，不受short_path影响"""
+        return str(exp.path.relative_to(self.outputs_dir.parent))
+
     def create_pipeline_table(self) -> PrettyTable:
         """创建流水线表格，支持一对多关系"""
         table = PrettyTable()
@@ -369,7 +382,7 @@ class ExperimentTracker:
         # 移除max_width限制，显示完整实验名称
 
         for stage1_path, stage1_exp in sorted(self.stage_1_exps.items(), key=lambda x: x[1].path.name):
-            stage1_name = stage1_exp.name  # 显示完整名称
+            stage1_name = self.get_display_path(stage1_exp)
             stage1_status = self.get_status_icon(stage1_exp.status)
 
             stage2_children = self.relationships.get(stage1_path, [])
@@ -382,7 +395,7 @@ class ExperimentTracker:
                     if not stage2_exp:
                         continue
 
-                    stage2_name = stage2_exp.name  # 显示完整名称
+                    stage2_name = self.get_display_path(stage2_exp)
                     stage2_status = self.get_status_icon(stage2_exp.status)
 
                     stage3_children = self.relationships.get(stage2_path, [])
@@ -398,7 +411,7 @@ class ExperimentTracker:
                             if not stage3_exp:
                                 continue
 
-                            stage3_name = stage3_exp.name  # 显示完整名称
+                            stage3_name = self.get_display_path(stage3_exp)
                             stage3_status = self.get_status_icon(stage3_exp.status)
 
                             stage4_children = self.relationships.get(stage3_path, [])
@@ -424,7 +437,7 @@ class ExperimentTracker:
                                     if not stage4_exp:
                                         continue
 
-                                    stage4_name = stage4_exp.name  # 显示完整名称
+                                    stage4_name = self.get_display_path(stage4_exp)
                                     stage4_status = self.get_status_icon(stage4_exp.status)
 
                                     if i == 0 and j == 0 and k == 0:
@@ -456,7 +469,129 @@ class ExperimentTracker:
         """转义Markdown表格中的管道字符"""
         return str(text).replace("|", "&#124;")
 
-    def generate_markdown_report(self, output_path: Path) -> str:
+    def generate_suggestions(self) -> Dict[str, any]:
+        """生成实验建议"""
+        suggestions = {
+            "missing_exps": {1: [], 2: [], 3: [], 4: []},
+            "needs_continuation": {1: [], 2: [], 3: []},
+            "needs_selection": [],
+        }
+
+        # 收集缺失状态的实验
+        for exp in self.stage_1_exps.values():
+            if exp.status == "missing":
+                suggestions["missing_exps"][1].append(self.get_full_relative_path(exp))
+
+        for exp in self.stage_2_exps.values():
+            if exp.status == "missing":
+                suggestions["missing_exps"][2].append(self.get_full_relative_path(exp))
+            elif exp.status == "partial":
+                # 部分完成的阶段2需要进行数据选择
+                suggestions["needs_selection"].append(self.get_full_relative_path(exp))
+
+        for exp in self.stage_3_exps.values():
+            if exp.status == "missing":
+                suggestions["missing_exps"][3].append(self.get_full_relative_path(exp))
+
+        for exp in self.stage_4_exps.values():
+            if exp.status == "missing":
+                suggestions["missing_exps"][4].append(self.get_full_relative_path(exp))
+
+        # 收集需要继续运行的实验
+        # 阶段1：没有完成的阶段2子实验
+        for stage1_path, stage1_exp in self.stage_1_exps.items():
+            if stage1_exp.status == "complete":
+                stage2_children = self.relationships.get(stage1_path, [])
+                has_complete_stage2 = any(self.stage_2_exps.get(child).status == "complete" for child in stage2_children if child in self.stage_2_exps)
+                if not has_complete_stage2:
+                    suggestions["needs_continuation"][1].append(self.get_full_relative_path(stage1_exp))
+
+        # 阶段2：完成的阶段2但没有完成的阶段3子实验
+        for stage2_path, stage2_exp in self.stage_2_exps.items():
+            if stage2_exp.status == "complete":
+                stage3_children = self.relationships.get(stage2_path, [])
+                has_complete_stage3 = any(self.stage_3_exps.get(child).status == "complete" for child in stage3_children if child in self.stage_3_exps)
+                if not has_complete_stage3:
+                    # 阶段2需要添加 /selected_data.jsonl 后缀
+                    suggestions["needs_continuation"][2].append(self.get_full_relative_path(stage2_exp) + "/selected_data.jsonl")
+
+        # 阶段3：完成的阶段3但没有完成的阶段4子实验
+        for stage3_path, stage3_exp in self.stage_3_exps.items():
+            if stage3_exp.status == "complete":
+                stage4_children = self.relationships.get(stage3_path, [])
+                has_complete_stage4 = any(self.stage_4_exps.get(child).status == "complete" for child in stage4_children if child in self.stage_4_exps)
+                if not has_complete_stage4:
+                    suggestions["needs_continuation"][3].append(self.get_full_relative_path(stage3_exp))
+
+        return suggestions
+
+    def print_suggestions(self, suggestions: Dict[str, any]):
+        """打印建议到控制台"""
+        print("\n" + "=" * 80)
+        print("实验建议")
+        print("=" * 80)
+
+        # 删除无用文件夹建议
+        has_missing = False
+        for stage in [1, 2, 3, 4]:
+            if suggestions["missing_exps"][stage]:
+                has_missing = True
+                break
+
+        if has_missing:
+            print("\n【删除无用文件夹建议】")
+            for stage in [1, 2, 3, 4]:
+                if suggestions["missing_exps"][stage]:
+                    stage_names = {1: "阶段一", 2: "阶段二", 3: "阶段三", 4: "阶段四"}
+                    print(f"\n对于{stage_names[stage]}，建议使用以下指令删除无用文件夹：")
+                    print("rm -rf \\")
+                    for i, path in enumerate(sorted(suggestions["missing_exps"][stage])):
+                        if i < len(suggestions["missing_exps"][stage]) - 1:
+                            print(f'  "{path}" \\')
+                        else:
+                            print(f'  "{path}"')
+
+        # 继续运行实验建议
+        has_continuation = any(suggestions["needs_continuation"][stage] for stage in [1, 2, 3]) or suggestions["needs_selection"]
+        if has_continuation:
+            print("\n【继续运行实验建议】")
+
+            if suggestions["needs_continuation"][1]:
+                print("\n阶段一有以下结果需要持续运行阶段二的实验：")
+                for i, path in enumerate(sorted(suggestions["needs_continuation"][1])):
+                    if i < len(suggestions["needs_continuation"][1]) - 1:
+                        print(f'"{path}",\\')
+                    else:
+                        print(f'"{path}"')
+
+            if suggestions["needs_selection"]:
+                print("\n以下阶段二实验需要进行数据选择：")
+                for i, path in enumerate(sorted(suggestions["needs_selection"])):
+                    if i < len(suggestions["needs_selection"]) - 1:
+                        print(f'"{path}",\\')
+                    else:
+                        print(f'"{path}"')
+
+            if suggestions["needs_continuation"][2]:
+                print("\n阶段二有以下结果需要持续运行阶段三的实验：")
+                for i, path in enumerate(sorted(suggestions["needs_continuation"][2])):
+                    if i < len(suggestions["needs_continuation"][2]) - 1:
+                        print(f'"{path}",\\')
+                    else:
+                        print(f'"{path}"')
+
+            if suggestions["needs_continuation"][3]:
+                print("\n阶段三有以下结果需要持续运行阶段四的实验：")
+                for i, path in enumerate(sorted(suggestions["needs_continuation"][3])):
+                    if i < len(suggestions["needs_continuation"][3]) - 1:
+                        print(f'"{path}",\\')
+                    else:
+                        print(f'"{path}"')
+
+        if not has_missing and not has_continuation:
+            print("\n暂无建议。")
+
+    def generate_markdown_report(self, output_path: Path, suggestions: Dict[str, any] = None) -> str:
         """生成Markdown报告"""
         lines = [
             "# Select-MoE实验进度报告",
@@ -526,13 +661,92 @@ class ExperimentTracker:
                     datasets = self.escape_markdown_pipes(datasets)
                     lines.append(f"| {name} | {icon} | {parent} | {datasets} |")
 
+        # 添加建议部分
+        if suggestions:
+            lines.extend(["", "## 实验建议", ""])
+
+            # 删除无用文件夹建议
+            has_missing = any(suggestions["missing_exps"][stage] for stage in [1, 2, 3, 4])
+            if has_missing:
+                lines.append("### 删除无用文件夹建议")
+                lines.append("")
+                for stage in [1, 2, 3, 4]:
+                    if suggestions["missing_exps"][stage]:
+                        stage_names = {1: "阶段一", 2: "阶段二", 3: "阶段三", 4: "阶段四"}
+                        lines.append(f"**{stage_names[stage]}** - 建议使用以下指令删除无用文件夹：")
+                        lines.append("")
+                        lines.append("```bash")
+                        lines.append("rm -rf \\")
+                        for i, path in enumerate(sorted(suggestions["missing_exps"][stage])):
+                            if i < len(suggestions["missing_exps"][stage]) - 1:
+                                lines.append(f'  "{path}" \\')
+                            else:
+                                lines.append(f'  "{path}"')
+                        lines.append("```")
+                        lines.append("")
+
+            # 继续运行实验建议
+            has_continuation = any(suggestions["needs_continuation"][stage] for stage in [1, 2, 3]) or suggestions["needs_selection"]
+            if has_continuation:
+                lines.append("### 继续运行实验建议")
+                lines.append("")
+
+                if suggestions["needs_continuation"][1]:
+                    lines.append("**阶段一** - 以下结果需要持续运行阶段二的实验：")
+                    lines.append("")
+                    lines.append("```bash")
+                    for i, path in enumerate(sorted(suggestions["needs_continuation"][1])):
+                        if i < len(suggestions["needs_continuation"][1]) - 1:
+                            lines.append(f'"{path}",\\')
+                        else:
+                            lines.append(f'"{path}"')
+                    lines.append("```")
+                    lines.append("")
+
+                if suggestions["needs_selection"]:
+                    lines.append("**阶段二（部分完成）** - 以下实验需要进行数据选择：")
+                    lines.append("")
+                    lines.append("```bash")
+                    for i, path in enumerate(sorted(suggestions["needs_selection"])):
+                        if i < len(suggestions["needs_selection"]) - 1:
+                            lines.append(f'"{path}",\\')
+                        else:
+                            lines.append(f'"{path}"')
+                    lines.append("```")
+                    lines.append("")
+
+                if suggestions["needs_continuation"][2]:
+                    lines.append("**阶段二** - 以下结果需要持续运行阶段三的实验：")
+                    lines.append("")
+                    lines.append("```bash")
+                    for i, path in enumerate(sorted(suggestions["needs_continuation"][2])):
+                        if i < len(suggestions["needs_continuation"][2]) - 1:
+                            lines.append(f'"{path}",\\')
+                        else:
+                            lines.append(f'"{path}"')
+                    lines.append("```")
+                    lines.append("")
+
+                if suggestions["needs_continuation"][3]:
+                    lines.append("**阶段三** - 以下结果需要持续运行阶段四的实验：")
+                    lines.append("")
+                    lines.append("```bash")
+                    for i, path in enumerate(sorted(suggestions["needs_continuation"][3])):
+                        if i < len(suggestions["needs_continuation"][3]) - 1:
+                            lines.append(f'"{path}",\\')
+                        else:
+                            lines.append(f'"{path}"')
+                    lines.append("```")
+                    lines.append("")
+
         lines.extend(
             [
                 "",
                 "---",
                 "",
                 f"**报告生成于**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}  ",
-                f"**总计**: 阶段1({len(self.stage_1_exps)}) | 阶段2({len(self.stage_2_exps)}) | 阶段3({len(self.stage_3_exps)}) | 阶段4({len(self.stage_4_exps)})",
+                f"**总计**: 阶段1({len(self.stage_1_exps)}) | 阶段2({len(self.stage_2_exps)}) | "
+                f"阶段3({len(self.stage_3_exps)}) | 阶段4({len(self.stage_4_exps)})",
             ]
         )
 
@@ -541,7 +755,7 @@ class ExperimentTracker:
             f.write(content)
         return content
 
-    def print_results(self, verbose: bool = False, output_format: str = "tree", save_report: bool = False):
+    def print_results(self, verbose: bool = False, output_format: str = "tree", save_report: bool = False, show_suggestions: bool = False):
         """打印结果"""
         print("\n" + "=" * 80)
         print("SELECT-MOE实验进度跟踪 - 阶段1-4")
@@ -570,9 +784,15 @@ class ExperimentTracker:
         else:
             self._print_tree_format(verbose)
 
+        # 生成和显示建议
+        suggestions = None
+        if show_suggestions:
+            suggestions = self.generate_suggestions()
+            self.print_suggestions(suggestions)
+
         if save_report:
             report_path = self.outputs_dir / f"experiment_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
-            self.generate_markdown_report(report_path)
+            self.generate_markdown_report(report_path, suggestions=suggestions)
             print(f"\n报告已保存到: {report_path}")
 
         print(f"\n{'=' * 80}")
@@ -583,7 +803,8 @@ class ExperimentTracker:
 
         for stage1_path, stage1_exp in sorted(self.stage_1_exps.items(), key=lambda x: x[1].path.name):
             icon = self.get_status_icon(stage1_exp.status)
-            print(f"\n{icon} 阶段1: {stage1_exp.name}")
+            display_name = self.get_display_path(stage1_exp)
+            print(f"\n{icon} 阶段1: {display_name}")
 
             if verbose:
                 print(f"    路径: {stage1_exp.path}")
@@ -596,7 +817,8 @@ class ExperimentTracker:
                     is_last_stage2 = i == len(stage2_children) - 1
                     prefix = "└──" if is_last_stage2 else "├──"
                     icon = self.get_status_icon(stage2_exp.status)
-                    print(f"  {prefix} {icon} 阶段2: {stage2_exp.name}")
+                    display_name = self.get_display_path(stage2_exp)
+                    print(f"  {prefix} {icon} 阶段2: {display_name}")
 
                     if verbose:
                         indent = "      " if is_last_stage2 else "  │   "
@@ -611,7 +833,8 @@ class ExperimentTracker:
                             prefix = ("    └──" if is_last_stage3 else "    ├──") if is_last_stage2 else ("  │ └──" if is_last_stage3 else "  │ ├──")
 
                             icon = self.get_status_icon(stage3_exp.status)
-                            print(f"{prefix} {icon} 阶段3: {stage3_exp.name}")
+                            display_name = self.get_display_path(stage3_exp)
+                            print(f"{prefix} {icon} 阶段3: {display_name}")
 
                             if verbose:
                                 indent = "        " if is_last_stage2 else "  │     "
@@ -636,7 +859,8 @@ class ExperimentTracker:
                                         stage4_prefix = "  │ │ └──" if is_last_stage4 else "  │ │ ├──"
 
                                     icon = self.get_status_icon(stage4_exp.status)
-                                    print(f"{stage4_prefix} {icon} 阶段4: {stage4_exp.name}")
+                                    display_name = self.get_display_path(stage4_exp)
+                                    print(f"{stage4_prefix} {icon} 阶段4: {display_name}")
 
                                     if verbose:
                                         if is_last_stage2 and is_last_stage3:
@@ -671,7 +895,8 @@ class ExperimentTracker:
                 print("\n孤儿阶段2实验:")
                 for exp in sorted(orphaned_stage2, key=lambda x: x.name):
                     icon = self.get_status_icon(exp.status)
-                    print(f"  {icon} {exp.name}")
+                    display_name = self.get_display_path(exp)
+                    print(f"  {icon} {display_name}")
                     if verbose:
                         print(f"      期望的父实验: {exp.parent_path}")
 
@@ -679,7 +904,8 @@ class ExperimentTracker:
                 print("\n孤儿阶段3实验:")
                 for exp in sorted(orphaned_stage3, key=lambda x: x.name):
                     icon = self.get_status_icon(exp.status)
-                    print(f"  {icon} {exp.name}")
+                    display_name = self.get_display_path(exp)
+                    print(f"  {icon} {display_name}")
                     if verbose:
                         print(f"      期望的父实验: {exp.parent_path}")
 
@@ -687,7 +913,8 @@ class ExperimentTracker:
                 print("\n孤儿阶段4实验:")
                 for exp in sorted(orphaned_stage4, key=lambda x: x.name):
                     icon = self.get_status_icon(exp.status)
-                    print(f"  {icon} {exp.name}")
+                    display_name = self.get_display_path(exp)
+                    print(f"  {icon} {display_name}")
                     if verbose:
                         print(f"      期望的父实验: {exp.parent_path}")
                         if exp.evaluated_datasets:
@@ -702,10 +929,12 @@ def main():
     parser.add_argument("--verbose", "-v", action="store_true", help="显示详细信息")
     parser.add_argument("--format", choices=["tree", "table"], default="tree", help="输出格式: tree(树形) 或 table(表格) (默认: tree)")
     parser.add_argument("--save-report", action="store_true", help="在outputs目录中生成Markdown报告")
+    parser.add_argument("--short-path", action="store_true", help="只显示实验文件夹名称（默认显示完整相对路径）")
+    parser.add_argument("--suggest", action="store_true", help="显示实验建议（删除无用文件夹和继续运行实验）")
 
     args = parser.parse_args()
 
-    tracker = ExperimentTracker(args.outputs_dir)
+    tracker = ExperimentTracker(args.outputs_dir, short_path=args.short_path)
 
     print("正在扫描实验...")
     tracker.scan_experiments()
@@ -713,7 +942,7 @@ def main():
     print("正在建立关系...")
     tracker.build_relationships()
 
-    tracker.print_results(verbose=args.verbose, output_format=args.format, save_report=args.save_report)
+    tracker.print_results(verbose=args.verbose, output_format=args.format, save_report=args.save_report, show_suggestions=args.suggest)
 
 
 if __name__ == "__main__":
