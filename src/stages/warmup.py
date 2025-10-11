@@ -275,7 +275,7 @@ def warmup(cfg: DictConfig) -> None:
     )
 
     # 6. 输出数据统计信息
-    get_data_statistics(tokenized_dataset)
+    # get_data_statistics(tokenized_dataset)
 
     data_collator = DataCollatorForSeq2Seq(tokenizer=tokenizer, model=model, padding="longest")
 

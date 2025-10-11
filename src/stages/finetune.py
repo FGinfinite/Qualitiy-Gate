@@ -223,7 +223,7 @@ def finetune(cfg: DictConfig) -> None:
     )
 
     # 6. 输出数据统计信息
-    get_data_statistics(tokenized_dataset)
+    # get_data_statistics(tokenized_dataset)
 
     # 7. 验证并计算批次大小配置
     per_device_batch_size = cfg.training.per_device_batch_size
