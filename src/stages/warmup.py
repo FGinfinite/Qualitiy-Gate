@@ -15,7 +15,7 @@ from transformers import (
 )
 
 from src.data import encode_data, get_data_statistics, load_and_prepare_dataset
-from src.models.select_moe import SelectMoeForCausalLM, register_select_moe
+from src.models.quality_gate_model import QualityGateForCausalLM, register_quality_gate
 from src.training.full_rank_finetuning import (
     print_trainable_parameters,
     save_full_rank_weights,
@@ -24,11 +24,10 @@ from src.training.full_rank_finetuning import (
 from src.utils.logging_utils import setup_training_logging
 from src.utils.tools import grab_gpu
 
-# 路由权重相关的模式定义
-ROUTING_PATTERNS = [
+# 质量门控权重相关的模式定义
+QUALITY_GATE_PATTERNS = [
     "quality_gate",  # Quality gate parameters
-    ".gate.weight",  # MoE gate weights
-    "router",  # Any router-related parameters
+    ".gate.weight",  # Quality gate weights
 ]
 
 # ---------------------------------------------------------------------------
@@ -128,19 +127,50 @@ def validate_batch_size_configuration(total_batch_size: int, per_device_batch_si
 
 def get_model_and_tokenizer(
     cfg: DictConfig,
-) -> Tuple[SelectMoeForCausalLM, AutoTokenizer]:
+) -> Tuple[QualityGateForCausalLM, AutoTokenizer]:
     """
-    加载预转换的 Select-MoE 模型和分词器。
+    加载质量门控模型和分词器。
+    支持从预训练的Qwen模型加载或从已有的质量门控模型加载。
     """
-    # 注册 Select-MoE 模型
-    register_select_moe()
+    # 注册质量门控模型
+    register_quality_gate()
 
-    # 加载预转换的 Select-MoE 模型
+    # 加载模型
     model_kwargs = {
         "low_cpu_mem_usage": True,
         "torch_dtype": torch.bfloat16,
     }
-    model = SelectMoeForCausalLM.from_pretrained(cfg.selector_model.path, **model_kwargs)
+    
+    # 检查是否是已经转换的质量门控模型
+    model_path = cfg.selector_model.path
+    try:
+        # 首先尝试加载已有的质量门控模型
+        model = QualityGateForCausalLM.from_pretrained(model_path, **model_kwargs)
+        log = logging.getLogger(__name__)
+        log.info(f"成功加载已有的质量门控模型: {model_path}")
+    except Exception as e:
+        # 如果失败，从Qwen模型加载并转换
+        log = logging.getLogger(__name__)
+        log.info(f"从Qwen基座模型加载: {model_path}")
+        from transformers import AutoModelForCausalLM as HFAutoModelForCausalLM
+        
+        # 加载基座模型
+        base_model = HFAutoModelForCausalLM.from_pretrained(model_path, **model_kwargs)
+        
+        # 创建质量门控配置
+        config = QualityGateForCausalLM.config_class.from_pretrained(model_path)
+        config.quality_gate_init_mean = cfg.training.quality_gate_init_mean
+        config.quality_gate_init_std = cfg.training.quality_gate_init_std
+        
+        # 创建新的质量门控模型
+        model = QualityGateForCausalLM(config)
+        
+        # 复制基座模型的权重（除了需要新增的质量门控部分）
+        model.load_state_dict(base_model.state_dict(), strict=False)
+        log.info(f"已从基座模型初始化质量门控模型")
+        
+        del base_model
+        torch.cuda.empty_cache()
 
     # 从训练配置中覆写损失函数参数
     if hasattr(cfg.training, "quality_loss_weight"):
@@ -149,37 +179,22 @@ def get_model_and_tokenizer(
         model.config.quality_gate_init_mean = cfg.training.quality_gate_init_mean
     if hasattr(cfg.training, "quality_gate_init_std"):
         model.config.quality_gate_init_std = cfg.training.quality_gate_init_std
-    if hasattr(cfg.training, "trash_expert_mode"):
-        model.config.trash_expert_mode = cfg.training.trash_expert_mode
-    if hasattr(cfg.training, "enable_load_balancing"):
-        model.config.enable_load_balancing = cfg.training.enable_load_balancing
-    if hasattr(cfg.training, "output_router_logits"):
-        model.config.output_router_logits = cfg.training.output_router_logits
 
-    # 新增的质量损失配置参数
+    # 质量损失配置参数
     if hasattr(cfg.training, "quality_loss_type"):
         model.config.quality_loss_type = cfg.training.quality_loss_type
     if hasattr(cfg.training, "quality_loss_debug"):
         model.config.quality_loss_debug = cfg.training.quality_loss_debug
 
-    # Beta moment matching参数
+    # 损失平均策略参数
     if hasattr(cfg.training, "quality_loss_params"):
         params = cfg.training.quality_loss_params
-        if hasattr(params, "beta_target_mean"):
-            model.config.beta_target_mean = params.beta_target_mean
-        if hasattr(params, "beta_target_var"):
-            model.config.beta_target_var = params.beta_target_var
-        if hasattr(params, "w_mean"):
-            model.config.w_mean = params.w_mean
-        if hasattr(params, "w_var"):
-            model.config.w_var = params.w_var
-        if hasattr(params, "lambda_var"):
-            model.config.lambda_var = params.lambda_var
         if hasattr(params, "sample_wise_averaging"):
             model.config.sample_wise_averaging = params.sample_wise_averaging
 
-    # 加载分词器（使用原始模型名称）
-    tokenizer = AutoTokenizer.from_pretrained(cfg.selector_model.tokenizer_name)
+    # 加载分词器
+    tokenizer_name = cfg.selector_model.get("tokenizer_name", cfg.selector_model.path)
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
@@ -237,8 +252,8 @@ def warmup(cfg: DictConfig) -> None:
         )
         log.info("--- GPU显存抢占完成 ---")
 
-    # 2. 加载 Select-MoE 模型和分词器
-    log.info("正在加载和配置 Select-MoE 模型...")
+    # 2. 加载质量门控模型和分词器
+    log.info("正在加载和配置质量门控模型...")
     model, tokenizer = get_model_and_tokenizer(cfg)
     log.info("模型加载完成。")
 
@@ -251,8 +266,8 @@ def warmup(cfg: DictConfig) -> None:
         log.info("PEFT 模型已创建。可训练参数：")
         model.print_trainable_parameters()
     elif cfg.training.peft_mode == "full_rank":
-        # 全秩微调模式：只微调路由参数（quality gates + MoE gates），但是全秩训练
-        setup_full_rank_training(model, ROUTING_PATTERNS, mode="parameter")
+        # 全秩微调模式：只微调质量门控参数，但是全秩训练
+        setup_full_rank_training(model, QUALITY_GATE_PATTERNS, mode="parameter")
         print_trainable_parameters(model)
     else:
         raise ValueError(f"不支持的微调模式: {cfg.training.peft_mode}。支持的模式: ['lora', 'full_rank']")
@@ -342,11 +357,11 @@ def warmup(cfg: DictConfig) -> None:
             log.info(f"正在将最终的 PEFT 适配模型保存到 {cfg.output_dir}")
             trainer.save_model(cfg.output_dir)
         elif cfg.training.peft_mode == "full_rank":
-            log.info(f"正在将路由全秩微调权重保存到 {cfg.output_dir}")
+            log.info(f"正在将质量门控全秩微调权重保存到 {cfg.output_dir}")
             full_rank_weights_path = os.path.join(cfg.output_dir, "full_rank_weights.pt")
-            save_full_rank_weights(model, ROUTING_PATTERNS, full_rank_weights_path, mode="parameter", tokenizer=tokenizer)
+            save_full_rank_weights(model, QUALITY_GATE_PATTERNS, full_rank_weights_path, mode="parameter", tokenizer=tokenizer)
 
-    log.info("--- 阶段 1：预训练完成 ---")
+    log.info("--- 阶段1：质量门控预热训练完成 ---")
 
 
 if __name__ == "__main__":

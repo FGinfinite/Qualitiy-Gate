@@ -1,82 +1,46 @@
 # @package _global_
 
-stage: batch_selection
+# Batch Selection Configuration (批量数据筛选)
+# 自动化批量处理多个实验的数据筛选
 
-# Hydra settings to create a timestamped output directory
+# Hydra Configuration
 hydra:
   run:
     dir: outputs/batch_selection/${now:%Y-%m-%d}/${now:%H-%M-%S}
   sweep:
     dir: outputs/batch_selection
     subdir: ${now:%Y-%m-%d}/${now:%H-%M-%S}
-  job:
-    config:
-      override_dirname:
-        kv_sep: "="
-        item_sep: ","
-        exclude_keys:
-          - hydra.run.dir
-          - hydra.sweep.dir
-          - hydra.sweep.subdir
 
-output_dir: ${hydra:run.dir}
-
-# Required: Root directory containing stage_2_selection outputs
+# Root directory to scan for experiments
 root_dir: "outputs/stage_2_selection"
 
-# Data selection percentage (0.05 means select top 5% of the data)
-selection_percentage: 0.0125
+# Output directory for batch processing report
+output_dir: ${hydra:run.dir}
 
-# Optional: Original dataset directory path (auto-inferred if not specified)
-data_dir: null
+# Data directory (optional, for loading original messages)
+data_dir: null  # If not provided, will auto-infer
 
-# Clustering method: currently only "kmeans" is supported
-clustering_method: "kmeans"
+# Selection percentage (e.g., 0.30 means select top 30%)
+selection_percentage: 0.30
 
-# Clustering parameters
-clustering_params:
-  # K-Means specific parameters
-  auto_k: false  # Automatically determine k using Elbow method
-  k: 26  # Manual k value (only used if auto_k=false)
-  k_range: [20, 89]  # k search range for Elbow method
-  max_iters: 300  # Maximum iterations
-  
-  # K-Means parallel computation parameters
-  enable_parallel_kmeans: true  # Enable multi-GPU parallel computation for k-value search
-  parallel_processes: 7  # Number of parallel processes for k-value computation
-  gpu_allocation_strategy: "round_robin"  # GPU allocation strategy: "round_robin" or "balanced"
-
-# Device configuration
-device: "auto"  # "cuda", "cpu", or "auto" for automatic detection
-
-# Debug configuration
-debug_print: false  # Enable detailed debug output for clustering algorithms
-
-# Logging configuration
-logging:
-  verbose: false  # Enable detailed logging output
+# Quality scoring parameters
+quality_params:
+  alpha: 1.0      # token权重参数（默认1；>1 更偏重高熵；<1 更均衡）
+  eps: 1.0e-8     # 数值下界，防分母为0
+  tau: 0.0        # 稳定性参数（可选，0表示不使用）
 
 # Batch processing configuration
 batch_processing:
-  # Skip directories that already have selected_data.jsonl
-  skip_existing: true
-  
-  # Maximum number of experiments to process in parallel
-  max_parallel_experiments: 1
-  
-  # Continue processing other experiments if one fails
-  continue_on_error: true
-  
-  # Save detailed processing report
-  save_report: true
-  
-  # Dry run mode - only scan and report, don't actually process
-  dry_run: false
+  skip_existing: true          # Skip directories that already have selected_data.jsonl
+  dry_run: false               # If true, only show what would be processed
+  continue_on_error: true      # Continue processing other experiments if one fails
+  save_report: true            # Save detailed processing report
 
 # Force processing configuration
 force_processing:
-  # Force reprocess even if selected_data.jsonl exists
-  enabled: false
-  
-  # Backup existing files before overwriting
-  backup_existing: true
+  enabled: false               # Force reprocessing even if output exists
+  backup_existing: true        # Backup existing files before overwriting
+
+# Logging configuration
+logging:
+  verbose: false  # Enable debug logging

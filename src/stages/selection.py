@@ -11,16 +11,16 @@ from tqdm import tqdm
 from transformers import AutoTokenizer, set_seed
 
 from src.data import load_and_prepare_dataset
-from src.models.select_moe import SelectMoeForCausalLM, register_select_moe
+from src.models.quality_gate_model import QualityGateForCausalLM, register_quality_gate
 from src.training.full_rank_finetuning import load_full_rank_weights
 
 
-def get_model_and_tokenizer(cfg: DictConfig) -> Tuple[SelectMoeForCausalLM, AutoTokenizer]:
+def get_model_and_tokenizer(cfg: DictConfig) -> Tuple[QualityGateForCausalLM, AutoTokenizer]:
     """
-    加载预训练的Select-MoE模型并应用全秩微调权重
+    加载预训练的质量门控模型并应用全秩微调权重
     """
-    # 注册Select-MoE模型
-    register_select_moe()
+    # 注册质量门控模型
+    register_quality_gate()
 
     model_kwargs = {
         "low_cpu_mem_usage": True,
@@ -28,8 +28,8 @@ def get_model_and_tokenizer(cfg: DictConfig) -> Tuple[SelectMoeForCausalLM, Auto
         "device_map": "auto",
     }
 
-    # 加载预转换的Select-MoE模型
-    model = SelectMoeForCausalLM.from_pretrained(cfg.selector_model.path, **model_kwargs)
+    # 加载预训练的质量门控模型
+    model = QualityGateForCausalLM.from_pretrained(cfg.selector_model.path, **model_kwargs)
 
     # 加载全秩微调权重和分词器
     tokenizer = load_full_rank_weights(model, os.path.join(cfg.model_checkpoint_path, "full_rank_weights.pt"))
@@ -41,88 +41,80 @@ def get_model_and_tokenizer(cfg: DictConfig) -> Tuple[SelectMoeForCausalLM, Auto
     return model, tokenizer
 
 
-def calculate_quality_score_from_gates(
-    quality_score_list: list,
-    attention_mask: torch.Tensor,
-    debug: bool = False,
-) -> float:
+def compute_token_perplexity(logits: torch.Tensor, input_ids: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
     """
-    使用质量门输出计算质量分数
-
+    计算每个token的困惑度
+    
     Args:
-        quality_score_list: 各层质量门输出的分数列表
-        attention_mask: 形状为 (seq_len,) 的注意力掩码
-        debug: 是否打印调试信息
-
+        logits: 模型输出的logits，形状为 (batch_size, seq_len, vocab_size)
+        input_ids: 输入的token IDs，形状为 (batch_size, seq_len)
+        attention_mask: 注意力掩码，形状为 (batch_size, seq_len)
+    
     Returns:
-        质量分数：good_ratio的平均值
+        每个token的困惑度，形状为 (batch_size, seq_len)
     """
-    valid_mask = attention_mask.bool()
-    actual_length = valid_mask.sum().item()
-
-    if debug:
-        log = logging.getLogger(__name__)
-        log.debug(f"质量门分数数量: {len(quality_score_list)}")
-        log.debug(f"实际token数量: {actual_length}")
-
-    if actual_length == 0:
-        return 0.0
-
-    layer_quality_scores = []
-    for layer_idx, quality_score in enumerate(quality_score_list):
-        # quality_score: (seq_len, 1) -> 原始分数
-        valid_quality_score = quality_score[valid_mask]  # (actual_length, 1)
-
-        # 使用sigmoid转换为概率
-        quality_probs = torch.sigmoid(valid_quality_score)  # (actual_length, 1)
-        good_probs = quality_probs.squeeze(-1)  # (actual_length,)
-
-        # 在该层内对所有token求平均
-        layer_avg_good_prob = good_probs.mean().item()
-        layer_quality_scores.append(layer_avg_good_prob)
-
-        if debug and layer_idx < 3:
-            log.debug(f"第{layer_idx + 1}层好数据概率: {layer_avg_good_prob:.6f}")
-
-    # 对所有层求平均
-    final_quality_score = sum(layer_quality_scores) / len(layer_quality_scores)
-
-    if debug:
-        log.debug(f"最终质量分数: {final_quality_score:.6f}")
-
-    return final_quality_score
+    # 移位以对齐预测和目标
+    shift_logits = logits[..., :-1, :].contiguous()
+    shift_labels = input_ids[..., 1:].contiguous()
+    shift_attention_mask = attention_mask[..., 1:].contiguous()
+    
+    # 计算交叉熵损失（每个token）
+    loss_fct = torch.nn.CrossEntropyLoss(reduction='none')
+    
+    # 展平以计算损失
+    shift_logits_flat = shift_logits.view(-1, shift_logits.size(-1))
+    shift_labels_flat = shift_labels.view(-1)
+    
+    # 计算每个token的负对数似然
+    nll_per_token = loss_fct(shift_logits_flat, shift_labels_flat)
+    
+    # 重塑回原始形状
+    nll_per_token = nll_per_token.view(shift_labels.size())
+    
+    # 计算困惑度 (exp(nll))
+    ppl_per_token = torch.exp(nll_per_token)
+    
+    # 对于第一个token（没有预测），填充为1
+    batch_size, seq_len = input_ids.shape
+    ppl_full = torch.ones(batch_size, seq_len, device=ppl_per_token.device)
+    ppl_full[:, 1:] = ppl_per_token
+    
+    # 应用attention mask
+    ppl_full = ppl_full * shift_attention_mask.float()
+    
+    return ppl_full
 
 
 def load_router_data(router_data_path: str) -> dict:
     """
     加载保存的完整路由数据
-
+    
     Args:
         router_data_path: 路由数据文件路径
-
+    
     Returns:
         包含完整路由信息的字典
     """
     router_data = torch.load(router_data_path, map_location="cpu")
-
+    
     log = logging.getLogger(__name__)
     log.info(f"加载路由数据: {router_data_path}")
     log.info(f"  - 数据集: {router_data['dataset_name']}")
     log.info(f"  - 样本数: {router_data['num_samples']}")
-    log.info(f"  - 质量门分数形状: {router_data['quality_score'].shape}")
-    log.info(f"  - MoE路由logits形状: {router_data['moe_logits'].shape}")
-
+    log.info(f"  - 质量门分数形状: {router_data['quality_gates'].shape}")
+    log.info(f"  - 困惑度形状: {router_data['perplexities'].shape}")
+    
     return router_data
 
 
 def get_sample_router_info(router_data: dict, sample_id: str) -> dict:
     """
     根据样本ID获取对应的路由信息
-
+    
     Args:
         router_data: 从load_router_data加载的数据字典
         sample_id: 样本的唯一ID（例如: "oasst1_25460"）
-
+    
     Returns:
         包含该样本路由信息的字典
     """
@@ -131,27 +123,27 @@ def get_sample_router_info(router_data: dict, sample_id: str) -> dict:
         position = router_data["sample_ids"].index(sample_id)
     except ValueError:
         raise ValueError(f"样本ID '{sample_id}' 未在数据集 '{router_data['dataset_name']}' 中找到") from None
-
+    
     return {
         "sample_id": sample_id,
         "dataset_name": router_data["dataset_name"],
-        "quality_score": router_data["quality_score"][position],  # [num_layers, 1]
-        "moe_logits": router_data["moe_logits"][position],  # [num_layers, num_experts]
+        "quality_gates": router_data["quality_gates"][position],  # [num_layers, seq_len]
+        "perplexities": router_data["perplexities"][position],    # [seq_len]
         "position_in_dataset": position,
     }
 
 
 def select(cfg: DictConfig) -> None:
     """
-    数据选择阶段的主函数
+    数据选择阶段的主函数（阶段2：统计收集）
     """
     # 设置全局种子以确保实验可复现
     set_seed(cfg.seed)
-
+    
     log = logging.getLogger(__name__)
-    log.info("--- 开始阶段2：数据选择 ---")
+    log.info("--- 开始阶段2：统计收集（数据选择第一步）---")
     log.info(f"使用全局种子: {cfg.seed}")
-
+    
     # 确定目标设备
     if torch.cuda.is_available():
         num_gpus = torch.cuda.device_count()
@@ -164,52 +156,42 @@ def select(cfg: DictConfig) -> None:
     else:
         device = torch.device("cpu")
         log.info("CUDA不可用，使用CPU")
-
+    
     # 如果使用GPU，清理缓存
     if device.type == "cuda":
         torch.cuda.empty_cache()
-
+    
     # 1. 加载模型和分词器
     log.info(f"从检查点加载模型: {cfg.model_checkpoint_path}")
     model, tokenizer = get_model_and_tokenizer(cfg)
     num_hidden_layers = model.config.num_hidden_layers
     log.info(f"成功加载模型: {cfg.model_checkpoint_path}")
-
-    # 2. 验证新架构
+    log.info(f"模型层数: {num_hidden_layers}")
+    
+    # 2. 验证模型架构
     with torch.no_grad():
         model_device = next(model.parameters()).device
         dummy_input = torch.ones(1, 10, dtype=torch.long, device=model_device)
         dummy_outputs = model(dummy_input, output_router_logits=True)
-
+        
         # 验证输出格式
-        if not isinstance(dummy_outputs.router_logits[0], dict):
-            raise ValueError("模型不是新的两层路由架构，请使用正确的模型")
-
-        if "quality_score" not in dummy_outputs.router_logits[0]:
-            raise ValueError("模型缺少质量门输出，请使用正确的两层路由架构")
-
-        if "moe_logits" not in dummy_outputs.router_logits[0]:
-            raise ValueError("模型缺少MoE路由输出，请使用正确的两层路由架构")
-
-    log.info("✓ 验证模型为新的两层路由架构")
-    log.info(f"✓ 模型层数: {num_hidden_layers}")
-    log.info(f"✓ 质量门输出维度: {dummy_outputs.router_logits[0]['quality_score'].shape[-1]}")
-    log.info(f"✓ MoE专家数量: {dummy_outputs.router_logits[0]['moe_logits'].shape[-1]}")
-
+        if dummy_outputs.past_key_values is None or len(dummy_outputs.past_key_values) == 0:
+            log.warning("模型未输出router logits，请检查配置")
+    
+    log.info("✓ 验证模型为质量门控架构")
+    
     # 3. 加载和准备数据集
     log.info(f"正在加载数据集...")
     dataset = load_and_prepare_dataset(cfg)
-
+    
     if cfg.dataset.shuffle:
         log.info("对数据集进行shuffle...")
         dataset = dataset.shuffle(seed=cfg.seed)
-
+    
     log.info(f"总样本数: {len(dataset)}")
     log.info("✓ 数据集已准备完毕")
-
-    # 4. 数据评分和路由logits记录
-    scored_data = []
-
+    
+    # 4. 收集统计量
     # 确定数据集名称列表
     if cfg.dataset.dataset_from == "local":
         dataset_names_list = cfg.dataset.local.dataset_names
@@ -217,20 +199,20 @@ def select(cfg: DictConfig) -> None:
         dataset_names_list = [ds.dataset_name for ds in cfg.dataset.hf.datasets]
     else:
         raise ValueError(f"不支持的数据源: {cfg.dataset.dataset_from}")
-
+    
     log.info(f"数据集来源: {cfg.dataset.dataset_from}")
     log.info(f"数据集名称: {dataset_names_list}")
-
+    
     all_router_data_by_dataset = {
         name: {
-            "quality_score": [],  # 质量门分数
-            "moe_logits": [],  # MoE路由logits
-            "sample_ids": [],  # 样本ID
+            "quality_gates": [],  # 质量门控logits: [N, L, T]
+            "perplexities": [],   # token困惑度: [N, T]
+            "sample_ids": [],     # 样本ID
         }
         for name in dataset_names_list
     }
     dataset_sample_counts = {name: 0 for name in dataset_names_list}
-
+    
     # 创建数据加载器
     def collate_fn(batch):
         return {
@@ -238,15 +220,15 @@ def select(cfg: DictConfig) -> None:
             "dataset": [item["dataset"] for item in batch],
             "id": [item["id"] for item in batch],
         }
-
+    
     dataloader = DataLoader(dataset, batch_size=cfg.data_process.batch_size, collate_fn=collate_fn)
-
-    log.info("开始数据评分...")
+    
+    log.info("开始收集统计量...")
     for i, batch in enumerate(tqdm(dataloader)):
         messages_list = batch["messages"]
         dataset_names = batch["dataset"]
         ids = batch["id"]
-
+        
         # 将messages转换为文本
         texts = []
         for messages in messages_list:
@@ -259,12 +241,12 @@ def select(cfg: DictConfig) -> None:
                 texts.append("\n".join(text_parts))
             else:
                 texts.append("")
-
+        
         if i == 0:
             log.info("批次0，前3个文本示例:")
             for idx in range(min(3, len(texts))):
                 log.info(f"{idx + 1}: {texts[idx][:100]}...")
-
+        
         # 分词
         inputs = tokenizer(
             texts,
@@ -275,146 +257,157 @@ def select(cfg: DictConfig) -> None:
         )
         model_device = next(model.parameters()).device
         inputs = {k: v.to(model_device) for k, v in inputs.items()}
-
+        
         with torch.no_grad():
             outputs = model(**inputs, output_router_logits=True)
-
-        # 处理router logits
+        
+        # 处理每个样本
         batch_size = len(texts)
-        sequence_length = inputs["input_ids"].shape[1]
-
-        moe_router_logits = [layer_dict["moe_logits"] for layer_dict in outputs.router_logits]
-        all_router_logits = torch.stack(moe_router_logits)
-
+        
+        # 计算困惑度
+        perplexities = compute_token_perplexity(
+            outputs.logits, 
+            inputs["input_ids"], 
+            inputs["attention_mask"]
+        )  # [batch_size, seq_len]
+        
         if i == 0:
-            log.info(f"Router logits形状: {all_router_logits.shape}")
-            log.info(f"批次大小: {batch_size}, 序列长度: {sequence_length}")
-
-        # 计算质量分数
+            log.info(f"困惑度形状: {perplexities.shape}")
+        
         for j in range(batch_size):
             dataset_name = dataset_names[j]
             sample_attention_mask = inputs["attention_mask"][j]
             debug_mode = i == 0 and j < 3
-
-            # 使用质量门输出计算质量分数
-            quality_score_list = [layer_dict["quality_score"][j] for layer_dict in outputs.router_logits]
-            quality_score = calculate_quality_score_from_gates(
-                quality_score_list,
-                sample_attention_mask,
-                debug=debug_mode,
-            )
-
+            
             # 获取有效token的掩码信息
             valid_mask = sample_attention_mask.bool()
             actual_length = valid_mask.sum().item()
-
-            # 记录完整的路由信息
-            # 1. 收集质量门logits并在序列维度进行平均
-            quality_score_averaged = []
-            for layer_quality_score in quality_score_list:
-                if actual_length > 0:
-                    valid_quality_score = layer_quality_score[valid_mask]
-                    layer_avg_quality_score = valid_quality_score.mean(dim=0)
-                else:
-                    layer_avg_quality_score = torch.zeros(1)
-                quality_score_averaged.append(layer_avg_quality_score)
-
-            quality_score_sample = torch.stack(quality_score_averaged)  # [num_layers, 1]
-
-            # 2. 收集MoE路由logits并计算平均概率分布
-            if actual_length > 0:
-                moe_logits_list = []
-                seq_len = inputs["input_ids"].shape[1]
-
-                for _, layer_dict in enumerate(outputs.router_logits):
-                    layer_moe_logits = layer_dict["moe_logits"]
-
-                    # 提取第j个样本的logits
-                    start_idx = j * seq_len
-                    end_idx = (j + 1) * seq_len
-                    sample_layer_logits = layer_moe_logits[start_idx:end_idx]
-
-                    # 转换为概率分布
-                    sample_layer_probs = torch.softmax(sample_layer_logits, dim=-1)
-
-                    # 根据attention mask提取有效token的概率，然后求平均
-                    valid_probs = sample_layer_probs[valid_mask]
-                    if valid_probs.shape[0] > 0:
-                        layer_avg_probs = valid_probs.mean(dim=0)
-                    else:
-                        num_experts = sample_layer_probs.shape[-1]
-                        layer_avg_probs = torch.ones(num_experts) / num_experts
-
-                    moe_logits_list.append(layer_avg_probs)
-
-                sample_moe_matrix = torch.stack(moe_logits_list)  # [num_layers, num_experts]
-            else:
-                num_layers = len(outputs.router_logits)
-                num_experts = outputs.router_logits[0]["moe_logits"].shape[-1]
-                sample_moe_matrix = torch.ones(num_layers, num_experts) / num_experts
-                quality_score_sample = torch.zeros(num_layers, 1)
-
+            
+            # 收集质量门控logits
+            # 注意：model的outputs.past_key_values实际上不是past_key_values
+            # 我们需要通过一个特殊的前向传播来获取router_logits
+            # 让我们先获取单个样本的输入
+            single_input = {
+                "input_ids": inputs["input_ids"][j:j+1],
+                "attention_mask": inputs["attention_mask"][j:j+1],
+            }
+            
+            with torch.no_grad():
+                single_output = model(**single_input, output_router_logits=True)
+            
+            # 从模型的中间层提取质量门控logits
+            # 由于我们修改了模型，需要确保能够访问到router_logits
+            # 这里假设model.model.layers中每一层都有quality_gate
+            quality_gates_list = []
+            hidden_states = model.model.embed_tokens(single_input["input_ids"])
+            
+            # 手动前向传播以收集质量门控
+            position_ids = torch.arange(hidden_states.shape[1], device=hidden_states.device).unsqueeze(0)
+            position_embeddings = model.model.rotary_emb(hidden_states, position_ids)
+            causal_mask = None  # 简化处理
+            
+            for layer_idx, layer in enumerate(model.model.layers):
+                # 自注意力
+                residual = hidden_states
+                hidden_states = layer.input_layernorm(hidden_states)
+                hidden_states, _, _ = layer.self_attn(
+                    hidden_states=hidden_states,
+                    attention_mask=causal_mask,
+                    position_ids=position_ids,
+                    position_embeddings=position_embeddings,
+                )
+                hidden_states = residual + hidden_states
+                
+                # 质量门控
+                residual = hidden_states
+                hidden_states = layer.post_attention_layernorm(hidden_states)
+                quality_score, _ = layer.quality_gate(hidden_states)  # [1, seq_len, 1]
+                quality_gates_list.append(quality_score.squeeze(0).squeeze(-1))  # [seq_len]
+                
+                # FFN
+                hidden_states = layer.mlp(hidden_states)
+                hidden_states = residual + hidden_states
+            
+            # 堆叠所有层的质量门控logits: [L, seq_len]
+            quality_gates_sample = torch.stack(quality_gates_list)  # [L, seq_len]
+            
+            # 获取该样本的困惑度
+            perplexity_sample = perplexities[j]  # [seq_len]
+            
             # 保存到数据结构中
-            all_router_data_by_dataset[dataset_name]["quality_score"].append(quality_score_sample.cpu())
-            all_router_data_by_dataset[dataset_name]["moe_logits"].append(sample_moe_matrix.cpu())
+            all_router_data_by_dataset[dataset_name]["quality_gates"].append(quality_gates_sample.cpu())
+            all_router_data_by_dataset[dataset_name]["perplexities"].append(perplexity_sample.cpu())
             all_router_data_by_dataset[dataset_name]["sample_ids"].append(ids[j])
             dataset_sample_counts[dataset_name] += 1
-
+            
             if i == 0 and j < 3:
                 current_sample_index = i * cfg.data_process.batch_size + j
                 log.info(f"--- 样本 {current_sample_index} 详细计算过程 ---")
                 log.info(f"  - 数据集: {dataset_names[j]}")
                 log.info(f"  - 样本ID: {ids[j]}")
                 log.info(f"  - 实际长度: {actual_length} / 总长度: {sample_attention_mask.shape[0]}")
-                log.info(f"  - 最终质量分数: {quality_score:.6f}")
-
-            scored_data.append(
-                {
-                    "dataset": dataset_names[j],
-                    "id": ids[j],
-                    "scores": quality_score,
-                    "messages": messages_list[j],
-                }
-            )
-
+                log.info(f"  - 质量门控形状: {quality_gates_sample.shape}")
+                log.info(f"  - 困惑度形状: {perplexity_sample.shape}")
+                log.info(f"  - 平均困惑度: {perplexity_sample[valid_mask].mean().item():.4f}")
+    
     # 5. 立即保存完整的路由张量文件
-    log.info("模型推理完成，立即保存完整路由张量文件...")
+    log.info("模型推理完成，立即保存完整统计数据...")
     output_path = hydra.utils.to_absolute_path(cfg.output_path)
     output_dir = os.path.dirname(output_path)
     os.makedirs(output_dir, exist_ok=True)
-
+    
     router_data_dir = os.path.join(output_dir, "router_data")
     os.makedirs(router_data_dir, exist_ok=True)
-
+    
     for dataset_name in dataset_names_list:
         dataset_router_data = all_router_data_by_dataset[dataset_name]
-
-        if dataset_router_data["quality_score"] and dataset_router_data["moe_logits"]:
+        
+        if dataset_router_data["quality_gates"] and dataset_router_data["perplexities"]:
+            # 找到最大序列长度并进行padding
+            max_seq_len = max(qg.shape[1] for qg in dataset_router_data["quality_gates"])
+            
+            # Pad质量门控和困惑度到相同长度
+            padded_quality_gates = []
+            padded_perplexities = []
+            
+            for qg, ppl in zip(dataset_router_data["quality_gates"], dataset_router_data["perplexities"]):
+                L, T = qg.shape
+                # Pad质量门控
+                padded_qg = torch.zeros(L, max_seq_len)
+                padded_qg[:, :T] = qg
+                padded_quality_gates.append(padded_qg)
+                
+                # Pad困惑度
+                padded_ppl = torch.zeros(max_seq_len)
+                padded_ppl[:T] = ppl
+                padded_perplexities.append(padded_ppl)
+            
             router_data_dict = {
-                "quality_score": torch.stack(dataset_router_data["quality_score"]),  # [N, L, 1]
-                "moe_logits": torch.stack(dataset_router_data["moe_logits"]),  # [N, L, E]
+                "quality_gates": torch.stack(padded_quality_gates),  # [N, L, max_seq_len]
+                "perplexities": torch.stack(padded_perplexities),     # [N, max_seq_len]
                 "sample_ids": dataset_router_data["sample_ids"],
                 "dataset_name": dataset_name,
                 "num_samples": dataset_sample_counts[dataset_name],
+                "max_seq_len": max_seq_len,
                 "metadata": {
-                    "description": "完整的路由数据，包含质量门和MoE路由输出",
-                    "quality_score_shape": "[N, num_layers, 1] - 质量门分数",
-                    "moe_logits_shape": "[N, num_layers, num_experts] - MoE路由平均概率",
+                    "description": "质量门控和困惑度统计数据",
+                    "quality_gates_shape": "[N, num_layers, max_seq_len] - 质量门控logits（sigmoid前）",
+                    "perplexities_shape": "[N, max_seq_len] - 每个token的困惑度",
                     "sample_ids": "样本的唯一ID标识",
                 },
             }
-
+            
             router_data_path = os.path.join(router_data_dir, f"{dataset_name}_router_data.pt")
             torch.save(router_data_dict, router_data_path)
-
-            log.info(f"数据集 '{dataset_name}' 的完整路由数据已保存到: {router_data_path}")
-            log.info(f"  - 质量门分数形状: {router_data_dict['quality_score'].shape}")
-            log.info(f"  - MoE路由logits形状: {router_data_dict['moe_logits'].shape}")
+            
+            log.info(f"数据集 '{dataset_name}' 的统计数据已保存到: {router_data_path}")
+            log.info(f"  - 质量门控形状: {router_data_dict['quality_gates'].shape}")
+            log.info(f"  - 困惑度形状: {router_data_dict['perplexities'].shape}")
             log.info(f"  - 样本数: {router_data_dict['num_samples']}")
-
+        
         else:
-            log.warning(f"数据集 '{dataset_name}' 没有路由数据")
-
+            log.warning(f"数据集 '{dataset_name}' 没有统计数据")
+    
     # 释放模型和GPU内存
     log.info("释放模型实例和GPU内存...")
     del model
@@ -422,9 +415,9 @@ def select(cfg: DictConfig) -> None:
         torch.cuda.empty_cache()
         torch.cuda.synchronize()
     log.info("模型内存已释放")
-
-    # 6. Router数据计算和保存完成
-    log.info("路由数据已保存，可以使用独立脚本进行数据选择算法实验:")
+    
+    # 6. 统计数据收集完成
+    log.info("统计数据已保存，可以使用独立脚本进行数据筛选:")
     log.info(f"  使用continue_selection.py: CUDA_VISIBLE_DEVICES=0 uv run scripts/continue_selection.py router_data_dir={router_data_dir}")
     log.info(f"  使用batch_selection.py: CUDA_VISIBLE_DEVICES=0 uv run scripts/batch_selection.py root_dir={os.path.dirname(router_data_dir)}")
-    log.info("--- 阶段2：路由数据计算完成 ---")
+    log.info("--- 阶段2：统计收集完成 ---")

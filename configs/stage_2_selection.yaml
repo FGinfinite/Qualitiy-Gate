@@ -7,9 +7,10 @@ seed: 42
 
 # 模型配置
 selector_model:
-  path: "converted_models/select_moe_converted_OLMoE-1B-7B-0125"
+  # 质量门控模型路径（通常是从stage 1训练得到的）
+  path: "path/to/quality_gate_model"
 
-# Stage 2: Data Selection Configuration
+# Stage 2: Data Selection Configuration (统计收集阶段)
 
 # Hydra settings to create a timestamped output directory
 hydra:
@@ -29,10 +30,10 @@ hydra:
           - hydra.sweep.subdir
 
 # Path to the full rank weights from stage 1
-model_checkpoint_path: "outputs/stage_1_warmup/2025-08-15/17-27-15-batch=16_lr=0.001_loss=sigmoid_lossWeight=1_sampleWise=True_tag=none"
+model_checkpoint_path: "outputs/stage_1_warmup/2025-01-01/00-00-00-batch=16_lr=0.001_loss=sigmoid_lossWeight=1_sampleWise=True_tag=none"
 
-# The final output path for the selected data
-output_path: "${hydra:run.dir}/selected_data.jsonl"
+# The final output path for the router data
+output_path: "${hydra:run.dir}/router_data.pt"
 
 tag: "none"
 
@@ -62,36 +63,12 @@ dataset:
   shuffle: false
   max_sequence_length: 1024
   # 1.0 means using the full dataset
-  subset_ratio: 1
+  subset_ratio: 1.0
   processing_num_workers: 10
   overwrite_cache: false
 
   # Sequence length sorting configuration
   sort_by_length: true  # 是否按字符串长度降序排列数据（推荐开启以优化推理效率）
-
-# Data selection percentage (0.05 means select top 5% of the data)
-selection_percentage: 0.0125
-
-# Clustering method: currently only "kmeans" is supported
-clustering_method: "kmeans"
-
-# Clustering parameters
-clustering_params:
-  # K-Means specific parameters
-  auto_k: true  # Automatically determine k using Elbow method
-  k: null  # Manual k value (only used if auto_k=false)
-  k_range: [20, 50]  # k search range for Elbow method
-  max_iters: 300  # Maximum iterations
-  
-  # K-Means parallel computation parameters
-  enable_parallel_kmeans: false  # Enable multi-GPU parallel computation for k-value search
-  parallel_processes: 4  # Number of parallel processes for k-value computation
-  gpu_allocation_strategy: "round_robin"  # GPU allocation strategy: "round_robin" or "balanced"
-
-# Skip data selection process after obtaining router logits
-# If true, only performs model inference to collect router logits
-# Data selection can then be performed separately using scripts/cluster_selection.py
-skip_data_selection: true
 
 # Data processing settings
 data_process:
