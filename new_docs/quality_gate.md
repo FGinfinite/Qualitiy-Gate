@@ -1,166 +1,136 @@
-# 质量门控数据选择——核心方法（v1）
-
-> 三阶段流程；一次项正则；**单次排序**；**零统计量**；**负曲率惩罚的非对称分母**。
-> 目标：给工程直接落地用，指导实现与联调。
+下面是**“只用门控 g + token 困惑度权重”的核心方法**（前向即可、一次排序、步骤清晰）。
 
 ---
 
-## 0. 记号与目标
+# 0. 记号与目标
 
-* 模型共有 **L** 个门控层；样本 (x) 的长度为 (T_x)。
-* 第 (l) 层门控：(u_l = g_l \odot y_l)，其中 (g_l\in(0,1))（按 token 输出），(y_l) 为门控前的特征。
-* 训练损失：
+* 数据集样本数 **N**；第 (i) 个样本长度 (T_i)；模型层数 **L**。
+* 预热后的模型（主干冻结）在前向时输出：
+
+  * (G_i\in(0,1)^{L\times T_i})：第 (l) 层第 (t) 个 token 的门控 (g_{i,l,t})（Sigmoid 后）。
+  * (\mathbf{ppl}_i\in\mathbb R^{T_i})：每个 token 的困惑度（(\exp(\text{NLL}))）。
+* 目标：为每个样本算出**质量分数** (q_i)，按 (q) 降序取 **top-k%**。
+
+---
+
+# 1. 阶段一 · 预热（Warm-up）
+
+* 冻结主干，仅训练门控参数；正常交叉熵训练若干步/epoch。
+* 若使用质量正则 (L_{\text{quality}})：**先样本内（layer&token）平均，再样本间平均**，避免长序列偏置。
   [
-  L_{\text{total}} = L_{\text{lm}} + \lambda,L_{\text{quality}}
+  \overline g^{(x)}=\frac{1}{L}\sum_{l=1}^{L}\frac{1}{T_x}\sum_{t=1}^{T_x}g_{l,t}(x),\quad
+  L_{\text{quality}}=\frac{1}{B}\sum_{x\in\mathcal B}\overline g^{(x)}
   ]
-* **一次项正则**（修正的聚合定义，避免长序列偏置）：
-  [
-  \overline g^{(x)} = \frac1L \sum_{l=1}^L \frac1{T_x} \sum_{t=1}^{T_x} g_{l,t}(x),\qquad
-  L_{\text{quality}} = \frac1B \sum_{x\in\mathcal B} \overline g^{(x)}
-  ]
-  （先**样本内**做 layer&token 平均，再**样本间**做 batch 平均。）
 
 ---
 
-## 1. 阶段一 · 预热（Warm-up）
+# 2. 阶段二 · 统计收集（仅前向）
 
-**目的**：让门控具备基本可区分性；冻结主干，**仅训练门控参数**。
-**做法**：
+对每个样本 (i) 做一次前向，取出 (G_i) 与 (\mathbf{ppl}_i)。
 
-1. 冻结 backbone；启用门控（Sigmoid/Soft gate）。
-2. 用上式 (L_{\text{total}}) 正常训练若干步/epoch。
-3. 优化器：AdamW/SGD 皆可；门控 lr 建议为常规微调 lr 的 **1/5～1/10**。
-4. 其他约束/排序逻辑 **不在本阶段** 使用。
-
----
-
-## 2. 阶段二 · 统计收集（Scoring Prep）
-
-**输出**：对每个样本 (x) 收集三条 **按层向量**（长度 **L**），**不做层平均**，便于后续自定义分析。
-
-* (\mathbf g(x) = [\bar g_l]*{l=1}^L)，其中 (\bar g_l = \frac1{T_x}\sum_t g*{l,t}(x))。
-* (\mathbf A(x) = [\bar A_l]*{l=1}^L)，其中 (\bar A_l = \frac1{T_x}\sum_t \big(\partial L*{\text{lm}}/\partial g_{l,t}\big))。
-* (\mathbf B(x) = [\bar B_l]*{l=1}^L)，其中 (\bar B_l = \frac1{T_x}\sum_t \big(y*{l,t}^\top H_{u_l}y_{l,t}\big))（HVP 实现即可）。
-
-> 说明：**只需一次前/反传**。A 用 autograd；B 用 Hessian-Vector Product 沿方向 (y_l)。
-
-**伪代码（高层）**：
-
-```python
-model.eval(); freeze(backbone=True)
-
-for x in dataloader:
-    out, cache = model.forward_with_gates(x, return_intermediates=True)  # cache: y_l, g_l, u_l per token
-    L_lm = out.lm_loss
-
-    # A: ∂L_lm/∂g_l  (list[L] of [T_x])
-    A_tok = autograd.grad(L_lm, cache.gates, retain_graph=True)
-
-    # B: y^T H_u y  via HVP (list[L] of [T_x])
-    B_tok = hessian_vector_product(L_lm, cache.u, cache.y)
-
-    # token-mean per layer -> vectors [L]
-    g_vec = token_mean(cache.gates)      # [L]
-    A_vec = token_mean(A_tok)            # [L]
-    B_vec = token_mean(B_tok)            # [L]
-
-    dump(x_id, g_vec, A_vec, B_vec)      # 不做 layer-mean；直接保存 [L]
-```
-
----
-
-## 3. 阶段三 · 排序与选数（Ranking & Pick）
-
-**逐层打分 → 样本聚合 → 单次排序选前 r%**。不做两段排序；不引入额外统计量。
-
-### 3.1 逐层 D₂ 分数（一次项正则）
-
+**2.1 样本内 token 权重（高熵更重要）**
+给定超参 (\alpha>0)（默认 1），定义
 [
-\boxed{
-\mathrm{D2}*l(x)=
-\frac{\big[-(A_l(x)+\lambda)\big]*+^2}
-{2\big(,\tau + \max(B_l(x)+\mu,0);+;\kappa,\max(-(B_l(x)+\mu),0),\big)}
-}
+w_{i,t}=\frac{(\mathrm{ppl}*{i,t})^{\alpha}}{\sum*{u=1}^{T_i}(\mathrm{ppl}*{i,u})^{\alpha}+\varepsilon},\quad
+\varepsilon=10^{-8}.
+]
+性质：(w*{i,t}\ge0)、(\sum_t w_{i,t}=1)，困惑度越高权重越大。
+
+**2.2 按 token 加权得到逐层分数并堆叠**
+[
+s_{i,l}=\sum_{t=1}^{T_i} w_{i,t},g_{i,l,t},\qquad
+S=\big[s_{i,l}\big]\in\mathbb R^{N\times L}.
 ]
 
-* 分子：净驱动力（收益−固定成本）的**正部平方**。
-* 分母：**非对称惩罚**分母
+> 形状关键：这里得到的是 **[N, L]** 矩阵（样本 × 层）。
 
-  * (\tau>0)：极小下界（防近零爆分）；
-  * (\max(B+\mu,0))：正曲率按原值付“成本”；
-  * (\kappa\max(-(B+\mu),0))：**负曲率（不可信）加重惩罚**，(\kappa>1)。
+---
 
-**推荐默认**：(\tau=1\mathrm{e}{-4}\sim 1\mathrm{e}{-3})，(\kappa=10)，(\mu=0)。
+# 3. 阶段三 · 逐层“一步映射”到统一尺度并加权
 
-### 3.2 样本聚合（默认：层平均，可自定义）
-
+目的：把不同层的列拉到统一尺度，同时**让均值小（更“会关门”）的层权重大**。
+先算每列统计量（跨样本）：
 [
-\mathrm{D2}*{\text{sample}}(x)=\frac{1}{L}\sum*{l=1}^L \mathrm{D2}_l(x)
+a_l=\min_i S_{i,l},\quad
+b_l=\max_i S_{i,l},\quad
+\mu_l=\frac{1}{N}\sum_{i=1}^N S_{i,l}.
 ]
 
-> 也可换为 `topk_mean`、按层权重平均等；本规范默认用 layer-mean，因阶段二已保存 ([L]) 向量，后续可灵活替换。
+**一步映射（把“列内 min–max 归一化” 与 “按均值的反比加权”合并）**：
+[
+\boxed{;
+R_{i,l}=\frac{S_{i,l}-a_l}
+{\big(\max(b_l-a_l,\varepsilon)\big)\cdot\big(\max(\mu_l,\varepsilon)\big)}; }
+]
+得到 (R\in\mathbb R^{N\times L})。
+直觉：同列内，(R) 对 (S) 单调；分母里的 ((b_l-a_l)) 统一尺度，(\mu_l) 越小该层权重越大。
 
-### 3.3 排序与选择
+> 如需更稳，可把第二个因子改为 ((\mu_l+\tau))，(\tau\in[10^{-4},10^{-3}])。
 
-* 对全集样本计算 (\mathrm{D2}_{\text{sample}}(x))，**降序排序**；
-* 选取前 **r%**（或前 **K** 条），得到高质量子集。
+---
 
-**伪代码（评分与选数）**：
+# 4. 样本质量分数与选择
+
+[
+q_i=\frac{1}{L}\sum_{l=1}^{L} R_{i,l}\quad(\text{得到 }[N]\text{ 向量})
+]
+对 ({q_i}) **降序排序**，取 **top-k%** 作为高质量样本子集。
+
+---
+
+# 5. 伪代码（可直接实现）
 
 ```python
-tau, kappa, mu = 1e-4, 10.0, 0.0
+# 超参
+alpha = 1.0
+eps = 1e-8
+top_ratio = 0.30  # 例：取前30%
 
-def D2_layerwise(A_vec, B_vec, lam):
-    num = np.maximum(-(A_vec + lam), 0.0)**2                   # [L]
-    den = tau + np.maximum(B_vec + mu, 0.0) + kappa*np.maximum(-(B_vec + mu), 0.0)
-    return num / (2.0 * den)                                   # [L]
+# ===== Phase 2: collect =====
+S_rows = []  # list of [L]
+for x in dataset:  # 仅前向
+    logits, cache = model.forward_with_gates(x, return_intermediates=True)
+    G = cache.gates_sigmoid            # [L, T_i]
+    ppl = compute_token_ppl(logits, x.targets)  # [T_i], ppl = exp(nll)
 
-scores = {}
-for x_id in dataset_ids:
-    g_vec, A_vec, B_vec = load(x_id)                           # 全是 [L]
-    d2_vec = D2_layerwise(A_vec, B_vec, λ)
-    scores[x_id] = d2_vec.mean()                               # 默认 layer-mean
+    w = (ppl ** alpha)
+    w = w / (w.sum() + eps)            # [T_i], sum=1
+    s = (G * w[None, :]).sum(axis=1)   # [L]  按token加权求和
+    S_rows.append(s)
 
-selected = top_percent(scores, r)                              # 单次排序，取前 r%
-save_selected(selected)
+S = stack(S_rows, axis=0)              # [N, L]
+
+# ===== Phase 3: one-shot column mapping =====
+a  = S.min(axis=0)                     # [L]
+b  = S.max(axis=0)                     # [L]
+mu = S.mean(axis=0)                    # [L]
+
+den = np.maximum(b - a, eps) * np.maximum(mu, eps)  # [L]
+R = (S - a[None, :]) / den[None, :]    # [N, L]
+
+# ===== Score & pick =====
+q = R.mean(axis=1)                     # [N]
+k = int(np.ceil(top_ratio * len(q)))
+idx = np.argsort(-q)                   # 降序
+selected_ids = [dataset.ids[j] for j in idx[:k]]
 ```
 
 ---
 
-## 4. 工程接口（建议）
+# 6. 超参与稳定性
 
-### 4.1 阶段二输出（按样本）
-
-```json
-{
-  "sample_id": "string",
-  "g": [float; L],   // 每层 token-mean 的门控值
-  "A": [float; L],   // 每层 token-mean 的一阶项 ∂L_lm/∂g_l
-  "B": [float; L]    // 每层 token-mean 的方向二阶 y^T H y
-}
-```
-
-### 4.2 阶段三输入/输出
-
-* 输入：上述 JSONL / Parquet；参数 `{lambda, tau, kappa, mu, r}`。
-* 输出：`selected_ids: List[sample_id]`（以及可选的 `score` 侧写）。
+* (\alpha)：强调高熵 token（默认 1；>1 更偏重高熵；<1 更均衡）。
+* (\varepsilon=1\mathrm{e}{-8})：统一的数值下界，防分母为 0。
+* （可选）(\tau)：把 (\max(\mu_l,\varepsilon)) 换成 ((\mu_l+\tau)) 可更稳。
+* 复杂度：仅前向；内存主要是暂存 (G) 以聚合成 (S)。
 
 ---
 
-## 5. 落地注意事项
+# 7. 快速检查清单
 
-* **稳定性**：(\tau) 给最小曲率，已杜绝“趋零爆分”；(\kappa>1) 保证负曲率必被降权。
-* **一致性**：A/B 的 token-mean 与层索引必须与门控实现一致；不同批次的统计口径保持一致。
-* **可扩展**：若未来切换到**二次正则**，把分子 (A+\lambda) 改为 (A+2\lambda g)，分母加 (+2\lambda) 即可：
-  (\mathrm{D2}*l=\frac{[-(A_l+2\lambda g_l)]*+^2}{2(\tau+\max(B_l+\mu+2\lambda,0)+\kappa\max(-(B_l+\mu+2\lambda),0))})。
+* [ ] 预热仅更新门控；若用 (L_{\text{quality}})，遵循“样本内→样本间”聚合。
+* [ ] 收集阶段只前向，得到 **(G_i:[L,T_i]), (\mathbf{ppl}_i:[T_i])**。
+* [ ] 形成 **(S:[N,L])**；按“一步映射”得到 **(R:[N,L])**。
+* [ ] (q=\text{mean}_L(R))；按 (q) 降序取 **top-k%**。
 
----
-
-## 6. 快速检查清单（上线前）
-
-* [ ] 预热阶段仅门控参数更新；`L_quality` 采用 **样本内→样本间** 聚合。
-* [ ] 阶段二产物为 **[L] 向量**（不做层平均）；数值范围检查无 NaN/Inf。
-* [ ] 阶段三使用 **非对称分母**；(\tau,\kappa,\mu) 为**常数**，无批内统计。
-* [ ] 单次排序选前 r% 输出；保存打分以便复现与回溯。
-
-> 以上即为“核心方法”最终版：三阶段清晰、接口明确、代码可直接实现。
+这样流程就**前向一次、步骤清晰、零反传**，可以直接落地。
