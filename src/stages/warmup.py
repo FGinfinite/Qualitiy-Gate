@@ -129,8 +129,11 @@ def get_model_and_tokenizer(
     cfg: DictConfig,
 ) -> Tuple[QualityGateForCausalLM, AutoTokenizer]:
     """
-    加载质量门控模型和分词器。
-    支持从预训练的Qwen模型加载或从已有的质量门控模型加载。
+    加载预先转换好的质量门控模型和分词器。
+
+    要求：
+    - selector_model.path 必须指向已经转换好的质量门控模型目录
+    - 使用 scripts/convert_qwen_to_quality_gate.py 预先完成模型转换
     """
     # 注册质量门控模型
     register_quality_gate()
@@ -140,37 +143,13 @@ def get_model_and_tokenizer(
         "low_cpu_mem_usage": True,
         "torch_dtype": torch.bfloat16,
     }
-    
-    # 检查是否是已经转换的质量门控模型
+
+    # 加载预先转换好的质量门控模型
     model_path = cfg.selector_model.path
-    try:
-        # 首先尝试加载已有的质量门控模型
-        model = QualityGateForCausalLM.from_pretrained(model_path, **model_kwargs)
-        log = logging.getLogger(__name__)
-        log.info(f"成功加载已有的质量门控模型: {model_path}")
-    except Exception as e:
-        # 如果失败，从Qwen模型加载并转换
-        log = logging.getLogger(__name__)
-        log.info(f"从Qwen基座模型加载: {model_path}")
-        from transformers import AutoModelForCausalLM as HFAutoModelForCausalLM
-        
-        # 加载基座模型
-        base_model = HFAutoModelForCausalLM.from_pretrained(model_path, **model_kwargs)
-        
-        # 创建质量门控配置
-        config = QualityGateForCausalLM.config_class.from_pretrained(model_path)
-        config.quality_gate_init_mean = cfg.training.quality_gate_init_mean
-        config.quality_gate_init_std = cfg.training.quality_gate_init_std
-        
-        # 创建新的质量门控模型
-        model = QualityGateForCausalLM(config)
-        
-        # 复制基座模型的权重（除了需要新增的质量门控部分）
-        model.load_state_dict(base_model.state_dict(), strict=False)
-        log.info(f"已从基座模型初始化质量门控模型")
-        
-        del base_model
-        torch.cuda.empty_cache()
+    log = logging.getLogger(__name__)
+    log.info(f"从预转换模型加载: {model_path}")
+    model = QualityGateForCausalLM.from_pretrained(model_path, **model_kwargs)
+    log.info(f"成功加载质量门控模型: {model_path}")
 
     # 从训练配置中覆写损失函数参数
     if hasattr(cfg.training, "quality_loss_weight"):
@@ -357,6 +336,7 @@ def warmup(cfg: DictConfig) -> None:
             log.info(f"正在将最终的 PEFT 适配模型保存到 {cfg.output_dir}")
             trainer.save_model(cfg.output_dir)
         elif cfg.training.peft_mode == "full_rank":
+            # 只保存质量门控权重（节省磁盘空间）
             log.info(f"正在将质量门控全秩微调权重保存到 {cfg.output_dir}")
             full_rank_weights_path = os.path.join(cfg.output_dir, "full_rank_weights.pt")
             save_full_rank_weights(model, QUALITY_GATE_PATTERNS, full_rank_weights_path, mode="parameter", tokenizer=tokenizer)

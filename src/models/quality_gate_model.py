@@ -16,12 +16,11 @@ from transformers import (
     AutoModelForCausalLM,
     PreTrainedModel,
 )
+from transformers.masking_utils import create_causal_mask, create_sliding_window_causal_mask
 from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers.models.qwen3.modeling_qwen3 import (
     Qwen3Config,
     Qwen3DecoderLayer,
-    Qwen3ForCausalLM,
-    Qwen3Model,
 )
 from transformers.utils import logging
 
@@ -221,9 +220,7 @@ class QualityGateModel(QualityGatePreTrainedModel):
         self.vocab_size = config.vocab_size
 
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
-        self.layers = nn.ModuleList(
-            [QualityGateDecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
-        )
+        self.layers = nn.ModuleList([QualityGateDecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)])
 
         # 使用Qwen3的RMSNorm和RotaryEmbedding
         from transformers.models.qwen3.modeling_qwen3 import (
@@ -235,6 +232,8 @@ class QualityGateModel(QualityGatePreTrainedModel):
         self.rotary_emb = Qwen3RotaryEmbedding(config=config)
 
         self.gradient_checkpointing = False
+        # 检查是否有sliding window layers
+        self.has_sliding_layers = "sliding_attention" in self.config.layer_types if hasattr(self.config, "layer_types") else False
 
         # 初始化权重并应用最终处理
         self.post_init()
@@ -261,9 +260,7 @@ class QualityGateModel(QualityGatePreTrainedModel):
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_router_logits = output_router_logits if output_router_logits is not None else False
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        )
+        output_hidden_states = output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         use_cache = use_cache if use_cache is not None else self.config.use_cache
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
@@ -280,16 +277,29 @@ class QualityGateModel(QualityGatePreTrainedModel):
         # 处理cache position (Qwen3风格)
         if cache_position is None:
             past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
-            cache_position = torch.arange(
-                past_seen_tokens, past_seen_tokens + inputs_embeds.shape[1], device=inputs_embeds.device
-            )
+            cache_position = torch.arange(past_seen_tokens, past_seen_tokens + inputs_embeds.shape[1], device=inputs_embeds.device)
         if position_ids is None:
             position_ids = cache_position.unsqueeze(0)
 
         # 创建因果注意力掩码 (Qwen3风格)
-        causal_mask = self._update_causal_mask(
-            attention_mask, inputs_embeds, cache_position, past_key_values, output_attentions
-        )
+        # It may already have been prepared by e.g. `generate`
+        if not isinstance(causal_mask_mapping := attention_mask, dict):
+            # Prepare mask arguments
+            mask_kwargs = {
+                "config": self.config,
+                "input_embeds": inputs_embeds,
+                "attention_mask": attention_mask,
+                "cache_position": cache_position,
+                "past_key_values": past_key_values,
+                "position_ids": position_ids,
+            }
+            # Create the masks
+            causal_mask_mapping = {
+                "full_attention": create_causal_mask(**mask_kwargs),
+            }
+            # The sliding window alternating layers are not always activated depending on the config
+            if self.has_sliding_layers:
+                causal_mask_mapping["sliding_attention"] = create_sliding_window_causal_mask(**mask_kwargs)
 
         hidden_states = inputs_embeds
 
@@ -300,7 +310,6 @@ class QualityGateModel(QualityGatePreTrainedModel):
         all_hidden_states = () if output_hidden_states else None
         all_self_attns = () if output_attentions else None
         all_router_logits = () if output_router_logits else None
-        next_decoder_cache = None
 
         for decoder_layer in self.layers:
             if output_hidden_states:
@@ -310,7 +319,7 @@ class QualityGateModel(QualityGatePreTrainedModel):
                 layer_outputs = self._gradient_checkpointing_func(
                     decoder_layer.__call__,
                     hidden_states,
-                    causal_mask,
+                    causal_mask_mapping[decoder_layer.attention_type],
                     position_ids,
                     past_key_values,
                     output_attentions,
@@ -322,7 +331,7 @@ class QualityGateModel(QualityGatePreTrainedModel):
             else:
                 layer_outputs = decoder_layer(
                     hidden_states,
-                    attention_mask=causal_mask,
+                    attention_mask=causal_mask_mapping[decoder_layer.attention_type],
                     position_ids=position_ids,
                     past_key_value=past_key_values,
                     output_attentions=output_attentions,
@@ -376,24 +385,6 @@ class QualityGateModel(QualityGatePreTrainedModel):
             router_logits=all_router_logits,
         )
 
-    def _update_causal_mask(
-        self,
-        attention_mask: torch.Tensor,
-        input_tensor: torch.Tensor,
-        cache_position: torch.Tensor,
-        past_key_values,
-        output_attentions: bool,
-    ):
-        """因果掩码更新"""
-        # 使用Qwen3的实现
-        from transformers.models.qwen3.modeling_qwen3 import (
-            Qwen3Model,
-        )
-
-        return Qwen3Model._update_causal_mask(
-            self, attention_mask, input_tensor, cache_position, past_key_values, output_attentions
-        )
-
 
 class QualityGateModelOutput:
     """质量门控模型输出"""
@@ -421,15 +412,15 @@ def quality_classification_loss(
 ) -> torch.Tensor:
     """
     计算质量分类损失
-    
+
     使用线性损失：直接使用sigmoid后的good_ratio作为损失，鼓励降低good_ratio
-    
+
     Args:
         router_logits: 包含每层'quality_score'的张量列表
         config: 模型配置
         attention_mask: 注意力掩码，用于排除padding tokens (batch_size, seq_len)
         debug: 是否打印调试信息
-    
+
     Returns:
         质量分类损失张量
     """
@@ -588,12 +579,9 @@ class QualityGateForCausalLM(QualityGatePreTrainedModel):
         cache_position: Optional[torch.LongTensor] = None,
         **loss_kwargs,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
-
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_router_logits = output_router_logits if output_router_logits is not None else False
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        )
+        output_hidden_states = output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         # decoder outputs
@@ -639,13 +627,21 @@ class QualityGateForCausalLM(QualityGatePreTrainedModel):
                 output = (aux_loss,) + output
             return (loss,) + output if loss is not None else output
 
-        return CausalLMOutputWithPast(
+        # 注意：使用 past_key_values 字段传递 router_logits（HuggingFace的常见做法）
+        # 因为 CausalLMOutputWithPast 不原生支持 router_logits
+        return_output = CausalLMOutputWithPast(
             loss=loss,
             logits=logits,
             past_key_values=outputs.past_key_values if return_dict else None,
             hidden_states=outputs.hidden_states if return_dict else None,
             attentions=outputs.attentions if return_dict else None,
         )
+
+        # 添加 router_logits 作为额外属性（用于数据选择阶段）
+        if output_router_logits and hasattr(outputs, "router_logits"):
+            return_output.router_logits = outputs.router_logits
+
+        return return_output
 
     def prepare_inputs_for_generation(
         self,
@@ -701,4 +697,3 @@ __all__ = [
     "QualityGateForCausalLM",
     "register_quality_gate",
 ]
-

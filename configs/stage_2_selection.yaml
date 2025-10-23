@@ -7,8 +7,10 @@ seed: 42
 
 # 模型配置
 selector_model:
-  # 质量门控模型路径（通常是从stage 1训练得到的）
-  path: "path/to/quality_gate_model"
+  # 预转换的质量门控模型路径（使用 scripts/convert_qwen_to_quality_gate.py 转换）
+  # 这个路径必须与 Stage 1 使用的模型路径一致
+  path: "converted_models/quality_gate_Qwen3-1.7B"
+  tokenizer_name: "Qwen/Qwen3-1.7B"
 
 # Stage 2: Data Selection Configuration (统计收集阶段)
 
@@ -29,7 +31,9 @@ hydra:
           - hydra.sweep.dir
           - hydra.sweep.subdir
 
-# Path to the full rank weights from stage 1
+# Path to the stage 1 checkpoint directory
+# 该目录包含训练好的质量门控权重: full_rank_weights.pt
+# Stage 2 会加载 selector_model.path 的基础模型，然后应用这里的权重
 model_checkpoint_path: "outputs/stage_1_warmup/2025-01-01/00-00-00-batch=16_lr=0.001_loss=sigmoid_lossWeight=1_sampleWise=True_tag=none"
 
 # The final output path for the router data

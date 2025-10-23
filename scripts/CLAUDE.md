@@ -1,335 +1,550 @@
-[根目录](../CLAUDE.md) > **scripts**
+# scripts 模块文档
 
-# 执行脚本模块 - 流水线执行与工具集合
+[根目录](/mnt/lishiwei/Quality-Gate/CLAUDE.md) > **scripts**
+
+---
 
 ## 变更记录 (Changelog)
 
-**2025-09-14 22:43:47** - 模块文档初始化
-- 创建脚本模块执行指南
-- 详细说明四阶段脚本使用方法
-- 添加独立选择脚本和批量处理文档
+### 2025-10-23
+- 初始化模块文档
+- 记录转换和选择脚本功能
+
+---
 
 ## 模块职责
 
-执行脚本模块提供完整的Select-MoE流水线执行工具集，主要功能：
-- **四阶段执行脚本**：自动化Warmup/Selection/Finetune/Evaluate流程
-- **独立数据选择**：解耦的聚类选择脚本，支持断点续跑
-- **批量实验处理**：跨多个实验的批量数据选择
-- **模型转换工具**：OLMoE到Select-MoE的模型转换和验证
-- **评估脚本**：标准化的模型性能评估
+`scripts/` 目录包含独立的工具脚本，用于：
+
+1. **模型转换**: 将基座模型转换为 Quality-Gate 格式
+2. **数据筛选**: 基于统计数据进行数据选择
+3. **模型对比**: 验证转换后的模型正确性
+
+这些脚本可以独立运行，不依赖训练流程。
+
+---
 
 ## 入口与启动
 
-### 四阶段主要脚本
-- `run_stage_1.sh` - Stage 1: 路由器预训练执行脚本
-- `run_stage_2.sh` - Stage 2: 路由器数据计算脚本
-- `run_stage_3.sh` - Stage 3: 目标模型微调脚本
-- `eval.sh` - Stage 4: 模型评估脚本
+### 模型转换脚本
 
-### 独立工具脚本
-- `continue_selection.py` - 独立聚类数据选择
-- `batch_selection.py` - 批量实验数据选择
-- `convert_olmoe_to_select_moe.py` - 模型转换工具
-- `compare_converted_model.py` - 模型转换验证
+#### convert_qwen_to_quality_gate.py
 
-### 基本流水线执行
+**用途**: 将 Qwen3 预训练模型转换为 Quality-Gate 格式
+
+**使用方法**:
 ```bash
-# 完整四阶段流水线
-CUDA_VISIBLE_DEVICES=0,1,2,3 bash scripts/run_stage_1.sh
-CUDA_VISIBLE_DEVICES=0 bash scripts/run_stage_2.sh model_checkpoint_path=outputs/stage_1_warmup/2025-09-14/22-43-47/full_rank_weights.pt
-CUDA_VISIBLE_DEVICES=0 uv run scripts/continue_selection.py router_data_dir=outputs/stage_2_selection/2025-09-14/22-43-47/router_data
-CUDA_VISIBLE_DEVICES=0,1,2,3 bash scripts/run_stage_3.sh dataset.data_path=outputs/stage_2_selection/2025-09-14/22-43-47/selected_data.jsonl
-bash scripts/eval.sh
+# 基本转换
+uv run python scripts/convert_qwen_to_quality_gate.py \
+    --model Qwen/Qwen3-1.7B \
+    --save-path ./converted_models/quality_gate_Qwen3-1.7B
+
+# 自定义参数
+uv run python scripts/convert_qwen_to_quality_gate.py \
+    --model Qwen/Qwen3-1.7B \
+    --save-path ./converted_models/quality_gate_Qwen3-1.7B \
+    --quality-gate-init-mean 0.0 \
+    --quality-gate-init-std 0.02 \
+    --quality-loss-weight 1.0 \
+    --device cuda:0 \
+    --seed 42
 ```
+
+**支持的模型**:
+- Qwen/Qwen3-1.7B (推荐)
+- Qwen/Qwen3-* 系列
+- **不支持** Qwen2/Qwen2.5 (架构不兼容)
+
+**输出结构**:
+```
+converted_models/quality_gate_Qwen3-1.7B/
+├── config.json                    # Quality-Gate 配置
+├── model.safetensors              # 模型权重
+├── tokenizer.json                 # 分词器
+├── tokenizer_config.json
+└── special_tokens_map.json
+```
+
+---
+
+### 数据筛选脚本
+
+#### batch_selection.py
+
+**用途**: 批量处理多个数据集的筛选
+
+**使用方法**:
+```bash
+# 基本用法
+uv run python scripts/batch_selection.py \
+    root_dir=outputs/stage_2_selection/2025-10-23/12-00-00-xxx
+
+# 自定义筛选比例
+uv run python scripts/batch_selection.py \
+    root_dir=outputs/stage_2_selection/2025-10-23/12-00-00-xxx \
+    selection_percentage=0.1
+```
+
+**配置文件**: `configs/batch_selection.yaml`
+```yaml
+root_dir: "outputs/stage_2_selection/..."
+router_data_subdir: "router_data"
+selection_percentage: 0.05
+output_filename: "selected_data.jsonl"
+```
+
+#### continue_selection.py
+
+**用途**: 对单个数据集进行筛选（可续跑）
+
+**使用方法**:
+```bash
+uv run python scripts/continue_selection.py \
+    router_data_dir=outputs/stage_2_selection/.../router_data
+```
+
+**配置文件**: `configs/continue_selection.yaml`
+```yaml
+router_data_dir: "outputs/stage_2_selection/.../router_data"
+selection_percentage: 0.05
+output_filename: "selected_data.jsonl"
+```
+
+#### random_selection.py
+
+**用途**: 随机选择数据（基线对比）
+
+**使用方法**:
+```bash
+uv run python scripts/random_selection.py \
+    selection_percentage=0.05
+```
+
+---
+
+### 模型验证脚本
+
+#### compare_quality_gate_model.py
+
+**用途**: 验证转换后的 Quality-Gate 模型
+
+**使用方法**:
+```bash
+uv run python scripts/compare_quality_gate_model.py \
+    --converted-model ./converted_models/quality_gate_Qwen3-1.7B \
+    --dtype bfloat16
+```
+
+**验证内容**:
+- 模型加载正确性
+- 前向传播功能
+- 质量门控输出格式
+- 与基座模型的输出一致性
+
+---
+
+## 关键功能
+
+### 模型转换流程
+
+`convert_qwen_to_quality_gate.py` 的核心函数：
+
+```python
+def convert_and_save_model(
+    model_name="Qwen/Qwen3-1.7B",
+    save_path=None,
+    device="cpu",
+    quality_gate_init_mean=0.0,
+    quality_gate_init_std=0.02,
+    quality_loss_weight=1.0,
+    quality_loss_type="sigmoid",
+    seed=42,
+) -> str:
+    """
+    转换 Qwen3 模型为 Quality-Gate 格式
+
+    步骤：
+    1. 加载原始 Qwen3 模型
+    2. 创建 Quality-Gate 配置
+    3. 复制 Qwen3 权重到 Quality-Gate 模型
+    4. 初始化质量门控参数
+    5. 验证转换正确性
+    6. 保存模型和分词器
+    7. 测试加载保存的模型
+
+    Returns:
+        保存路径的绝对路径
+    """
+```
+
+**关键步骤**:
+1. 验证模型类型（确保是 Qwen3）
+2. 复制基座权重
+3. 添加质量门控层（自动初始化）
+4. 运行前向传播测试
+5. 测试质量门控输出
+
+### 数据筛选算法
+
+`batch_selection.py` 的筛选逻辑：
+
+1. **加载路由数据**:
+```python
+router_data = torch.load(f"{router_data_dir}/openhermes_router_data.pt")
+quality_gates = router_data["quality_gates"]  # [N, L, T]
+perplexities = router_data["perplexities"]    # [N, T]
+```
+
+2. **计算质量分数**:
+```python
+# 对每个样本，取所有层的平均质量分数
+quality_scores = torch.sigmoid(quality_gates).mean(dim=(1, 2))  # [N]
+```
+
+3. **排序和选择**:
+```python
+# 按质量分数降序排序
+sorted_indices = torch.argsort(quality_scores, descending=True)
+
+# 选择 top-k
+num_to_select = int(len(sorted_indices) * selection_percentage)
+selected_indices = sorted_indices[:num_to_select]
+```
+
+4. **输出 JSONL**:
+```python
+with open(output_path, "w") as f:
+    for idx in selected_indices:
+        sample = original_dataset[idx]
+        f.write(json.dumps(sample) + "\n")
+```
+
+---
 
 ## 对外接口
 
-### Stage 1 预训练脚本 (`run_stage_1.sh`)
-```bash
-#!/bin/bash
-# Stage 1: Select-MoE路由器预训练
+### convert_qwen_to_quality_gate.py
 
-# GPU设备指定
-CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3}
+#### 命令行参数
 
-# 加速器配置选择
-ACCELERATE_CONFIG="configs/accelerate_config/FSDP.yaml"
+| 参数 | 类型 | 默认值 | 说明 |
+|-----|------|--------|------|
+| `--model` | str | "Qwen/Qwen3-1.7B" | Qwen3 模型名称或路径 |
+| `--save-path` | str | None | 本地保存路径 |
+| `--device` | str | "cpu" | 使用的设备 |
+| `--quality-gate-init-mean` | float | 0.0 | 质量门控初始化均值 |
+| `--quality-gate-init-std` | float | 0.02 | 质量门控初始化标准差 |
+| `--quality-loss-weight` | float | 1.0 | 质量损失权重 |
+| `--quality-loss-type` | str | "sigmoid" | 质量损失类型 |
+| `--seed` | int | 42 | 随机种子 |
 
-# 执行训练
-accelerate launch --config_file $ACCELERATE_CONFIG \
-    src/main.py \
-    --config-name stage_1_warmup \
-    "$@"  # 传递所有命令行参数
+#### 返回值
 
-# 使用示例:
-# bash scripts/run_stage_1.sh training.learning_rate=1e-4 tag=experiment_v1
+- **成功**: 返回保存路径，退出码 0
+- **失败**: 打印错误信息，退出码 1
+
+---
+
+### batch_selection.py
+
+#### Hydra 配置参数
+
+```yaml
+# configs/batch_selection.yaml
+root_dir: "outputs/stage_2_selection/..."    # 阶段2输出目录
+router_data_subdir: "router_data"            # 路由数据子目录
+selection_percentage: 0.05                   # 选择比例
+output_filename: "selected_data.jsonl"       # 输出文件名
+seed: 42                                     # 随机种子
+
+# 筛选策略
+strategy: "quality_based"  # "quality_based", "perplexity_based", "hybrid"
 ```
 
-### Stage 2 数据计算脚本 (`run_stage_2.sh`)
-```bash
-#!/bin/bash
-# Stage 2: 路由器数据推理和计算
+#### 输出格式
 
-# 检查必需参数
-if [[ "$*" != *"model_checkpoint_path="* ]]; then
-    echo "错误: 必须指定model_checkpoint_path参数"
-    echo "使用方法: bash $0 model_checkpoint_path=path/to/weights.pt"
-    exit 1
-fi
-
-# 单GPU推理执行
-CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0} \
-python src/main.py \
-    --config-name stage_2_selection \
-    "$@"
-
-# 使用示例:
-# bash scripts/run_stage_2.sh model_checkpoint_path=outputs/stage_1_warmup/2025-09-14/22-43-47/full_rank_weights.pt
+```jsonl
+{"messages": [...], "dataset": "openhermes", "id": "openhermes_12345"}
+{"messages": [...], "dataset": "openhermes", "id": "openhermes_67890"}
+...
 ```
 
-### 独立数据选择脚本 (`continue_selection.py`)
-```python
-#!/usr/bin/env python3
-"""
-独立的聚类选择脚本
-
-从Stage 2的router_data进行数据选择，支持多种聚类算法和参数配置。
-"""
-
-@hydra.main(config_path="../configs", config_name="continue_selection")
-def main(cfg: DictConfig):
-    """
-    主选择函数
-
-    Args:
-        cfg: Hydra配置，包含以下关键参数:
-            - router_data_dir: router数据目录路径
-            - selection_percentage: 选择比例 (0.01-1.0)
-            - clustering_method: 聚类方法 ("kmeans")
-            - clustering_params: 聚类参数字典
-            - debug_print: 是否启用调试输出
-    """
-
-# 使用示例:
-# CUDA_VISIBLE_DEVICES=0 uv run scripts/continue_selection.py \
-#     router_data_dir=outputs/stage_2_selection/2025-09-14/22-43-47/router_data \
-#     selection_percentage=0.05 \
-#     clustering_method=kmeans \
-#     clustering_params.enable_parallel_kmeans=true
-```
-
-### 批量数据选择脚本 (`batch_selection.py`)
-```python
-#!/usr/bin/env python3
-"""
-批量实验数据选择脚本
-
-自动扫描指定根目录下的所有实验，并为每个实验执行数据选择。
-支持跨多个实验的批量处理和进度跟踪。
-"""
-
-@hydra.main(config_path="../configs", config_name="batch_selection")
-def main(cfg: DictConfig):
-    """
-    批量选择主函数
-
-    Args:
-        cfg: 包含以下参数:
-            - root_dir: 实验根目录 (如 outputs/stage_2_selection)
-            - selection_percentage: 统一的选择比例
-            - clustering_method: 聚类算法
-            - max_workers: 最大并行worker数
-    """
-
-# 使用示例:
-# CUDA_VISIBLE_DEVICES=0 uv run scripts/batch_selection.py \
-#     root_dir=outputs/stage_2_selection \
-#     selection_percentage=0.1 \
-#     clustering_method=kmeans
-```
-
-### 模型转换工具 (`convert_olmoe_to_select_moe.py`)
-```python
-#!/usr/bin/env python3
-"""
-OLMoE到Select-MoE模型转换工具
-
-将原始OLMoE模型转换为具有两层路由架构的Select-MoE格式。
-"""
-
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--source-model", default="allenai/OLMoE-1B-7B-0125")
-    parser.add_argument("--save-path", required=True)
-    parser.add_argument("--dtype", default="bfloat16")
-
-# 使用示例:
-# python scripts/convert_olmoe_to_select_moe.py \
-#     --save-path ./converted_models/select_moe_converted_OLMoE-1B-7B-0125
-```
+---
 
 ## 关键依赖与配置
 
-### 环境依赖
-- `bash>=4.0` - Shell脚本执行环境
-- `uv` - Python依赖管理和执行
-- `accelerate>=1.8.1` - 分布式训练支持
-- `hydra-core` - 配置管理
+### 依赖关系
 
-### GPU资源配置
-```bash
-# 单GPU环境
-export CUDA_VISIBLE_DEVICES=0
+```python
+# convert_qwen_to_quality_gate.py
+transformers
+torch
+src.models.quality_gate_model
 
-# 多GPU训练环境
-export CUDA_VISIBLE_DEVICES=0,1,2,3
-
-# GPU内存管理
-export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512
+# batch_selection.py
+torch
+datasets
+hydra-core
 ```
 
-### 脚本执行权限
-```bash
-# 确保脚本可执行
-chmod +x scripts/*.sh
+### 配置文件
 
-# 检查脚本语法
-bash -n scripts/run_stage_1.sh
+```
+configs/
+├── batch_selection.yaml       # 批量筛选配置
+├── continue_selection.yaml    # 续跑筛选配置
+└── random_selection.yaml      # 随机筛选配置
 ```
 
-## 数据模型
-
-### 脚本执行流程
-```
-用户执行脚本
-    ↓
-环境检查和GPU设置
-    ↓
-配置文件加载和参数解析
-    ↓
-Python主程序调用
-    ↓
-Hydra参数覆盖和验证
-    ↓
-实际训练/推理/选择逻辑
-    ↓
-结果保存和日志记录
-```
-
-### 输出目录结构
-```
-outputs/
-├── stage_1_warmup/
-│   └── YYYY-MM-DD/
-│       └── HH-MM-SS-[params]/
-│           ├── full_rank_weights.pt      # 训练权重
-│           ├── .hydra/                   # Hydra配置快照
-│           └── logs/                     # 训练日志
-├── stage_2_selection/
-│   └── YYYY-MM-DD/
-│       └── HH-MM-SS/
-│           ├── router_data/              # 路由器数据
-│           │   ├── cot_router_data.pt
-│           │   └── openhermes_router_data.pt
-│           └── selected_data.jsonl       # 选择的数据
-└── stage_3_finetune/
-    └── YYYY-MM-DD/
-        └── HH-MM-SS/
-            └── checkpoint-*/             # LoRA检查点
-```
-
-### 参数覆盖机制
-```bash
-# 1. 单个参数覆盖
-bash scripts/run_stage_1.sh training.learning_rate=1e-4
-
-# 2. 多个参数覆盖
-bash scripts/run_stage_1.sh \
-    training.batch_size=32 \
-    training.epochs=3 \
-    tag=experiment_v2
-
-# 3. 嵌套参数覆盖
-bash scripts/run_stage_2.sh \
-    clustering_method=kmeans \
-    clustering_params.k=50 \
-    clustering_params.auto_k=false
-
-# 4. 列表参数覆盖
-bash scripts/run_stage_1.sh \
-    dataset.local.dataset_names=[cot,dolly]
-```
+---
 
 ## 测试与质量
 
-### 脚本语法检查
-```bash
-# 检查所有Shell脚本语法
-for script in scripts/*.sh; do
-    echo "检查 $script"
-    bash -n "$script" || echo "语法错误: $script"
-done
+### 转换验证
+
+**自动测试**（内置在转换脚本）:
+```python
+# 1. 前向传播测试
+test_input = torch.randint(0, vocab_size, (1, 8))
+outputs = model(test_input, output_router_logits=False)
+assert outputs.logits.shape == (1, 8, vocab_size)
+
+# 2. 质量门控输出测试
+outputs_with_router = model(test_input, output_router_logits=True)
+assert len(outputs_with_router.router_logits) == num_hidden_layers
+
+# 3. 重新加载测试
+test_model = QualityGateForCausalLM.from_pretrained(save_path)
+test_outputs = test_model(test_input, output_router_logits=True)
+assert test_outputs.logits.shape == (1, 8, vocab_size)
 ```
 
-### 干跑测试
-```bash
-# 测试配置解析但不执行训练
-python src/main.py --config-name stage_1_warmup --help
+### 筛选验证
 
-# 测试参数覆盖
-python src/main.py --config-name stage_1_warmup training.batch_size=1 --help
+**数据完整性检查**:
+```python
+# 检查筛选后的数据格式
+selected_dataset = load_dataset("json", data_files="selected_data.jsonl")
+assert "messages" in selected_dataset.column_names
+assert "dataset" in selected_dataset.column_names
+assert "id" in selected_dataset.column_names
 ```
 
-### 依赖检查
-```bash
-# 检查Python环境
-python --version
-pip list | grep -E "(torch|transformers|accelerate)"
-
-# 检查GPU可用性
-python -c "import torch; print(f'GPU数量: {torch.cuda.device_count()}')"
-```
+---
 
 ## 常见问题 (FAQ)
 
-**Q: 脚本执行时提示权限不足？**
-A: 使用 `chmod +x scripts/*.sh` 给脚本添加执行权限。
+### Q: 为什么转换只支持 Qwen3？
 
-**Q: 如何在不同GPU配置下运行？**
-A: 设置 `CUDA_VISIBLE_DEVICES` 环境变量，或在configs/accelerate_config/目录下选择合适的配置文件。
+A: Quality-Gate 模型架构基于 Qwen3 设计，与 Qwen2/Qwen2.5 的架构细节不兼容。主要差异：
+- Attention 机制的实现
+- LayerNorm 的位置和参数
+- RotaryEmbedding 的配置
 
-**Q: 脚本中断后如何续跑？**
-A: 对于数据选择阶段，可以使用 `continue_selection.py` 直接从router_data继续执行。
+### Q: 转换后的模型能否直接用于推理？
 
-**Q: 如何批量处理多个实验？**
-A: 使用 `batch_selection.py` 脚本，指定包含多个实验的根目录。
+A: 可以，但质量门控参数是随机初始化的，需要先进行阶段1的预热训练。
 
-**Q: 如何调试脚本参数传递？**
-A: 在脚本中添加 `echo "$@"` 查看传递的参数，或使用Hydra的 `--help` 选项。
+### Q: 如何验证转换是否成功？
+
+A: 转换脚本会自动执行验证测试。也可以手动运行：
+```bash
+uv run python scripts/compare_quality_gate_model.py \
+    --converted-model ./converted_models/quality_gate_Qwen3-1.7B
+```
+
+### Q: batch_selection.py 和 continue_selection.py 有什么区别？
+
+A:
+- **batch_selection.py**: 批量处理多个数据集，自动发现所有 `*_router_data.pt` 文件
+- **continue_selection.py**: 处理单个数据集，支持从中断处续跑
+
+### Q: 能否自定义筛选策略？
+
+A: 可以，修改 `batch_selection.py` 的筛选逻辑：
+
+```python
+# 示例：基于困惑度筛选
+def select_by_perplexity(router_data, selection_percentage):
+    perplexities = router_data["perplexities"]
+    avg_ppl = perplexities.mean(dim=1)  # [N]
+
+    # 选择困惑度最低的样本
+    sorted_indices = torch.argsort(avg_ppl)
+    num_to_select = int(len(sorted_indices) * selection_percentage)
+    return sorted_indices[:num_to_select]
+```
+
+### Q: 转换脚本能否支持其他基座模型？
+
+A: 需要修改代码支持新架构。步骤：
+1. 创建新的转换脚本（如 `convert_llama_to_quality_gate.py`）
+2. 定义新的配置类（继承自基座的 Config）
+3. 定义新的解码器层（插入 QualityGate）
+4. 实现权重复制逻辑
+5. 添加验证测试
+
+---
 
 ## 相关文件清单
 
-### 主要执行脚本
-- `run_stage_1.sh` - Stage 1预训练脚本（25行）
-- `run_stage_2.sh` - Stage 2数据计算脚本（20行）
-- `run_stage_3.sh` - Stage 3微调脚本（25行）
-- `eval.sh` - Stage 4评估脚本（15行）
+```
+scripts/
+├── convert_qwen_to_quality_gate.py    # Qwen3 → Quality-Gate 转换
+├── compare_quality_gate_model.py      # 模型验证
+├── batch_selection.py                 # 批量数据筛选
+├── continue_selection.py              # 单数据集筛选（可续跑）
+└── random_selection.py                # 随机筛选（基线）
+```
 
-### 独立工具脚本
-- `continue_selection.py` - 独立选择脚本（200+行）
-- `batch_selection.py` - 批量选择脚本（150+行）
-- `random_selection.py` - 随机选择基线脚本
+**相关配置**:
+- `/mnt/lishiwei/Quality-Gate/configs/batch_selection.yaml`
+- `/mnt/lishiwei/Quality-Gate/configs/continue_selection.yaml`
+- `/mnt/lishiwei/Quality-Gate/configs/random_selection.yaml`
 
-### 模型工具脚本
-- `convert_olmoe_to_select_moe.py` - 模型转换（300+行）
-- `compare_converted_model.py` - 转换验证（100+行）
-- `convert.sh` - 转换包装脚本
+**相关模块**:
+- `/mnt/lishiwei/Quality-Gate/src/models/quality_gate_model.py`
+- `/mnt/lishiwei/Quality-Gate/src/stages/selection.py`
 
-### 相关配置
-- `../configs/stage_*.yaml` - 各阶段配置文件
-- `../configs/continue_selection.yaml` - 独立选择配置
-- `../configs/batch_selection.yaml` - 批量选择配置
+---
 
-### 相关工具
-- `../src/main.py` - Python主入口
-- `../tools/install.sh` - 开发工具安装
+## 开发指南
+
+### 添加新的转换脚本
+
+**模板**:
+```python
+#!/usr/bin/env python3
+"""
+将 XXX 基座模型转换为 Quality-Gate 模型
+"""
+
+import argparse
+from src.models.quality_gate_model import register_quality_gate
+
+def convert_xxx_to_quality_gate(
+    model_name: str,
+    save_path: str,
+    **kwargs
+) -> str:
+    """转换 XXX 模型"""
+    # 1. 注册 Quality-Gate
+    register_quality_gate()
+
+    # 2. 加载基座模型
+    base_model = load_base_model(model_name)
+
+    # 3. 创建 Quality-Gate 配置
+    config = create_quality_gate_config(base_model.config)
+
+    # 4. 创建 Quality-Gate 模型
+    quality_gate_model = create_quality_gate_model(config)
+
+    # 5. 复制权重
+    copy_weights(base_model, quality_gate_model)
+
+    # 6. 验证
+    validate_model(quality_gate_model)
+
+    # 7. 保存
+    quality_gate_model.save_pretrained(save_path)
+
+    return save_path
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model", type=str, required=True)
+    parser.add_argument("--save-path", type=str, required=True)
+    args = parser.parse_args()
+
+    convert_xxx_to_quality_gate(args.model, args.save_path)
+```
+
+### 添加新的筛选策略
+
+**示例：基于多样性的筛选**:
+```python
+# scripts/diversity_selection.py
+import torch
+from sklearn.cluster import KMeans
+
+def select_diverse_samples(
+    router_data: dict,
+    selection_percentage: float,
+    num_clusters: int = 10
+) -> torch.Tensor:
+    """
+    使用聚类确保多样性
+
+    步骤：
+    1. 对 quality_gates 进行聚类
+    2. 从每个簇中选择高质量样本
+    3. 确保选择样本覆盖所有簇
+    """
+    quality_gates = router_data["quality_gates"]  # [N, L, T]
+
+    # 展平特征
+    features = quality_gates.view(quality_gates.size(0), -1)  # [N, L*T]
+
+    # K-Means 聚类
+    kmeans = KMeans(n_clusters=num_clusters, random_state=42)
+    cluster_labels = kmeans.fit_predict(features.numpy())
+
+    # 计算质量分数
+    quality_scores = torch.sigmoid(quality_gates).mean(dim=(1, 2))
+
+    # 从每个簇中选择
+    selected_indices = []
+    samples_per_cluster = int(len(features) * selection_percentage / num_clusters)
+
+    for cluster_id in range(num_clusters):
+        cluster_mask = cluster_labels == cluster_id
+        cluster_indices = torch.where(torch.tensor(cluster_mask))[0]
+        cluster_scores = quality_scores[cluster_indices]
+
+        # 选择该簇中质量最高的样本
+        sorted_cluster = cluster_indices[torch.argsort(cluster_scores, descending=True)]
+        selected_indices.extend(sorted_cluster[:samples_per_cluster].tolist())
+
+    return torch.tensor(selected_indices)
+```
+
+### 调试技巧
+
+**转换脚本调试**:
+```python
+# 启用详细日志
+import logging
+logging.basicConfig(level=logging.DEBUG)
+
+# 使用 CPU 避免 CUDA 错误
+python scripts/convert_qwen_to_quality_gate.py \
+    --model Qwen/Qwen3-1.7B \
+    --device cpu
+
+# 检查中间输出
+with torch.no_grad():
+    outputs = model(test_input, output_router_logits=True)
+    print(f"Router logits: {[rl.shape for rl in outputs.router_logits]}")
+```
+
+**筛选脚本调试**:
+```python
+# 打印统计信息
+router_data = torch.load("router_data.pt")
+quality_gates = router_data["quality_gates"]
+quality_scores = torch.sigmoid(quality_gates).mean(dim=(1, 2))
+
+print(f"Quality scores 统计:")
+print(f"  Min: {quality_scores.min().item():.4f}")
+print(f"  Max: {quality_scores.max().item():.4f}")
+print(f"  Mean: {quality_scores.mean().item():.4f}")
+print(f"  Std: {quality_scores.std().item():.4f}")
+
+# 可视化分布
+import matplotlib.pyplot as plt
+plt.hist(quality_scores.numpy(), bins=50)
+plt.xlabel("Quality Score")
+plt.ylabel("Frequency")
+plt.savefig("quality_score_distribution.png")
+```
