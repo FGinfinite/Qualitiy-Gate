@@ -44,40 +44,38 @@ def setup_logging(cfg: DictConfig):
 @hydra.main(config_path="../configs", config_name="continue_selection", version_base=None)
 def main(cfg: DictConfig) -> None:
     """主函数：执行基于质量的数据选择"""
-    
+
     # 验证必需参数
     if cfg.router_data_dir is None:
         raise ValueError("router_data_dir参数是必需的")
-    
+
     # 设置日志
     setup_logging(cfg)
     log = logging.getLogger(__name__)
-    
+
     # 记录开始时间
     start_time = datetime.now()
-    
+
     log.info("=== 开始基于质量的数据选择 ===")
     log.info(f"选择比例: {cfg.selection_percentage}")
-    
+
     # 自动生成输出路径
     output_path = generate_output_path(cfg.router_data_dir)
     log.info(f"输出路径: {output_path}")
-    
+
     try:
         # 1. 加载所有router_data
         log.info("加载router_data文件...")
         all_router_data = load_all_router_data(cfg.router_data_dir)
-        
+
         # 2. 加载原始数据集映射
         log.info("加载原始数据集映射...")
         dataset_mapping = load_original_dataset_mapping(cfg.router_data_dir, cfg.data_dir)
-        
+
         # 3. 准备数据
         log.info("准备数据...")
-        all_quality_gates, all_perplexities, all_sample_ids, all_messages, all_dataset_names = prepare_selection_data(
-            all_router_data, dataset_mapping
-        )
-        
+        all_quality_gates, all_perplexities, all_sample_ids, all_messages, all_dataset_names = prepare_selection_data(all_router_data, dataset_mapping)
+
         # 4. 执行质量选择
         log.info("开始基于质量的数据选择...")
         selected_data = quality_based_selection(
@@ -91,25 +89,25 @@ def main(cfg: DictConfig) -> None:
             eps=cfg.quality_params.get("eps", 1e-8),
             tau=cfg.quality_params.get("tau", 0.0),
         )
-        
+
         log.info(f"质量选择完成，选择了 {len(selected_data)} 个样本 ({cfg.selection_percentage * 100:.2f}%)")
-        
+
         if len(selected_data) > 3:
             log.info(f"前3个分数: {[d['scores'] for d in selected_data[:3]]}")
             log.info(f"后3个分数: {[d['scores'] for d in selected_data[-3:]]}")
-        
+
         # 5. 保存选择结果
         log.info("保存选择结果...")
         output_dir = os.path.dirname(output_path)
         os.makedirs(output_dir, exist_ok=True)
-        
+
         with open(output_path, "w", encoding="utf-8") as f:
             for item in selected_data:
                 f.write(json.dumps(item, ensure_ascii=False) + "\n")
-        
+
         # 记录结束时间
         end_time = datetime.now()
-        
+
         # 6. 保存选择配置
         save_selection_config(
             output_dir=os.path.dirname(output_path),
@@ -124,10 +122,10 @@ def main(cfg: DictConfig) -> None:
             start_time=start_time,
             end_time=end_time,
         )
-        
+
         log.info(f"质量选择的数据已保存到: {output_path}")
         log.info("=== 基于质量的数据选择完成 ===")
-        
+
     except Exception as e:
         log.error(f"数据选择过程中发生错误: {e}")
         raise e

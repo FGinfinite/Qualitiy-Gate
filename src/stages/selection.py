@@ -75,7 +75,6 @@ def compute_token_perplexity(logits: torch.Tensor, input_ids: torch.Tensor, atte
     # 移位以对齐预测和目标
     shift_logits = logits[..., :-1, :].contiguous()
     shift_labels = input_ids[..., 1:].contiguous()
-    shift_attention_mask = attention_mask[..., 1:].contiguous()
 
     # 计算交叉熵损失（每个token）
     loss_fct = torch.nn.CrossEntropyLoss(reduction="none")
@@ -98,8 +97,8 @@ def compute_token_perplexity(logits: torch.Tensor, input_ids: torch.Tensor, atte
     ppl_full = torch.ones(batch_size, seq_len, device=ppl_per_token.device)
     ppl_full[:, 1:] = ppl_per_token
 
-    # 应用attention mask
-    ppl_full = ppl_full * shift_attention_mask.float()
+    # 应用attention mask（使用原始的 attention_mask，因为 ppl_full 已经是完整长度）
+    ppl_full = ppl_full * attention_mask.float()
 
     return ppl_full
 
@@ -288,65 +287,31 @@ def select(cfg: DictConfig) -> None:
 
         if i == 0:
             log.info(f"困惑度形状: {perplexities.shape}")
+            if hasattr(outputs, "router_logits") and outputs.router_logits is not None:
+                log.info(f"Router logits层数: {len(outputs.router_logits)}")
+                log.info(f"每层quality_score形状: {outputs.router_logits[0].shape}")
+            else:
+                log.warning("⚠️ outputs.router_logits 不存在或为None，请检查模型配置")
 
         for j in range(batch_size):
             dataset_name = dataset_names[j]
             sample_attention_mask = inputs["attention_mask"][j]
-            debug_mode = i == 0 and j < 3
 
             # 获取有效token的掩码信息
             valid_mask = sample_attention_mask.bool()
             actual_length = valid_mask.sum().item()
 
-            # 收集质量门控logits
-            # 注意：model的outputs.past_key_values实际上不是past_key_values
-            # 我们需要通过一个特殊的前向传播来获取router_logits
-            # 让我们先获取单个样本的输入
-            single_input = {
-                "input_ids": inputs["input_ids"][j : j + 1],
-                "attention_mask": inputs["attention_mask"][j : j + 1],
-            }
-
-            with torch.no_grad():
-                single_output = model(**single_input, output_router_logits=True)
-
-            # 从模型的中间层提取质量门控logits
-            # 由于我们修改了模型，需要确保能够访问到router_logits
-            # 这里假设model.model.layers中每一层都有quality_gate
+            # 1. 提取质量门控logits（直接从批量推理的outputs.router_logits）
             quality_gates_list = []
-            hidden_states = model.model.embed_tokens(single_input["input_ids"])
+            for quality_score in outputs.router_logits:
+                # quality_score: [batch_size, seq_len, 1]
+                # 提取第j个样本，并应用sigmoid得到g值
+                sample_quality = torch.sigmoid(quality_score[j]).squeeze(-1)  # [seq_len]
+                quality_gates_list.append(sample_quality)
 
-            # 手动前向传播以收集质量门控
-            position_ids = torch.arange(hidden_states.shape[1], device=hidden_states.device).unsqueeze(0)
-            position_embeddings = model.model.rotary_emb(hidden_states, position_ids)
-            causal_mask = None  # 简化处理
-
-            for layer_idx, layer in enumerate(model.model.layers):
-                # 自注意力
-                residual = hidden_states
-                hidden_states = layer.input_layernorm(hidden_states)
-                hidden_states, _, _ = layer.self_attn(
-                    hidden_states=hidden_states,
-                    attention_mask=causal_mask,
-                    position_ids=position_ids,
-                    position_embeddings=position_embeddings,
-                )
-                hidden_states = residual + hidden_states
-
-                # 质量门控
-                residual = hidden_states
-                hidden_states = layer.post_attention_layernorm(hidden_states)
-                quality_score, _ = layer.quality_gate(hidden_states)  # [1, seq_len, 1]
-                quality_gates_list.append(quality_score.squeeze(0).squeeze(-1))  # [seq_len]
-
-                # FFN
-                hidden_states = layer.mlp(hidden_states)
-                hidden_states = residual + hidden_states
-
-            # 堆叠所有层的质量门控logits: [L, seq_len]
             quality_gates_sample = torch.stack(quality_gates_list)  # [L, seq_len]
 
-            # 获取该样本的困惑度
+            # 2. 提取该样本的困惑度（已经计算好了）
             perplexity_sample = perplexities[j]  # [seq_len]
 
             # 保存到数据结构中
