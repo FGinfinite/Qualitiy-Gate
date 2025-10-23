@@ -27,7 +27,7 @@ seed: 42
 
 defaults:
   - _self_
-  - training: qwen_2.5_1.5b
+  - training: qwen_3_1.7b
 
 
 output_dir: ${hydra:run.dir}
