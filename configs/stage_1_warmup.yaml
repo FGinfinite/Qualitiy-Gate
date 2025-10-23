@@ -35,8 +35,8 @@ seed: 42
 selector_model:
   # 必须指向预先转换好的质量门控模型路径
   # 使用 scripts/convert_qwen_to_quality_gate.py 预先完成模型转换
-  path: "converted_models/quality_gate_Qwen3-1.7B"
-  tokenizer_name: "Qwen/Qwen3-1.7B"  # 分词器路径（通常是原始Qwen3模型）
+  path: "converted_models/quality_gate_Qwen3-1.7B-Base"
+  tokenizer_name: "Qwen/Qwen3-1.7B-Base"  # 分词器路径（通常是原始Qwen3模型）
 
 output_dir: ${hydra:run.dir}
 

@@ -48,7 +48,7 @@ def set_random_seed(seed):
 
 
 def convert_and_save_model(
-    model_name="Qwen/Qwen3-1.7B",
+    model_name="Qwen/Qwen3-1.7B-Base",
     save_path=None,
     device="cpu",
     quality_gate_init_mean=0.0,
@@ -101,7 +101,7 @@ def convert_and_save_model(
         # 验证模型类型
         model_type = type(original_model).__name__
         if "Qwen2" in model_type:
-            raise ValueError(f"❌ 检测到 Qwen2/Qwen2.5 模型 ({model_type})。\n   本脚本仅支持 Qwen3 模型。\n   请使用 Qwen3 系列模型（如 Qwen/Qwen3-1.7B）。")
+            raise ValueError(f"❌ 检测到 Qwen2/Qwen2.5 模型 ({model_type})。\n   本脚本仅支持 Qwen3 模型。\n   请使用 Qwen3 系列模型（如 Qwen/Qwen3-1.7B-Base）。")
 
         print("✓ Qwen3 模型加载成功!")
         print(f"  - 模型类型: {model_type}")
@@ -292,7 +292,7 @@ def main():
     parser.add_argument(
         "--model",
         type=str,
-        default="Qwen/Qwen3-1.7B",
+        default="Qwen/Qwen3-1.7B-Base",
         help="Qwen3 模型名称或路径（仅支持 Qwen3）",
     )
     parser.add_argument(
