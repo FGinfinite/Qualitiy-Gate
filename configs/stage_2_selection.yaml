@@ -9,8 +9,8 @@ seed: 42
 selector_model:
   # 预转换的质量门控模型路径（使用 scripts/convert_qwen_to_quality_gate.py 转换）
   # 这个路径必须与 Stage 1 使用的模型路径一致
-  path: "converted_models/quality_gate_Qwen3-1.7B"
-  tokenizer_name: "Qwen/Qwen3-1.7B"
+  path: "converted_models/quality_gate_Qwen3-1.7B-Base"
+  tokenizer_name: "Qwen/Qwen3-1.7B-Base"
 
 # Stage 2: Data Selection Configuration (统计收集阶段)
 
@@ -58,9 +58,17 @@ dataset:
   # HuggingFace dataset configuration (used when dataset_from="hf")
   hf:
     datasets:
-      - name: "teknium/OpenHermes-2.5"
-        dataset_name: "openhermes"
-        subset: null
+      # GSM8K 数据集 (7,473 个训练样本)
+      - name: "openai/gsm8k"
+        dataset_name: "gsm8k"
+        subset: "main"
+        split: "train"
+      # HENDRYCKS_MATH 数据集 - 使用 __full_subset__ 自动加载所有 7 个子集 (7,500 个训练样本)
+      # 子集包括: algebra, counting_and_probability, geometry, intermediate_algebra, 
+      #          number_theory, prealgebra, precalculus
+      - name: "EleutherAI/hendrycks_math"
+        dataset_name: "hendrycks_math"
+        subset: "__full_subset__"
         split: "train"
 
   # Common parameters

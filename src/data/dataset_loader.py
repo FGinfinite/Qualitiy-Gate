@@ -156,6 +156,70 @@ def convert_openhermes_format(example: Dict, dataset_name: str = "openhermes", e
     return {"dataset": dataset_name, "id": example_id, "messages": messages}
 
 
+def convert_gsm8k_format(example: Dict, dataset_name: str = "gsm8k", example_index: int = None) -> Dict:
+    """
+    转换GSM8K格式到项目标准格式
+
+    GSM8K数据集包含数学问题和答案：
+    - question: 数学问题文本
+    - answer: 包含推理步骤和最终答案的文本
+
+    Args:
+        example: GSM8K格式的数据样本
+        dataset_name: 数据集名称，用于生成dataset字段
+        example_index: 样本在数据集中的索引，用于生成唯一ID
+
+    Returns:
+        转换后的标准格式数据
+    """
+    if "question" not in example or "answer" not in example:
+        raise ValueError("GSM8K数据必须包含'question'和'answer'字段")
+
+    # 构建标准messages格式
+    messages = [
+        {"role": "user", "content": example["question"].strip()},
+        {"role": "assistant", "content": example["answer"].strip()},
+    ]
+
+    # 生成唯一ID
+    example_id = f"{dataset_name}_{example_index:06d}"
+
+    return {"dataset": dataset_name, "id": example_id, "messages": messages}
+
+
+def convert_hendrycks_math_format(example: Dict, dataset_name: str = "hendrycks_math", example_index: int = None) -> Dict:
+    """
+    转换HENDRYCKS_MATH格式到项目标准格式
+
+    HENDRYCKS_MATH数据集包含高等数学问题和详细解答：
+    - problem: 数学问题文本
+    - solution: 详细解答过程
+    - level: 难度级别（如 "Level 5"）
+    - type: 数学类型（如 "Algebra"）
+
+    Args:
+        example: HENDRYCKS_MATH格式的数据样本
+        dataset_name: 数据集名称，用于生成dataset字段
+        example_index: 样本在数据集中的索引，用于生成唯一ID
+
+    Returns:
+        转换后的标准格式数据
+    """
+    if "problem" not in example or "solution" not in example:
+        raise ValueError("HENDRYCKS_MATH数据必须包含'problem'和'solution'字段")
+
+    # 构建标准messages格式
+    messages = [
+        {"role": "user", "content": example["problem"].strip()},
+        {"role": "assistant", "content": example["solution"].strip()},
+    ]
+
+    # 生成唯一ID
+    example_id = f"{dataset_name}_{example_index:06d}"
+
+    return {"dataset": dataset_name, "id": example_id, "messages": messages}
+
+
 def load_hf_datasets(
     hf_config: Dict,
     sample_percentage: float = 1.0,
@@ -228,44 +292,145 @@ def load_hf_datasets(
         subset = dataset_config.get("subset", None)
         split = dataset_config.get("split", "train")
 
-        try:
-            # 加载HF数据集
-            print(f"正在从HuggingFace加载数据集 '{dataset_name}'...")
-            if subset:
-                dataset = load_dataset(dataset_name, subset, split=split)
-            else:
-                dataset = load_dataset(dataset_name, split=split)
+        # 检查是否需要加载所有子集
+        if subset == "__full_subset__":
+            try:
+                from datasets import get_dataset_config_names
 
-            # 采样
-            if sample_percentage < 1.0:
-                sample_size = int(len(dataset) * sample_percentage)
-                with temp_seed(seed):
-                    indices = np.random.permutation(len(dataset))[:sample_size]
-                dataset = dataset.select(indices)
+                # 定义已知数据集的子集列表（用于离线模式的 fallback）
+                KNOWN_DATASET_SUBSETS = {
+                    "EleutherAI/hendrycks_math": [
+                        "algebra",
+                        "counting_and_probability",
+                        "geometry",
+                        "intermediate_algebra",
+                        "number_theory",
+                        "prealgebra",
+                        "precalculus",
+                    ],
+                }
 
-            # 转换格式
-            if "openhermes" in dataset_name.lower():
-                # 获取需要移除的列（保留 dataset 和 id）
-                columns_to_remove = [col for col in dataset.column_names if col not in ["dataset", "id"]]
+                # 尝试从 HuggingFace Hub 获取子集列表
+                try:
+                    all_subsets = get_dataset_config_names(dataset_name)
 
-                # OpenHermes-2.5 格式转换，使用lambda避免闭包变量问题
-                dataset = dataset.map(
-                    lambda example, idx, name=internal_name: convert_openhermes_format(example, dataset_name=name, example_index=idx),
-                    with_indices=True,  # 传递索引
-                    desc=f"转换数据集格式 - {internal_name}",
-                    load_from_cache_file=True,  # 使用缓存提升性能
-                    remove_columns=columns_to_remove,  # 移除所有原始字段
-                )
-            else:
-                # 其他HF数据集可以在这里添加转换逻辑
-                raise ValueError(f"暂不支持数据集格式: {dataset_name}")
+                    # 检查是否返回了 'default'（这通常意味着离线模式或无法获取配置）
+                    if all_subsets == ["default"] and dataset_name in KNOWN_DATASET_SUBSETS:
+                        log.info("检测到离线模式或无法获取子集列表，使用预定义的子集列表")
+                        all_subsets = KNOWN_DATASET_SUBSETS[dataset_name]
 
-            all_datasets.append(dataset)
-            print(f"已加载HF数据集 '{internal_name}': {len(dataset)} 个样本")
+                except Exception as e:
+                    # 如果获取失败，使用预定义的子集列表
+                    if dataset_name in KNOWN_DATASET_SUBSETS:
+                        log.info(f"无法从 Hub 获取子集列表 ({e})，使用预定义的子集列表")
+                        all_subsets = KNOWN_DATASET_SUBSETS[dataset_name]
+                    else:
+                        raise ValueError(f"无法获取数据集 {dataset_name} 的子集列表，且没有预定义的 fallback 列表") from e
 
-        except Exception as e:
-            print(f"加载HF数据集 '{dataset_name}' 失败: {e}")
-            continue
+                print(f"检测到 __full_subset__ 标记，将加载 {dataset_name} 的所有 {len(all_subsets)} 个子集")
+                print(f"子集列表: {all_subsets}")
+
+                # 遍历每个子集
+                for subset_name in all_subsets:
+                    try:
+                        print(f"  正在加载子集 '{subset_name}'...")
+                        dataset = load_dataset(dataset_name, subset_name, split=split)
+
+                        # 采样
+                        if sample_percentage < 1.0:
+                            sample_size = int(len(dataset) * sample_percentage)
+                            with temp_seed(seed):
+                                indices = np.random.permutation(len(dataset))[:sample_size]
+                            dataset = dataset.select(indices)
+
+                        # 转换格式（使用子集名称作为 dataset_name）
+                        if "hendrycks_math" in dataset_name.lower() or "math" in dataset_name.lower():
+                            columns_to_remove = [col for col in dataset.column_names if col not in ["dataset", "id"]]
+                            dataset = dataset.map(
+                                lambda example, idx, name=subset_name: convert_hendrycks_math_format(example, dataset_name=name, example_index=idx),
+                                with_indices=True,
+                                desc=f"转换数据集格式 - {subset_name}",
+                                load_from_cache_file=True,
+                                remove_columns=columns_to_remove,
+                            )
+                        else:
+                            raise ValueError(f"__full_subset__ 仅支持 HENDRYCKS_MATH 等多子集数据集，不支持: {dataset_name}")
+
+                        all_datasets.append(dataset)
+                        print(f"  ✓ 已加载子集 '{subset_name}': {len(dataset)} 个样本")
+
+                    except Exception as e:
+                        print(f"  ✗ 加载子集 '{subset_name}' 失败: {e}")
+                        continue
+
+            except Exception as e:
+                print(f"加载 __full_subset__ 失败: {e}")
+                continue
+
+        else:
+            # 原有的单子集加载逻辑
+            try:
+                # 加载HF数据集
+                print(f"正在从HuggingFace加载数据集 '{dataset_name}'...")
+                if subset:
+                    dataset = load_dataset(dataset_name, subset, split=split)
+                else:
+                    dataset = load_dataset(dataset_name, split=split)
+
+                # 采样
+                if sample_percentage < 1.0:
+                    sample_size = int(len(dataset) * sample_percentage)
+                    with temp_seed(seed):
+                        indices = np.random.permutation(len(dataset))[:sample_size]
+                    dataset = dataset.select(indices)
+
+                # 转换格式
+                if "openhermes" in dataset_name.lower():
+                    # 获取需要移除的列（保留 dataset 和 id）
+                    columns_to_remove = [col for col in dataset.column_names if col not in ["dataset", "id"]]
+
+                    # OpenHermes-2.5 格式转换，使用lambda避免闭包变量问题
+                    dataset = dataset.map(
+                        lambda example, idx, name=internal_name: convert_openhermes_format(example, dataset_name=name, example_index=idx),
+                        with_indices=True,  # 传递索引
+                        desc=f"转换数据集格式 - {internal_name}",
+                        load_from_cache_file=True,  # 使用缓存提升性能
+                        remove_columns=columns_to_remove,  # 移除所有原始字段
+                    )
+                elif "gsm8k" in dataset_name.lower():
+                    # 获取需要移除的列（保留 dataset 和 id）
+                    columns_to_remove = [col for col in dataset.column_names if col not in ["dataset", "id"]]
+
+                    # GSM8K 格式转换
+                    dataset = dataset.map(
+                        lambda example, idx, name=internal_name: convert_gsm8k_format(example, dataset_name=name, example_index=idx),
+                        with_indices=True,  # 传递索引
+                        desc=f"转换数据集格式 - {internal_name}",
+                        load_from_cache_file=True,  # 使用缓存提升性能
+                        remove_columns=columns_to_remove,  # 移除所有原始字段
+                    )
+                elif "hendrycks_math" in dataset_name.lower() or "math" in dataset_name.lower():
+                    # 获取需要移除的列（保留 dataset 和 id）
+                    columns_to_remove = [col for col in dataset.column_names if col not in ["dataset", "id"]]
+
+                    # HENDRYCKS_MATH 格式转换
+                    dataset = dataset.map(
+                        lambda example, idx, name=internal_name: convert_hendrycks_math_format(example, dataset_name=name, example_index=idx),
+                        with_indices=True,  # 传递索引
+                        desc=f"转换数据集格式 - {internal_name}",
+                        load_from_cache_file=True,  # 使用缓存提升性能
+                        remove_columns=columns_to_remove,  # 移除所有原始字段
+                    )
+                else:
+                    # 其他HF数据集可以在这里添加转换逻辑
+                    raise ValueError(f"暂不支持数据集格式: {dataset_name}")
+
+                all_datasets.append(dataset)
+                print(f"已加载HF数据集 '{internal_name}': {len(dataset)} 个样本")
+
+            except Exception as e:
+                print(f"加载HF数据集 '{dataset_name}' 失败: {e}")
+                continue
 
     if not all_datasets:
         raise ValueError("没有成功加载任何HF数据集")

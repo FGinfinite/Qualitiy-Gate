@@ -330,6 +330,45 @@ def _get_dataset_config(dataset_name: str) -> dict:
             "source_type": "hf",
             "config": {"datasets": [{"name": "teknium/OpenHermes-2.5", "dataset_name": "openhermes", "subset": None, "split": "train"}]},
         },
+        "gsm8k": {
+            "source_type": "hf",
+            "config": {"datasets": [{"name": "openai/gsm8k", "dataset_name": "gsm8k", "subset": "main", "split": "train"}]},
+        },
+        # HENDRYCKS_MATH 数据集的所有子集
+        "algebra": {
+            "source_type": "hf",
+            "config": {"datasets": [{"name": "EleutherAI/hendrycks_math", "dataset_name": "algebra", "subset": "algebra", "split": "train"}]},
+        },
+        "counting_and_probability": {
+            "source_type": "hf",
+            "config": {
+                "datasets": [
+                    {"name": "EleutherAI/hendrycks_math", "dataset_name": "counting_and_probability", "subset": "counting_and_probability", "split": "train"}
+                ]
+            },
+        },
+        "geometry": {
+            "source_type": "hf",
+            "config": {"datasets": [{"name": "EleutherAI/hendrycks_math", "dataset_name": "geometry", "subset": "geometry", "split": "train"}]},
+        },
+        "intermediate_algebra": {
+            "source_type": "hf",
+            "config": {
+                "datasets": [{"name": "EleutherAI/hendrycks_math", "dataset_name": "intermediate_algebra", "subset": "intermediate_algebra", "split": "train"}]
+            },
+        },
+        "number_theory": {
+            "source_type": "hf",
+            "config": {"datasets": [{"name": "EleutherAI/hendrycks_math", "dataset_name": "number_theory", "subset": "number_theory", "split": "train"}]},
+        },
+        "prealgebra": {
+            "source_type": "hf",
+            "config": {"datasets": [{"name": "EleutherAI/hendrycks_math", "dataset_name": "prealgebra", "subset": "prealgebra", "split": "train"}]},
+        },
+        "precalculus": {
+            "source_type": "hf",
+            "config": {"datasets": [{"name": "EleutherAI/hendrycks_math", "dataset_name": "precalculus", "subset": "precalculus", "split": "train"}]},
+        },
         # 未来添加新的HF数据集示例:
         # "alpaca": {
         #     "source_type": "hf",
