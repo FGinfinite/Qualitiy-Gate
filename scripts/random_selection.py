@@ -23,7 +23,8 @@ project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-from src.data.dataset_loader import convert_openhermes_format, load_hf_datasets, load_local_datasets
+from src.data.dataset_loader import load_single_dataset
+from src.data.format_converters import infer_format_type
 from src.utils.hydra_resolvers import register_custom_resolvers
 
 # Register custom Hydra resolvers before @hydra.main
@@ -38,50 +39,65 @@ def setup_logging(cfg: DictConfig):
 
 
 def load_datasets(cfg: DictConfig):
-    """加载数据集（返回迭代器，不转换为列表）"""
+    """加载数据集（使用新版 API）"""
     log = logging.getLogger(__name__)
+    from datasets import concatenate_datasets
 
     if cfg.dataset.dataset_from == "local":
         log.info("从本地加载数据集...")
         config = cfg.dataset.local
-        combined_dataset = load_local_datasets(
-            data_dir=config.data_dir, dataset_names=config.dataset_names, sample_percentage=cfg.sample_percentage, seed=cfg.seed
-        )
+
+        # 加载所有本地数据集
+        all_datasets = []
+        for dataset_name in config.dataset_names:
+            dataset_config = {
+                "dataset_from": "local",
+                "dataset_name": dataset_name,
+                "format_type": "standard",  # 假设本地数据集已经是标准格式
+            }
+
+            dataset = load_single_dataset(
+                dataset_config=dataset_config,
+                local_dataset_dir=config.data_dir,
+                sample_percentage=cfg.sample_percentage,
+                seed=cfg.seed,
+            )
+            all_datasets.append(dataset)
+
+        # 合并所有数据集
+        combined_dataset = concatenate_datasets(all_datasets)
+
     elif cfg.dataset.dataset_from == "hf":
         log.info("从HuggingFace加载数据集...")
         config = cfg.dataset.hf
-        combined_dataset = load_hf_datasets(hf_config={"datasets": config.datasets}, sample_percentage=cfg.sample_percentage, seed=cfg.seed)
+
+        # 加载所有 HF 数据集
+        all_datasets = []
+        for hf_dataset_config in config.datasets:
+            # 确定数据集名称和格式类型
+            dataset_name = hf_dataset_config.get("dataset_name", hf_dataset_config["name"].split("/")[-1])
+
+            dataset_config = {
+                "dataset_from": "hf",
+                "dataset_name": dataset_name,
+                "name": hf_dataset_config["name"],
+                "subset": hf_dataset_config.get("subset"),
+                "split": hf_dataset_config.get("split", "train"),
+                "format_type": infer_format_type(dataset_name),  # 使用共享的格式推断函数
+            }
+
+            dataset = load_single_dataset(
+                dataset_config=dataset_config,
+                local_dataset_dir="",  # HF 数据集不需要本地目录
+                sample_percentage=cfg.sample_percentage,
+                seed=cfg.seed,
+            )
+            all_datasets.append(dataset)
+
+        # 合并所有数据集
+        combined_dataset = concatenate_datasets(all_datasets)
     else:
         raise ValueError(f"不支持的数据源类型: {cfg.dataset.dataset_from}")
-
-    # 对于本地数据集，检查并转换格式（HF数据集已在 load_hf_datasets 中转换）
-    if cfg.dataset.dataset_from == "local" and len(combined_dataset) > 0:
-        sample = combined_dataset[0]
-
-        # 如果包含 conversations 字段但没有 messages 字段，说明是 OpenHermes 格式，需要转换
-        if "conversations" in sample and "messages" not in sample:
-            log.info("检测到本地 OpenHermes 格式数据，正在转换为标准格式...")
-
-            # 获取数据集名称（如果有）
-            dataset_name = sample.get("dataset", "unknown")
-
-            # 获取所有需要移除的原始字段
-            columns_to_remove = [col for col in combined_dataset.column_names if col not in ["dataset", "id"]]
-            log.info(f"将移除以下原始字段: {columns_to_remove}")
-
-            # 使用 map 进行批量转换，并移除原始字段
-            combined_dataset = combined_dataset.map(
-                lambda example, idx: convert_openhermes_format(example, dataset_name=example.get("dataset", dataset_name), example_index=idx),
-                with_indices=True,
-                desc="转换数据集格式",
-                load_from_cache_file=True,
-                remove_columns=columns_to_remove,  # 移除所有原始字段
-            )
-            log.info("格式转换完成")
-        elif "messages" in sample:
-            log.info("数据集已经是标准格式")
-        else:
-            log.warning("未识别的数据格式，可能导致后续处理失败")
 
     log.info(f"数据集加载完成，共 {len(combined_dataset)} 个样本")
     return combined_dataset

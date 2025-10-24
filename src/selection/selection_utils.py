@@ -88,7 +88,7 @@ def load_original_dataset_mapping(router_data_dir: str, data_dir: Optional[str] 
     log.debug(f"需要加载的数据集: {dataset_names}")
 
     # 根据数据集名称确定加载策略
-    from src.data.dataset_loader import load_hf_datasets, load_local_datasets
+    from src.data.dataset_loader import load_single_dataset
 
     dataset_mapping = {}
 
@@ -103,40 +103,16 @@ def load_original_dataset_mapping(router_data_dir: str, data_dir: Optional[str] 
             dataset_mapping[dataset_name] = {}
             continue
 
-        source_type = dataset_config["source_type"]
-        config = dataset_config["config"]
-
         try:
-            if source_type == "local":
-                # 加载本地数据集
-                effective_data_dir = data_dir or config["data_dir"]
+            # 使用工厂函数将旧配置转换为新版 API 配置
+            new_config, local_dataset_dir = _convert_to_new_api_config(
+                dataset_name=dataset_name, dataset_config=dataset_config, data_dir=data_dir, router_data_dir=router_data_dir
+            )
 
-                # 推断项目根目录
-                if not os.path.isabs(effective_data_dir):
-                    current_dir = router_data_dir
-                    project_root = None
-                    for _ in range(10):
-                        current_dir = os.path.dirname(current_dir)
-                        if os.path.exists(os.path.join(current_dir, effective_data_dir)):
-                            project_root = current_dir
-                            break
+            log.debug(f"加载数据集 '{dataset_name}' (from: {new_config['dataset_from']})")
 
-                    if project_root:
-                        effective_data_dir = os.path.join(project_root, effective_data_dir)
-                    else:
-                        effective_data_dir = os.path.join(os.getcwd(), effective_data_dir)
-
-                log.debug(f"从本地加载数据集 '{dataset_name}': {effective_data_dir}")
-                combined_dataset = load_local_datasets(data_dir=effective_data_dir, dataset_names=config["dataset_names"], sample_percentage=1.0, seed=0)
-
-            elif source_type == "hf":
-                # 加载HuggingFace数据集
-                log.debug(f"从HuggingFace加载数据集 '{dataset_name}'")
-                combined_dataset = load_hf_datasets(hf_config={"datasets": config["datasets"]}, sample_percentage=1.0, seed=0)
-            else:
-                log.error(f"不支持的数据源类型: {source_type}")
-                dataset_mapping[dataset_name] = {}
-                continue
+            # 使用统一的新版 API 加载数据集
+            combined_dataset = load_single_dataset(dataset_config=new_config, local_dataset_dir=local_dataset_dir, sample_percentage=1.0, seed=0)
 
             # 组织数据映射
             single_dataset_mapping = {}
@@ -301,6 +277,72 @@ def generate_output_path(router_data_dir: str) -> str:
     # 生成输出文件路径
     output_path = os.path.join(parent_dir, "selected_data.jsonl")
     return output_path
+
+
+def _convert_to_new_api_config(dataset_name: str, dataset_config: Dict, data_dir: Optional[str] = None, router_data_dir: Optional[str] = None) -> tuple:
+    """
+    将旧配置格式转换为新版 API 配置格式
+
+    Args:
+        dataset_name: 数据集名称
+        dataset_config: 旧的数据集配置
+        data_dir: 数据目录路径（可选）
+        router_data_dir: router_data目录路径（用于推断项目根目录）
+
+    Returns:
+        (new_config, local_dataset_dir) 元组
+    """
+    from src.data.format_converters import infer_format_type
+
+    source_type = dataset_config["source_type"]
+    config = dataset_config["config"]
+
+    # 基础配置
+    new_config = {
+        "dataset_from": source_type,
+        "dataset_name": dataset_name,
+    }
+
+    if source_type == "local":
+        # 本地数据集配置
+        new_config["format_type"] = "standard"  # 本地数据集假设已经是标准格式
+
+        # 处理数据目录路径
+        effective_data_dir = data_dir or config["data_dir"]
+
+        # 推断项目根目录
+        if not os.path.isabs(effective_data_dir):
+            current_dir = router_data_dir
+            project_root = None
+            for _ in range(10):
+                current_dir = os.path.dirname(current_dir)
+                if os.path.exists(os.path.join(current_dir, effective_data_dir)):
+                    project_root = current_dir
+                    break
+
+            if project_root:
+                effective_data_dir = os.path.join(project_root, effective_data_dir)
+            else:
+                effective_data_dir = os.path.join(os.getcwd(), effective_data_dir)
+
+        return new_config, effective_data_dir
+
+    elif source_type == "hf":
+        # HF 数据集配置
+        hf_dataset_config = config["datasets"][0]
+        new_config.update(
+            {
+                "name": hf_dataset_config["name"],
+                "subset": hf_dataset_config.get("subset"),
+                "split": hf_dataset_config.get("split", "train"),
+                "format_type": infer_format_type(dataset_name),  # 使用共享的格式推断函数
+            }
+        )
+
+        return new_config, ""  # HF 数据集不需要本地目录
+
+    else:
+        raise ValueError(f"不支持的数据源类型: {source_type}")
 
 
 def _get_dataset_config(dataset_name: str) -> dict:
