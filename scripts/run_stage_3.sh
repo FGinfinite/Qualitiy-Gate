@@ -15,7 +15,7 @@ else
   fi
 fi
 
-echo "Found $NUM_GPUS GPUs. Launching Llama-2-7B LoRA fine-tuning..."
+echo "Found $NUM_GPUS GPUs. Launching fine-tuning..."
 
 # Generate a random port between 29500 and 29599
 MAIN_PORT=$((RANDOM % 100 + 29500))
