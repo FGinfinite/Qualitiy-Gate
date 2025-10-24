@@ -51,10 +51,12 @@ class ExperimentTracker:
 
     def check_stage_completion(self, exp_path: Path, stage: int) -> Tuple[str, List[str]]:
         """检查各阶段实验是否完成"""
+        if stage == 3:
+            return self.check_stage_3_completion(exp_path)
         if stage == 4:
             return self.check_stage_4_completion(exp_path)
 
-        required_files = {1: ["full_rank_weights.pt"], 2: ["router_data/", "selected_data.jsonl"], 3: ["adapter_model.safetensors"]}
+        required_files = {1: ["full_rank_weights.pt"], 2: ["router_data/", "selected_data.jsonl"]}
 
         found_files = []
         for file in required_files[stage]:
@@ -73,6 +75,34 @@ class ExperimentTracker:
             return "complete", found_files
         elif len(found_files) > 0:
             return "partial", found_files
+        else:
+            return "missing", found_files
+
+    def check_stage_3_completion(self, exp_path: Path) -> Tuple[str, List[str]]:
+        """检查阶段3实验的微调完成状态"""
+        found_files = []
+
+        # 检查方式1：PEFT适配器（新格式：在PEFT子目录中）
+        peft_adapter = exp_path / "PEFT" / "adapter_model.safetensors"
+        has_peft = peft_adapter.exists()
+        if has_peft:
+            found_files.append("PEFT/adapter_model.safetensors")
+
+        # 检查方式2：合并后的完整模型
+        # 可能是单个文件或者多个分片
+        has_merged_model = False
+        if (exp_path / "model.safetensors").exists():
+            has_merged_model = True
+            found_files.append("model.safetensors")
+        elif list(exp_path.glob("model-*.safetensors")):
+            has_merged_model = True
+            found_files.append("model-*.safetensors")
+
+        # 判断完成状态
+        # 完成：有PEFT适配器（新格式）
+        # 或者：有合并后的完整模型
+        if has_peft or has_merged_model:
+            return "complete", found_files
         else:
             return "missing", found_files
 
