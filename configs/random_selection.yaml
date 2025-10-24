@@ -32,13 +32,21 @@ dataset:
   # HuggingFace dataset configuration (alternative)
   hf:
     datasets:
-      - name: "teknium/OpenHermes-2.5"
-        dataset_name: "openhermes"
-        subset: null
+      # GSM8K 数据集 (7,473 个训练样本)
+      - name: "openai/gsm8k"
+        dataset_name: "gsm8k"
+        subset: "main"
+        split: "train"
+      # HENDRYCKS_MATH 数据集 - 使用 __full_subset__ 自动加载所有 7 个子集 (7,500 个训练样本)
+      # 子集包括: algebra, counting_and_probability, geometry, intermediate_algebra,
+      #          number_theory, prealgebra, precalculus
+      - name: "EleutherAI/hendrycks_math"
+        dataset_name: "hendrycks_math"
+        subset: "__full_subset__"
         split: "train"
 
 # Data selection parameters
-selection_percentage: 0.0125  # Select 5% of total data randomly
+selection_percentage: 0.25  # Select 5% of total data randomly
 seed: 42  # Random seed for reproducible results
 
 # Optional: Sample percentage from each dataset before random selection
