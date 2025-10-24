@@ -40,33 +40,30 @@ checkpoint:
 
 # Dataset configuration
 dataset:
-  # Data source selection for full mode: "local" or "hf"
-  dataset_from: "hf"  # Options: "local" (本地数据集), "hf" (HuggingFace数据集)
+  # 本地数据集根目录（所有 local 数据集的根路径）
+  local_dataset_dir: "dataset/train/processed"
   
-  # Local dataset configuration (used when dataset_from="local" and mode="full")
-  local:
-    data_dir: "dataset/train/processed"
-    dataset_names:
-      - "cot"
-      - "dolly"
-      - "flan_v2"
-      - "oasst1"
-  
-  # HuggingFace dataset configuration (used when dataset_from="hf" and mode="full")
-  hf:
-    datasets:
-      # GSM8K 数据集 (7,473 个训练样本)
-      - name: "openai/gsm8k"
-        dataset_name: "gsm8k"
-        subset: "main"
-        split: "train"
-      # HENDRYCKS_MATH 数据集 - 使用 __full_subset__ 自动加载所有 7 个子集 (7,500 个训练样本)
-      # 子集包括: algebra, counting_and_probability, geometry, intermediate_algebra,
-      #          number_theory, prealgebra, precalculus
-      - name: "EleutherAI/hendrycks_math"
-        dataset_name: "hendrycks_math"
-        subset: "__full_subset__"
-        split: "train"
+  # 数据集列表（仅在 mode="full" 时使用）
+  datasets:
+    # GSM8K 数据集 (7,473 个训练样本)
+    - dataset_from: "hf"
+      name: "openai/gsm8k"
+      dataset_name: "gsm8k"
+      subset: "main"
+      split: "train"
+      format_type: "gsm8k"
+      use_shared_memory: false
+    
+    # HENDRYCKS_MATH 数据集 - 使用 __full_subset__ 自动加载所有 7 个子集 (7,500 个训练样本)
+    # 子集包括: algebra, counting_and_probability, geometry, intermediate_algebra,
+    #          number_theory, prealgebra, precalculus
+    - dataset_from: "hf"
+      name: "EleutherAI/hendrycks_math"
+      dataset_name: "hendrycks_math"
+      subset: "__full_subset__"
+      split: "train"
+      format_type: "hendrycks_math"
+      use_shared_memory: false
   
   # Common parameters
   subset_ratio: 1.0  # Use 100% of data in full mode

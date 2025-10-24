@@ -3,7 +3,7 @@ import contextlib
 import logging
 import os
 from functools import partial
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 
 import numpy as np
 import torch
@@ -11,6 +11,31 @@ from datasets import Dataset, concatenate_datasets, load_dataset
 from omegaconf import DictConfig
 from tqdm import tqdm
 from transformers import AutoTokenizer
+
+# ============================================================================
+# 格式转换器工厂
+# ============================================================================
+
+# 格式转换器映射表
+FORMAT_CONVERTERS: Dict[str, Optional[Callable]] = {}
+
+
+def get_format_converter(format_type: str) -> Optional[Callable]:
+    """
+    根据 format_type 获取对应的格式转换器
+
+    Args:
+        format_type: 数据格式类型
+
+    Returns:
+        格式转换函数，如果是标准格式则返回 None
+
+    Raises:
+        ValueError: 如果格式类型不支持
+    """
+    if format_type not in FORMAT_CONVERTERS:
+        raise ValueError(f"不支持的数据格式: {format_type}，支持的格式: {list(FORMAT_CONVERTERS.keys())}")
+    return FORMAT_CONVERTERS[format_type]
 
 
 @contextlib.contextmanager
@@ -220,6 +245,353 @@ def convert_hendrycks_math_format(example: Dict, dataset_name: str = "hendrycks_
     return {"dataset": dataset_name, "id": example_id, "messages": messages}
 
 
+# 注册格式转换器到映射表
+FORMAT_CONVERTERS["openhermes"] = convert_openhermes_format
+FORMAT_CONVERTERS["gsm8k"] = convert_gsm8k_format
+FORMAT_CONVERTERS["hendrycks_math"] = convert_hendrycks_math_format
+FORMAT_CONVERTERS["standard"] = None  # 标准格式，无需转换
+
+
+# ============================================================================
+# 新版数据集加载函数（支持混合 local 和 hf）
+# ============================================================================
+
+
+def _load_local_single_dataset(dataset_name: str, local_dataset_dir: str) -> Dataset:
+    """
+    从本地目录加载单个数据集
+
+    Args:
+        dataset_name: 数据集名称（对应本地目录名）
+        local_dataset_dir: 本地数据集根目录
+
+    Returns:
+        加载的数据集
+
+    Raises:
+        ValueError: 如果目录不存在或没有找到数据文件
+    """
+    dataset_path = os.path.join(local_dataset_dir, dataset_name)
+    if not os.path.exists(dataset_path):
+        raise ValueError(f"本地数据集目录不存在: {dataset_path}")
+
+    # 查找所有 .jsonl 和 .json 文件
+    data_files = []
+    for file in os.listdir(dataset_path):
+        if file.endswith((".jsonl", ".json")):
+            data_files.append(os.path.join(dataset_path, file))
+
+    if not data_files:
+        raise ValueError(f"在 {dataset_path} 中没有找到数据文件")
+
+    # 加载数据集
+    dataset = load_dataset("json", data_files=data_files)["train"]
+    print(f"从本地加载数据集 '{dataset_name}': {len(dataset)} 个样本")
+
+    return dataset
+
+
+def _try_load_from_shared_memory(dataset_config: Dict) -> Optional[Dataset]:
+    """
+    尝试从共享内存加载数据集（可选功能）
+
+    Args:
+        dataset_config: 数据集配置字典
+
+    Returns:
+        成功返回 Dataset，失败返回 None
+    """
+    try:
+        from share_dataset import LoadResult, SharedDatasetClient
+
+        log = logging.getLogger(__name__)
+        dataset_name = dataset_config["name"]
+
+        log.info(f"尝试从共享内存加载数据集: {dataset_name}")
+
+        client = SharedDatasetClient()
+        result = client.load_shared_dataset(dataset_config)
+
+        if result.status == LoadResult.SUCCESS:
+            log.info(f"共享内存加载成功: {dataset_name}, 耗时: {result.load_time:.4f}秒, {result.message}")
+            return result.dataset
+        else:
+            log.info(f"共享内存加载失败: {result.message}，回退到普通加载")
+            return None
+
+    except ImportError:
+        return None
+    except Exception as e:
+        log = logging.getLogger(__name__)
+        log.warning(f"共享内存加载出错: {e}，回退到普通加载")
+        return None
+
+
+def _load_full_subset_dataset(dataset_name: str, split: str) -> Dataset:
+    """
+    加载包含多个子集的数据集（如 HENDRYCKS_MATH）
+
+    Args:
+        dataset_name: HuggingFace 数据集名称
+        split: 数据集分割（train/test）
+
+    Returns:
+        合并后的数据集
+    """
+    from datasets import get_dataset_config_names
+
+    log = logging.getLogger(__name__)
+
+    # 定义已知数据集的子集列表（用于离线模式的 fallback）
+    KNOWN_DATASET_SUBSETS = {
+        "EleutherAI/hendrycks_math": [
+            "algebra",
+            "counting_and_probability",
+            "geometry",
+            "intermediate_algebra",
+            "number_theory",
+            "prealgebra",
+            "precalculus",
+        ],
+    }
+
+    # 尝试从 HuggingFace Hub 获取子集列表
+    try:
+        all_subsets = get_dataset_config_names(dataset_name)
+
+        # 检查是否返回了 'default'（这通常意味着离线模式或无法获取配置）
+        if all_subsets == ["default"] and dataset_name in KNOWN_DATASET_SUBSETS:
+            log.info("检测到离线模式或无法获取子集列表，使用预定义的子集列表")
+            all_subsets = KNOWN_DATASET_SUBSETS[dataset_name]
+
+    except Exception as e:
+        # 如果获取失败，使用预定义的子集列表
+        if dataset_name in KNOWN_DATASET_SUBSETS:
+            log.info(f"无法从 Hub 获取子集列表 ({e})，使用预定义的子集列表")
+            all_subsets = KNOWN_DATASET_SUBSETS[dataset_name]
+        else:
+            raise ValueError(f"无法获取数据集 {dataset_name} 的子集列表，且没有预定义的 fallback 列表") from e
+
+    print(f"检测到 __full_subset__ 标记，将加载 {dataset_name} 的所有 {len(all_subsets)} 个子集")
+    print(f"子集列表: {all_subsets}")
+
+    # 遍历每个子集
+    subset_datasets = []
+    for subset_name in all_subsets:
+        try:
+            print(f"  正在加载子集 '{subset_name}'...")
+            subset_dataset = load_dataset(dataset_name, subset_name, split=split)
+            subset_datasets.append(subset_dataset)
+            print(f"  ✓ 已加载子集 '{subset_name}': {len(subset_dataset)} 个样本")
+        except Exception as e:
+            print(f"  ✗ 加载子集 '{subset_name}' 失败: {e}")
+            continue
+
+    if not subset_datasets:
+        raise ValueError(f"未能成功加载 {dataset_name} 的任何子集")
+
+    # 合并所有子集
+    combined = concatenate_datasets(subset_datasets)
+    return combined
+
+
+def _load_hf_single_dataset(dataset_config: Dict, use_shared_memory: bool) -> Dataset:
+    """
+    从 HuggingFace 加载单个数据集
+
+    Args:
+        dataset_config: 数据集配置字典，包含 name, subset, split 等
+        use_shared_memory: 是否尝试使用共享内存加载
+
+    Returns:
+        加载的数据集
+    """
+    name = dataset_config["name"]
+    subset = dataset_config.get("subset", None)
+    split = dataset_config.get("split", "train")
+
+    # 尝试共享内存加载（如果启用）
+    if use_shared_memory:
+        dataset = _try_load_from_shared_memory(dataset_config)
+        if dataset is not None:
+            return dataset
+
+    # 普通加载
+    print(f"正在从HuggingFace加载数据集 '{name}'...")
+
+    if subset == "__full_subset__":
+        # 加载所有子集
+        dataset = _load_full_subset_dataset(name, split)
+    elif subset:
+        # 加载指定子集
+        dataset = load_dataset(name, subset, split=split)
+    else:
+        # 加载默认配置
+        dataset = load_dataset(name, split=split)
+
+    return dataset
+
+
+def load_single_dataset(
+    dataset_config: Dict,
+    local_dataset_dir: str,
+    sample_percentage: float = 1.0,
+    seed: int = 42,
+) -> Dataset:
+    """
+    加载单个数据集（local 或 hf），并进行采样和格式转换
+
+    Args:
+        dataset_config: 数据集配置字典，必须包含:
+            - dataset_from: "local" 或 "hf"
+            - dataset_name: 数据集名称
+            - format_type: 数据格式类型（可选，默认 "standard"）
+            - use_shared_memory: 是否使用共享内存（可选，默认 False）
+            对于 hf 数据集还需要:
+            - name: HuggingFace 数据集路径
+            - subset: 子集名称（可选）
+            - split: 数据集分割（默认 "train"）
+        local_dataset_dir: 本地数据集根目录
+        sample_percentage: 采样比例
+        seed: 随机种子
+
+    Returns:
+        加载并转换后的数据集
+
+    Raises:
+        ValueError: 如果配置不合法或加载失败
+    """
+    dataset_from = dataset_config.get("dataset_from")
+    dataset_name = dataset_config["dataset_name"]
+    format_type = dataset_config.get("format_type", "standard")
+    use_shared_memory = dataset_config.get("use_shared_memory", False)
+
+    # 1. 加载原始数据集
+    if dataset_from == "local":
+        dataset = _load_local_single_dataset(dataset_name, local_dataset_dir)
+    elif dataset_from == "hf":
+        dataset = _load_hf_single_dataset(dataset_config, use_shared_memory)
+    else:
+        raise ValueError(f"不支持的 dataset_from: {dataset_from}，支持的值: 'local', 'hf'")
+
+    # 2. 采样
+    if sample_percentage < 1.0:
+        sample_size = int(len(dataset) * sample_percentage)
+        with temp_seed(seed):
+            indices = np.random.permutation(len(dataset))[:sample_size]
+        dataset = dataset.select(indices)
+        print(f"采样后数据集大小: {len(dataset)}")
+
+    # 3. 格式转换
+    converter = get_format_converter(format_type)
+    if converter is not None:
+        # 需要转换格式
+        columns_to_remove = [col for col in dataset.column_names if col not in ["dataset", "id", "messages"]]
+
+        dataset = dataset.map(
+            lambda example, idx: converter(example, dataset_name=dataset_name, example_index=idx),
+            with_indices=True,
+            desc=f"转换数据集格式 - {dataset_name}",
+            load_from_cache_file=True,
+            remove_columns=columns_to_remove,
+        )
+    else:
+        # 标准格式，验证是否包含必需字段
+        if "messages" not in dataset.column_names:
+            raise ValueError(f"数据集 '{dataset_name}' 标记为标准格式，但缺少 'messages' 字段")
+
+    return dataset
+
+
+# ============================================================================
+# 旧版数据集加载函数（已废弃，保留用于向后兼容）
+# ============================================================================
+# 注意：以下函数已被新版 load_single_dataset() 和 load_and_prepare_dataset() 替代
+# 保留这些函数仅用于向后兼容，不推荐在新代码中使用
+
+
+def load_local_datasets(
+    data_dir: str,
+    dataset_names: Optional[List[str]] = None,
+    sample_percentage: float = 1.0,
+    seed: int = 0,
+) -> Dataset:
+    """
+    从本地目录加载多个数据集并合并
+
+    [已废弃] 请使用新版 load_single_dataset() + load_and_prepare_dataset()
+
+    Args:
+        data_dir: 数据集根目录 (例如: data/train/processed)
+        dataset_names: 要加载的数据集名称列表，如果为None则加载所有可用数据集
+        sample_percentage: 每个数据集的采样比例
+        seed: 随机种子
+
+    Returns:
+        合并后的数据集
+    """
+    # 如果是相对路径，转换为绝对路径
+    if not os.path.isabs(data_dir):
+        # 从项目根目录开始的相对路径
+        project_root = os.getcwd()
+        data_dir = os.path.join(project_root, data_dir)
+
+    if not os.path.exists(data_dir):
+        raise ValueError(f"数据目录不存在: {data_dir}")
+
+    # 如果没有指定数据集名称，自动发现所有可用数据集
+    if dataset_names is None:
+        dataset_names = [d for d in os.listdir(data_dir) if os.path.isdir(os.path.join(data_dir, d))]
+
+    if not dataset_names:
+        raise ValueError(f"在目录 {data_dir} 中没有找到任何数据集")
+
+    all_datasets = []
+
+    for dataset_name in dataset_names:
+        dataset_path = os.path.join(data_dir, dataset_name)
+        if not os.path.exists(dataset_path):
+            print(f"警告: 数据集目录不存在，跳过: {dataset_path}")
+            continue
+
+        # 查找数据文件
+        data_files = []
+        for file in os.listdir(dataset_path):
+            if file.endswith((".jsonl", ".json")):
+                data_files.append(os.path.join(dataset_path, file))
+
+        if not data_files:
+            print(f"警告: 在 {dataset_path} 中没有找到数据文件，跳过")
+            continue
+
+        # 加载数据集
+        try:
+            dataset = load_dataset("json", data_files=data_files)["train"]
+
+            # 采样
+            if sample_percentage < 1.0:
+                sample_size = int(len(dataset) * sample_percentage)
+                with temp_seed(seed):
+                    indices = np.random.permutation(len(dataset))[:sample_size]
+                dataset = dataset.select(indices)
+
+            all_datasets.append(dataset)
+            print(f"已加载数据集 '{dataset_name}': {len(dataset)} 个样本")
+
+        except Exception as e:
+            print(f"加载数据集 '{dataset_name}' 失败: {e}")
+            continue
+
+    if not all_datasets:
+        raise ValueError("没有成功加载任何数据集")
+
+    # 合并所有数据集
+    combined_dataset = concatenate_datasets(all_datasets)
+    print(f"已合并 {len(dataset_names)} 个数据集，总共 {len(combined_dataset)} 个样本")
+
+    return combined_dataset
+
+
 def load_hf_datasets(
     hf_config: Dict,
     sample_percentage: float = 1.0,
@@ -229,6 +601,8 @@ def load_hf_datasets(
 ) -> Dataset:
     """
     从HuggingFace加载数据集并转换格式
+
+    [已废弃] 请使用新版 load_single_dataset() + load_and_prepare_dataset()
 
     Args:
         hf_config: HF数据集配置，包含datasets列表
@@ -694,57 +1068,82 @@ def encode_data(
 
 def load_and_prepare_dataset(cfg: DictConfig) -> Dataset:
     """
-    加载和准备数据集的主要函数，支持本地和HF数据源
+    加载和准备数据集（支持混合 local 和 hf 数据集）
+
+    新版实现：支持在同一配置中混合使用多个 local 和 hf 数据集
+
+    配置示例：
+    dataset:
+      local_dataset_dir: "dataset/train/processed"
+      datasets:
+        - dataset_from: "local"
+          dataset_name: "oasst1"
+          format_type: "standard"
+        - dataset_from: "hf"
+          name: "openai/gsm8k"
+          dataset_name: "gsm8k"
+          subset: "main"
+          split: "train"
+          format_type: "gsm8k"
+          use_shared_memory: false
 
     Args:
-        cfg: 配置对象，使用dataset_from参数控制数据源选择
-             dataset_from="local": 使用本地数据集
-             dataset_from="hf": 使用HuggingFace数据集
+        cfg: Hydra 配置对象
 
     Returns:
         准备好的数据集
     """
-    # 从配置中获取参数
-    sample_percentage = getattr(cfg.dataset, "subset_ratio", 1.0)
-    seed = getattr(cfg, "seed", 42)  # 使用全局种子
-    shuffle = getattr(cfg.dataset, "shuffle", True)
-    dataset_from = getattr(cfg.dataset, "dataset_from", "local")
-
-    # 序列长度排序相关配置
-    sort_by_length = getattr(cfg.dataset, "sort_by_length", False)
-
-    # 共享内存相关配置
-    use_shared_memory = getattr(cfg.dataset, "use_shared_memory", False)
-    shared_memory_config = getattr(cfg.dataset, "shared_memory", None)
-
     log = logging.getLogger(__name__)
 
-    # 根据dataset_from参数选择数据源
-    if dataset_from == "local":
-        # 使用本地数据集
-        local_config = cfg.dataset.local
-        log.info(f"使用本地数据集，从 {local_config.data_dir} 加载数据集...")
-        dataset = load_local_datasets(
-            data_dir=local_config.data_dir,
-            dataset_names=local_config.dataset_names,
-            sample_percentage=sample_percentage,
-            seed=seed,
-        )
+    # 获取配置参数
+    datasets_config = cfg.dataset.datasets
+    local_dataset_dir = getattr(cfg.dataset, "local_dataset_dir", "dataset/train/processed")
+    sample_percentage = getattr(cfg.dataset, "subset_ratio", 1.0)
+    seed = getattr(cfg, "seed", 42)
+    shuffle = getattr(cfg.dataset, "shuffle", True)
+    sort_by_length = getattr(cfg.dataset, "sort_by_length", False)
 
-    elif dataset_from == "hf":
-        # 使用HuggingFace数据集
-        hf_config = {"datasets": cfg.dataset.hf.datasets}
-        log.info("使用HuggingFace数据集...")
-        dataset = load_hf_datasets(
-            hf_config=hf_config,
-            sample_percentage=sample_percentage,
-            seed=seed,
-            use_shared_memory=use_shared_memory,
-            shared_memory_config=shared_memory_config,
-        )
+    # 转换为绝对路径
+    if not os.path.isabs(local_dataset_dir):
+        local_dataset_dir = os.path.join(os.getcwd(), local_dataset_dir)
 
-    else:
-        raise ValueError(f"不支持的数据源类型: {dataset_from}，支持的类型: 'local', 'hf'")
+    log.info(f"开始加载 {len(datasets_config)} 个数据集...")
+    log.info(f"本地数据集根目录: {local_dataset_dir}")
+    log.info(f"采样比例: {sample_percentage}")
+
+    # 加载所有数据集
+    all_datasets = []
+    for i, dataset_config in enumerate(datasets_config, 1):
+        dataset_name = dataset_config.get("dataset_name", "unknown")
+        dataset_from = dataset_config.get("dataset_from", "unknown")
+
+        try:
+            log.info(f"[{i}/{len(datasets_config)}] 正在加载 {dataset_from} 数据集: {dataset_name}")
+
+            dataset = load_single_dataset(
+                dataset_config=dataset_config,
+                local_dataset_dir=local_dataset_dir,
+                sample_percentage=sample_percentage,
+                seed=seed,
+            )
+
+            all_datasets.append(dataset)
+            log.info(f"✓ 已加载数据集 '{dataset_name}': {len(dataset)} 个样本")
+
+        except Exception as e:
+            log.error(f"✗ 加载数据集 '{dataset_name}' 失败: {e}")
+            import traceback
+
+            log.debug(traceback.format_exc())
+            continue
+
+    if not all_datasets:
+        raise ValueError("没有成功加载任何数据集")
+
+    # 合并数据集
+    log.info(f"正在合并 {len(all_datasets)} 个数据集...")
+    combined_dataset = concatenate_datasets(all_datasets)
+    log.info(f"✓ 数据集合并完成，总共 {len(combined_dataset)} 个样本")
 
     # 序列长度排序处理
     if sort_by_length:
@@ -756,21 +1155,19 @@ def load_and_prepare_dataset(cfg: DictConfig) -> Dataset:
             shuffle = False
 
         try:
-            # 使用字符串长度快速排序
-            dataset = sort_dataset_by_string_length(dataset, descending=True)
+            combined_dataset = sort_dataset_by_string_length(combined_dataset, descending=True)
             log.info("✓ 数据集已按字符串长度降序排列")
-
         except Exception as e:
             log.error(f"字符串长度排序失败: {e}")
             log.info("回退到原始数据集顺序")
 
     # 打乱数据集（如果排序未启用）
     if shuffle:
-        dataset = dataset.shuffle(seed=seed)
-        log.info(f"已打乱数据集，使用种子: {seed}")
+        combined_dataset = combined_dataset.shuffle(seed=seed)
+        log.info(f"✓ 已打乱数据集，种子: {seed}")
 
-    log.info(f"数据集准备完成，总共 {len(dataset)} 个样本")
-    return dataset
+    log.info(f"数据集准备完成，总共 {len(combined_dataset)} 个样本")
+    return combined_dataset
 
 
 def load_selected_data(data_path: str) -> Dataset:
