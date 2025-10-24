@@ -32,6 +32,12 @@ defaults:
 
 output_dir: ${hydra:run.dir}
 
+# Checkpoint saving configuration
+checkpoint:
+  save_intermediate: true  # 是否保存训练过程中的中间检查点（每个epoch结束时）
+  peft_dir: "PEFT"  # PEFT适配器保存的子目录名称
+  save_merged_model: true  # 是否在训练结束后保存合并的完整模型
+
 # Dataset configuration
 dataset:
   # Data source selection for full mode: "local" or "hf"

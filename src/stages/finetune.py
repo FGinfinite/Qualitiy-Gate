@@ -233,9 +233,13 @@ def finetune(cfg: DictConfig) -> None:
     data_collator = DataCollatorForSeq2Seq(tokenizer=tokenizer, model=model, padding="longest")
 
     # 9. 配置训练参数
+    # 确定PEFT检查点保存路径
+    peft_output_dir = f"{cfg.output_dir}/{cfg.checkpoint.peft_dir}"
+    log.info(f"PEFT适配器将保存到: {peft_output_dir}")
+
     # 基本训练参数
     training_args_dict = {
-        "output_dir": cfg.output_dir,
+        "output_dir": peft_output_dir,  # PEFT检查点保存到PEFT子目录
         "num_train_epochs": cfg.training.epochs,
         "per_device_train_batch_size": per_device_batch_size,
         "gradient_accumulation_steps": gradient_accumulation_steps,
@@ -245,7 +249,7 @@ def finetune(cfg: DictConfig) -> None:
         "weight_decay": cfg.training.weight_decay,
         "logging_dir": f"{cfg.output_dir}/logs",
         "logging_steps": 10,
-        "save_strategy": "epoch",
+        "save_strategy": "epoch" if cfg.checkpoint.save_intermediate else "no",  # 根据配置决定是否保存中间检查点
         "report_to": "none",
         "bf16": True,
         "tf32": False,  # 禁用TensorFloat-32以匹配LESS配置
@@ -309,15 +313,69 @@ def finetune(cfg: DictConfig) -> None:
         log.error(f"训练过程中出现错误: {e}")
         # 尝试保存检查点
         try:
-            trainer.save_model(f"{cfg.output_dir}/error_checkpoint")
+            trainer.save_model(f"{peft_output_dir}/error_checkpoint")
             log.info("已保存错误检查点")
         except Exception as error_save_error:
             log.error(f"无法保存错误检查点: {error_save_error}")
         raise
 
-    # 11. 保存最终模型
-    log.info(f"正在将最终的 LoRA 适配器保存到 {cfg.output_dir}")
-    trainer.save_model(cfg.output_dir)
+    # 11. 保存最终的PEFT适配器
+    log.info(f"正在将最终的 LoRA 适配器保存到 {peft_output_dir}")
+    trainer.save_model(peft_output_dir)
+    log.info("PEFT适配器保存完成。")
+
+    # 12. 如果配置要求，保存合并后的完整模型
+    if cfg.checkpoint.save_merged_model:
+        # 在FSDP模式下，需要等待所有进程完成PEFT适配器的保存
+        if world_size > 1:
+            import torch.distributed as dist
+
+            dist.barrier()
+            log.info("所有进程已完成PEFT适配器保存，准备合并模型...")
+
+        # 只在主进程（rank 0）执行合并和保存
+        if local_rank == 0:
+            log.info("正在合并PEFT适配器到基座模型...")
+            log.info("为确保在FSDP模式下正确工作，将重新加载基座模型和PEFT适配器...")
+
+            # 清理当前模型以释放内存
+            del model
+            del trainer
+            torch.cuda.empty_cache()
+
+            # 重新加载基座模型（在CPU或单GPU上，避免FSDP分片）
+            log.info(f"重新加载基座模型: {cfg.training.model.name}")
+            base_model = AutoModelForCausalLM.from_pretrained(
+                cfg.training.model.name,
+                torch_dtype=torch.bfloat16,
+                device_map="auto",  # 自动分配到可用设备
+                low_cpu_mem_usage=True,
+            )
+
+            # 加载刚保存的PEFT适配器
+            log.info(f"加载PEFT适配器: {peft_output_dir}")
+            from peft import PeftModel
+
+            peft_model = PeftModel.from_pretrained(base_model, peft_output_dir)
+
+            # 合并PEFT权重到基座模型
+            log.info("正在合并PEFT权重...")
+            merged_model = peft_model.merge_and_unload()
+
+            # 保存合并后的完整模型到输出目录根路径
+            merged_model_path = cfg.output_dir
+            log.info(f"正在将合并后的完整模型保存到 {merged_model_path}")
+
+            merged_model.save_pretrained(merged_model_path, safe_serialization=True, max_shard_size="5GB")
+
+            # 同时保存tokenizer
+            tokenizer.save_pretrained(merged_model_path)
+
+            # 清理内存
+            del merged_model
+            del peft_model
+            del base_model
+            torch.cuda.empty_cache()
 
     log.info("--- 阶段 3：LoRA微调完成 ---")
 
