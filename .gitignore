@@ -35,3 +35,8 @@ run2.sh
 run3.sh
 
 .env
+
+qwen2_lora
+
+open-instruct
+olmes

@@ -21,6 +21,8 @@ dependencies = [
     "cuml-cu12>=25.8.0",
     "umap>=0.1.1",
     "prettytable>=3.16.0",
+    "evaluate>=0.4.5",
+    "vllm>=0.8.5.post1",
 ]
 
 [tool.uv.sources]
