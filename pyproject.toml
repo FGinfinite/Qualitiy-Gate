@@ -23,6 +23,7 @@ dependencies = [
     "prettytable>=3.16.0",
     "evaluate>=0.4.5",
     "vllm>=0.8.5.post1",
+    "faker>=37.12.0",
 ]
 
 [tool.uv.sources]
