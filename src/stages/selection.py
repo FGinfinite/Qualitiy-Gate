@@ -210,15 +210,9 @@ def select(cfg: DictConfig) -> None:
     log.info("✓ 数据集已准备完毕")
 
     # 4. 收集统计量
-    # 确定数据集名称列表
-    if cfg.dataset.dataset_from == "local":
-        dataset_names_list = cfg.dataset.local.dataset_names
-    elif cfg.dataset.dataset_from == "hf":
-        dataset_names_list = [ds.dataset_name for ds in cfg.dataset.hf.datasets]
-    else:
-        raise ValueError(f"不支持的数据源: {cfg.dataset.dataset_from}")
+    # 从datasets列表中提取数据集名称
+    dataset_names_list = [ds.dataset_name for ds in cfg.dataset.datasets]
 
-    log.info(f"数据集来源: {cfg.dataset.dataset_from}")
     log.info(f"数据集名称: {dataset_names_list}")
 
     all_router_data_by_dataset = {
