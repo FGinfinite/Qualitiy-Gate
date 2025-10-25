@@ -21,7 +21,7 @@ output_dir: ${hydra:run.dir}
 data_dir: null  # If not provided, will auto-infer
 
 # Selection percentage (e.g., 0.30 means select top 30%)
-selection_percentage: 0.30
+selection_percentage: 0.25
 
 # Quality scoring parameters
 quality_params:
