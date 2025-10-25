@@ -39,7 +39,7 @@ def compute_layer_scores(
     按token加权得到逐层分数
 
     Args:
-        quality_gates: 质量门控logits (sigmoid前)，形状为 [L, T]
+        quality_gates: 质量门控值 (已经过sigmoid)，形状为 [L, T]
         perplexities: token困惑度，形状为 [T]
         alpha: token权重参数
         eps: 数值下界
@@ -50,8 +50,8 @@ def compute_layer_scores(
     # 计算token权重
     weights = compute_token_weights(perplexities, alpha, eps)  # [T]
 
-    # 对质量门控应用sigmoid
-    g = torch.sigmoid(quality_gates)  # [L, T]
+    # 注意：quality_gates 已经是 sigmoid 后的值 (在 selection.py 中已应用)
+    g = quality_gates  # [L, T]
 
     # 按token加权求和
     # s_{i,l} = Σ_t w_{i,t} * g_{i,l,t}
