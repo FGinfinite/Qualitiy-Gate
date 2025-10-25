@@ -40,9 +40,10 @@ class ExperimentInfo:
 class ExperimentTracker:
     """实验进度跟踪主类"""
 
-    def __init__(self, outputs_dir: str = "outputs", short_path: bool = False):
+    def __init__(self, outputs_dir: str = "outputs", short_path: bool = False, target_tasks: Optional[List[str]] = None):
         self.outputs_dir = Path(outputs_dir)
         self.short_path = short_path
+        self.target_tasks = target_tasks  # 目标数据集列表，用于阶段4完成状态检查
         self.stage_1_exps: Dict[str, ExperimentInfo] = {}
         self.stage_2_exps: Dict[str, ExperimentInfo] = {}
         self.stage_3_exps: Dict[str, ExperimentInfo] = {}
@@ -130,14 +131,24 @@ class ExperimentTracker:
             try:
                 with open(json_file, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                    groups = data.get("groups", {})
 
-                    # 查找主数据集
-                    # 策略：如果键中包含双下划线或以子任务模式命名（如 "dataset_subtask"），则跳过
-                    # 常见的主数据集：bbh, mmlu, gsm8k, hendrycks_math 等
-                    for dataset_name in groups.keys():
-                        # 跳过明显的子任务（包含多个下划线或特定模式）
-                        if dataset_name.count("_") <= 1:  # 最多一个下划线
+                    # 优先从 results 键提取，因为它包含最完整的信息
+                    # 但需要过滤掉子任务（通过检查 alias 字段）
+                    results = data.get("results", {})
+                    if isinstance(results, dict):
+                        for dataset_name, dataset_data in results.items():
+                            # 检查 alias 字段来判断是否为主任务
+                            # 主任务的 alias 通常不以 " - " 开头（子任务会有这个前缀）
+                            if isinstance(dataset_data, dict):
+                                alias = dataset_data.get("alias", dataset_name)
+                                # 如果 alias 不以 " - " 开头，认为是主任务
+                                if not alias.startswith(" - "):
+                                    evaluated_datasets.add(dataset_name)
+
+                    # 如果 results 为空或没有找到主任务，回退到 groups
+                    if not evaluated_datasets:
+                        groups = data.get("groups", {})
+                        for dataset_name in groups.keys():
                             evaluated_datasets.add(dataset_name)
 
                     found_files.append(json_file.name)
@@ -145,12 +156,21 @@ class ExperimentTracker:
             except Exception as e:
                 print(f"警告: 无法解析评估结果文件 {json_file}: {e}")
 
-        # 如果找到任何评估数据集，就认为是完成状态
-        # （之前的逻辑要求必须有 bbh 和 mmlu，太严格了）
-        if evaluated_datasets:
-            return "complete", found_files
+        # 如果指定了目标任务，检查是否全部完成
+        if self.target_tasks:
+            missing_tasks = set(self.target_tasks) - evaluated_datasets
+            if not missing_tasks:
+                return "complete", found_files
+            elif evaluated_datasets:
+                return "partial", found_files
+            else:
+                return "missing", found_files
         else:
-            return "missing", found_files
+            # 未指定目标任务，只要有任何评估数据集就认为完成
+            if evaluated_datasets:
+                return "complete", found_files
+            else:
+                return "missing", found_files
 
     def parse_stage_4_path(self, stage4_dir_name: str) -> Optional[str]:
         """解析阶段4目录名，返回对应的阶段3路径"""
@@ -309,11 +329,21 @@ class ExperimentTracker:
             try:
                 with open(json_file, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                    groups = data.get("groups", {})
 
-                    # 查找主数据集（最多包含一个下划线）
-                    for dataset_name in groups.keys():
-                        if dataset_name.count("_") <= 1:
+                    # 优先从 results 键提取主任务（通过 alias 过滤）
+                    results = data.get("results", {})
+                    if isinstance(results, dict):
+                        for dataset_name, dataset_data in results.items():
+                            if isinstance(dataset_data, dict):
+                                alias = dataset_data.get("alias", dataset_name)
+                                # 主任务的 alias 不以 " - " 开头
+                                if not alias.startswith(" - "):
+                                    evaluated_datasets.add(dataset_name)
+
+                    # 如果 results 为空，回退到 groups
+                    if not evaluated_datasets:
+                        groups = data.get("groups", {})
+                        for dataset_name in groups.keys():
                             evaluated_datasets.add(dataset_name)
 
             except Exception:
@@ -960,10 +990,21 @@ def main():
     parser.add_argument("--save-report", action="store_true", help="在outputs目录中生成Markdown报告")
     parser.add_argument("--short-path", action="store_true", help="只显示实验文件夹名称（默认显示完整相对路径）")
     parser.add_argument("--suggest", action="store_true", help="显示实验建议（删除无用文件夹和继续运行实验）")
+    parser.add_argument(
+        "--target-tasks",
+        type=str,
+        help="目标评估任务列表，逗号分隔 (例如: gsm8k,hendrycks_math,bbh,mmlu)。用于判断阶段4实验是否完成。如果指定，则要求所有目标任务都已评估。",
+    )
 
     args = parser.parse_args()
 
-    tracker = ExperimentTracker(args.outputs_dir, short_path=args.short_path)
+    # 解析目标任务列表
+    target_tasks = None
+    if args.target_tasks:
+        target_tasks = [task.strip() for task in args.target_tasks.split(",") if task.strip()]
+        print(f"目标评估任务: {', '.join(target_tasks)}")
+
+    tracker = ExperimentTracker(args.outputs_dir, short_path=args.short_path, target_tasks=target_tasks)
 
     print("正在扫描实验...")
     tracker.scan_experiments()
