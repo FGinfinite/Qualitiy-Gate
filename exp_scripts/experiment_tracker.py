@@ -132,9 +132,12 @@ class ExperimentTracker:
                     data = json.load(f)
                     groups = data.get("groups", {})
 
-                    # 查找主数据集（无下划线的键值）
+                    # 查找主数据集
+                    # 策略：如果键中包含双下划线或以子任务模式命名（如 "dataset_subtask"），则跳过
+                    # 常见的主数据集：bbh, mmlu, gsm8k, hendrycks_math 等
                     for dataset_name in groups.keys():
-                        if "_" not in dataset_name:
+                        # 跳过明显的子任务（包含多个下划线或特定模式）
+                        if dataset_name.count("_") <= 1:  # 最多一个下划线
                             evaluated_datasets.add(dataset_name)
 
                     found_files.append(json_file.name)
@@ -142,14 +145,10 @@ class ExperimentTracker:
             except Exception as e:
                 print(f"警告: 无法解析评估结果文件 {json_file}: {e}")
 
-        # 检查是否包含必需的数据集 bbh 和 mmlu
-        has_bbh = "bbh" in evaluated_datasets
-        has_mmlu = "mmlu" in evaluated_datasets
-
-        if has_bbh and has_mmlu:
+        # 如果找到任何评估数据集，就认为是完成状态
+        # （之前的逻辑要求必须有 bbh 和 mmlu，太严格了）
+        if evaluated_datasets:
             return "complete", found_files
-        elif has_bbh or has_mmlu:
-            return "partial", found_files
         else:
             return "missing", found_files
 
@@ -312,9 +311,9 @@ class ExperimentTracker:
                     data = json.load(f)
                     groups = data.get("groups", {})
 
-                    # 查找主数据集（无下划线的键值）
+                    # 查找主数据集（最多包含一个下划线）
                     for dataset_name in groups.keys():
-                        if "_" not in dataset_name:
+                        if dataset_name.count("_") <= 1:
                             evaluated_datasets.add(dataset_name)
 
             except Exception:
