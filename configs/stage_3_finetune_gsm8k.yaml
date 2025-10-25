@@ -1,0 +1,81 @@
+# @package _global_
+
+stage: finetune
+# Stage 3: Fine-tuning Configuration
+
+# Hydra Configuration
+hydra:
+  run:
+    dir: outputs/stage_3_finetune/${now:%Y-%m-%d}/${now:%H-%M-%S}-MODEL=<|${extract_model_config:${training.batch_size},${training.learning_rate},${tag}}|>-DATA=<|${extract_data_config_conditional:${dataset.data_path},${dataset.mode}}|>
+  sweep:
+    dir: outputs/stage_3_finetune
+    subdir: ${now:%Y-%m-%d}/${now:%H-%M-%S}-MODEL=<|${extract_model_config:${training.batch_size},${training.learning_rate},${tag}}|>-DATA=<|${extract_data_config_conditional:${dataset.data_path},${dataset.mode}}|>
+  job:
+    config:
+      override_dirname:
+        kv_sep: "="
+        item_sep: ","
+        exclude_keys:
+          - hydra.run.dir
+          - hydra.sweep.dir
+          - hydra.sweep.subdir
+
+tag: "none"
+
+# Global seed for reproducibility
+seed: 42
+
+defaults:
+  - _self_
+  - training: qwen_3_1.7b
+
+
+output_dir: ${hydra:run.dir}
+
+# Checkpoint saving configuration
+checkpoint:
+  save_intermediate: true  # 是否保存训练过程中的中间检查点（每个epoch结束时）
+  peft_dir: "PEFT"  # PEFT适配器保存的子目录名称
+  save_merged_model: true  # 是否在训练结束后保存合并的完整模型
+
+# Dataset configuration
+dataset:
+  # 本地数据集根目录（所有 local 数据集的根路径）
+  local_dataset_dir: "dataset/train/processed"
+  
+  # 数据集列表（仅在 mode="full" 时使用）
+  datasets:
+    # GSM8K 数据集 (7,473 个训练样本)
+    - dataset_from: "hf"
+      name: "openai/gsm8k"
+      dataset_name: "gsm8k"
+      subset: "main"
+      split: "train"
+      format_type: "gsm8k"
+      use_shared_memory: false
+    
+    # HENDRYCKS_MATH 数据集 - 使用 __full_subset__ 自动加载所有 7 个子集 (7,500 个训练样本)
+    # 子集包括: algebra, counting_and_probability, geometry, intermediate_algebra,
+    #          number_theory, prealgebra, precalculus
+    # - dataset_from: "hf"
+    #   name: "EleutherAI/hendrycks_math"
+    #   dataset_name: "hendrycks_math"
+    #   subset: "__full_subset__"
+    #   split: "train"
+    #   format_type: "hendrycks_math"
+    #   use_shared_memory: false
+  
+  # Common parameters
+  subset_ratio: 1.0  # Use 100% of data in full mode
+  # For subset mode: load from selected data file
+  data_path: "outputs/stage_2_selection/2025-08-11/03-52-40-batch=8_lr=0.001_loss=beta_moment_matching_tag=none/selected_data.jsonl"
+  max_sequence_length: 1024
+  processing_num_workers: 10
+  overwrite_cache: false
+  mode: "subset" # "full" or "subset"
+  shuffle: true # Enable data shuffling
+
+gpu_grab:
+  grab: false
+  memory_need_gb: 24
+  over_grab: false

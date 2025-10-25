@@ -40,3 +40,5 @@ qwen2_lora
 
 open-instruct
 olmes
+
+*.csv
