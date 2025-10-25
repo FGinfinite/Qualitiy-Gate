@@ -359,6 +359,10 @@ def _get_dataset_config(dataset_name: str) -> dict:
         - source_type: "local" 或 "hf"
         - config: 对应的加载配置
     """
+    # 特殊处理：如果是 noise_dataset_* 格式，动态生成配置
+    if dataset_name.startswith("noise_dataset_"):
+        return {"source_type": "local", "config": {"data_dir": "dataset/train/processed", "dataset_names": [dataset_name]}}
+
     # 数据集名称到配置的映射表
     # 添加新数据集时，只需在这里添加相应的映射即可
     dataset_configs = {
