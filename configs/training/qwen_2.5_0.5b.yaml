@@ -1,0 +1,22 @@
+model:
+  name: "Qwen/Qwen2.5-0.5B"
+  
+seed: 42
+batch_size: 128  # 总批次大小，会根据设备数自动分配
+per_device_batch_size: 4  # 每设备批次大小，可配置
+learning_rate: 2e-5
+epochs: 4
+optimizer: "AdamW"
+scheduler: "linear"  # 余弦衰减
+warmup_ratio: 0.03    # 线性预热比例
+weight_decay: 0.0     # 权重衰减
+peft_mode: "lora"    # 使用LoRA微调
+lora:
+  r: 64
+  lora_alpha: 256
+  lora_dropout: 0.1
+  target_modules:
+    - "q_proj"
+    - "k_proj"
+    - "v_proj"
+    - "o_proj"

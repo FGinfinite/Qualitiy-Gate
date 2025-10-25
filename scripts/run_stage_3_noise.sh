@@ -37,4 +37,4 @@ fi
   --config_file $CONFIG_FILE \
   --num_processes=$NUM_GPUS \
   --main_process_port=$MAIN_PORT \
-  src/main.py --config-name=stage_3_finetune_gsm8k "$@"
+  src/main.py --config-name=stage_3_finetune_noise "$@"

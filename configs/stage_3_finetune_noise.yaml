@@ -57,16 +57,13 @@ dataset:
     # HENDRYCKS_MATH 数据集 - 使用 __full_subset__ 自动加载所有 7 个子集 (7,500 个训练样本)
     # 子集包括: algebra, counting_and_probability, geometry, intermediate_algebra,
     #          number_theory, prealgebra, precalculus
-    # - dataset_from: "hf"
-    #   name: "EleutherAI/hendrycks_math"
-    #   dataset_name: "hendrycks_math"
-    #   subset: "__full_subset__"
-    #   split: "train"
-    #   format_type: "hendrycks_math"
-    #   use_shared_memory: false
+    - dataset_from: "local"
+      dataset_name: "noise_dataset_24k"  # 根据你生成的数据集名称修改
+      format_type: "standard"
+      use_shared_memory: false
   
   # Common parameters
-  subset_ratio: 1.0  # Use 100% of data in full mode
+  subset_ratio: 1  # Use 100% of data in full mode
   # For subset mode: load from selected data file
   data_path: "outputs/stage_2_selection/2025-08-11/03-52-40-batch=8_lr=0.001_loss=beta_moment_matching_tag=none/selected_data.jsonl"
   max_sequence_length: 1024

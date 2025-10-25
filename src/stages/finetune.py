@@ -279,6 +279,14 @@ def finetune(cfg: DictConfig) -> None:
             "fsdp": "full_shard auto_wrap",
             "fsdp_transformer_layer_cls_to_wrap": "Qwen2DecoderLayer",
         },
+        "Qwen/Qwen2.5-0.5B": {
+            "fsdp": "full_shard auto_wrap",
+            "fsdp_transformer_layer_cls_to_wrap": "Qwen2DecoderLayer",
+        },
+        "NousResearch/Meta-Llama-3-8B": {
+            "fsdp": "full_shard auto_wrap",
+            "fsdp_transformer_layer_cls_to_wrap": "LlamaDecoderLayer",
+        },
     }
 
     # 根据设备数决定是否使用FSDP
@@ -343,12 +351,12 @@ def finetune(cfg: DictConfig) -> None:
             del trainer
             torch.cuda.empty_cache()
 
-            # 重新加载基座模型（在CPU或单GPU上，避免FSDP分片）
+            # 重新加载基座模型（强制在单设备上，避免FSDP分片）
             log.info(f"重新加载基座模型: {cfg.training.model.name}")
             base_model = AutoModelForCausalLM.from_pretrained(
                 cfg.training.model.name,
                 torch_dtype=torch.bfloat16,
-                device_map="auto",  # 自动分配到可用设备
+                device_map="cpu",  # 强制单设备，避免DTensor包装
                 low_cpu_mem_usage=True,
             )
 
@@ -376,6 +384,8 @@ def finetune(cfg: DictConfig) -> None:
             del peft_model
             del base_model
             torch.cuda.empty_cache()
+
+            log.info("模型合并和保存完成")
 
     log.info("--- 阶段 3：LoRA微调完成 ---")
 
