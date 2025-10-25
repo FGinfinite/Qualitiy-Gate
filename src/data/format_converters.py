@@ -104,11 +104,14 @@ def convert_gsm8k_format(example: Dict, dataset_name: str = "gsm8k", example_ind
 
     Returns:
         转换后的标准格式数据
+
+    注意：
+        messages 字典的键顺序必须是 role -> content，以确保与其他数据集的 PyArrow schema 一致
     """
     if "question" not in example or "answer" not in example:
         raise ValueError("GSM8K数据必须包含'question'和'answer'字段")
 
-    # 构建标准messages格式
+    # 构建标准messages格式（关键：role 必须在 content 之前）
     messages = [
         {"role": "user", "content": example["question"].strip()},
         {"role": "assistant", "content": example["answer"].strip()},
@@ -137,11 +140,14 @@ def convert_hendrycks_math_format(example: Dict, dataset_name: str = "hendrycks_
 
     Returns:
         转换后的标准格式数据
+
+    注意：
+        messages 字典的键顺序必须是 role -> content，以确保与其他数据集的 PyArrow schema 一致
     """
     if "problem" not in example or "solution" not in example:
         raise ValueError("HENDRYCKS_MATH数据必须包含'problem'和'solution'字段")
 
-    # 构建标准messages格式
+    # 构建标准messages格式（关键：role 必须在 content 之前）
     messages = [
         {"role": "user", "content": example["problem"].strip()},
         {"role": "assistant", "content": example["solution"].strip()},

@@ -69,16 +69,16 @@ dataset:
 
     
     # 可选：混合本地数据集示例
-    - dataset_from: "local"
-      dataset_name: "oasst1"              # 对应 local_dataset_dir/oasst1 目录
-      format_type: "standard"             # 标准格式（已包含 messages 字段）
-      use_shared_memory: false
+    # - dataset_from: "local"
+    #   dataset_name: "oasst1"              # 对应 local_dataset_dir/oasst1 目录
+    #   format_type: "standard"             # 标准格式（已包含 messages 字段）
+    #   use_shared_memory: false
 
     
-    # - dataset_from: "local"
-    #   dataset_name: "noise_dataset_24k"  # 根据你生成的数据集名称修改
-    #   format_type: "standard"
-    #   use_shared_memory: false
+    - dataset_from: "local"
+      dataset_name: "noise_dataset_24k"  # 根据你生成的数据集名称修改
+      format_type: "standard"
+      use_shared_memory: false
   
   # Common parameters
   subset_ratio: 0.25

@@ -7,7 +7,7 @@
 
 import logging
 import os
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 
 import numpy as np
 from datasets import Dataset, concatenate_datasets, load_dataset
@@ -15,6 +15,31 @@ from omegaconf import DictConfig
 
 from .data_utils import sort_dataset_by_string_length, temp_seed
 from .format_converters import get_format_converter
+
+# ============================================================================
+# 辅助函数
+# ============================================================================
+
+# 定义标准的数据集 schema（用于统一 messages 字段顺序）
+# PyArrow 在合并数据集时要求 struct 字段顺序完全一致
+STANDARD_DATASET_FEATURES = None  # 延迟初始化
+
+
+def get_standard_features():
+    """获取标准的数据集 Features 定义"""
+    global STANDARD_DATASET_FEATURES
+    if STANDARD_DATASET_FEATURES is None:
+        from datasets import Features, Value
+
+        STANDARD_DATASET_FEATURES = Features(
+            {
+                "dataset": Value("string"),
+                "id": Value("string"),
+                "messages": [{"role": Value("string"), "content": Value("string")}],
+            }
+        )
+    return STANDARD_DATASET_FEATURES
+
 
 # ============================================================================
 # 新版数据集加载函数（支持混合 local 和 hf）
@@ -248,6 +273,8 @@ def load_single_dataset(
 
     # 3. 格式转换
     converter = get_format_converter(format_type)
+    standard_features = get_standard_features()
+
     if converter is not None:
         # 需要转换格式
         columns_to_remove = [col for col in dataset.column_names if col not in ["dataset", "id", "messages"]]
@@ -256,13 +283,18 @@ def load_single_dataset(
             lambda example, idx: converter(example, dataset_name=dataset_name, example_index=idx),
             with_indices=True,
             desc=f"转换数据集格式 - {dataset_name}",
-            load_from_cache_file=True,
+            features=standard_features,  # 关键：指定输出 schema，确保字段顺序一致
+            load_from_cache_file=True,  # 使用缓存，提升性能
             remove_columns=columns_to_remove,
         )
     else:
         # 标准格式，验证是否包含必需字段
         if "messages" not in dataset.column_names:
             raise ValueError(f"数据集 '{dataset_name}' 标记为标准格式，但缺少 'messages' 字段")
+
+        # 使用 cast 统一 schema（高效方案，利用 PyArrow 底层能力）
+        dataset = dataset.cast(standard_features)
+        print(f"✓ 已统一 '{dataset_name}' 的 schema")
 
     return dataset
 
