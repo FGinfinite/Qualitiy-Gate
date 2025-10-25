@@ -76,7 +76,7 @@ dataset:
 
     
     - dataset_from: "local"
-      dataset_name: "noise_dataset_24k"  # 根据你生成的数据集名称修改
+      dataset_name: "faker_dataset_24k"  # 根据你生成的数据集名称修改
       format_type: "standard"
       use_shared_memory: false
   

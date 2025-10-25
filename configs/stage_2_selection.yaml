@@ -58,7 +58,7 @@ dataset:
       use_shared_memory: false              # 是否使用共享内存（可选）
 
     - dataset_from: "local"
-      dataset_name: "noise_dataset_24k"  
+      dataset_name: "faker_dataset_24k"  
       format_type: "standard"
       use_shared_memory: false
 

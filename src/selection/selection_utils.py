@@ -360,8 +360,14 @@ def _get_dataset_config(dataset_name: str) -> dict:
         - config: 对应的加载配置
     """
     # 特殊处理：如果是 noise_dataset_* 格式，动态生成配置
-    if dataset_name.startswith("noise_dataset_"):
-        return {"source_type": "local", "config": {"data_dir": "dataset/train/processed", "dataset_names": [dataset_name]}}
+    if dataset_name.startswith("noise_dataset_") or dataset_name.startswith("faker_dataset_"):
+        return {
+            "source_type": "local",
+            "config": {
+                "data_dir": "dataset/train/processed",
+                "dataset_names": [dataset_name],
+            },
+        }
 
     # 数据集名称到配置的映射表
     # 添加新数据集时，只需在这里添加相应的映射即可
