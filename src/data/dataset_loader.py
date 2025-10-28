@@ -263,8 +263,14 @@ def load_single_dataset(
     else:
         raise ValueError(f"不支持的 dataset_from: {dataset_from}，支持的值: 'local', 'hf'")
 
-    # 2. 采样
-    if sample_percentage < 1.0:
+    # 2. 采样（目标任务数据自动使用全部数据）
+    is_target_task = dataset_config.get("is_target_task", False)
+
+    if is_target_task:
+        # 目标任务数据：始终使用全部数据，不受 subset_ratio 限制
+        print(f"✓ 目标任务数据，使用全部 {len(dataset)} 个样本（不受 subset_ratio 限制）")
+    elif sample_percentage < 1.0:
+        # 普通训练数据：根据 subset_ratio 采样
         sample_size = int(len(dataset) * sample_percentage)
         with temp_seed(seed):
             indices = np.random.permutation(len(dataset))[:sample_size]
@@ -296,8 +302,7 @@ def load_single_dataset(
         dataset = dataset.cast(standard_features)
         print(f"✓ 已统一 '{dataset_name}' 的 schema")
 
-    # 4. 添加 is_target_task 标签
-    is_target_task = dataset_config.get("is_target_task", False)
+    # 4. 添加 is_target_task 标签（已在步骤2获取）
     dataset = dataset.add_column("is_target_task", [int(is_target_task)] * len(dataset))
     print(f"✓ 已为数据集 '{dataset_name}' 添加标签 is_target_task={is_target_task}")
 

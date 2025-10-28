@@ -3,28 +3,47 @@
 """
 数据集验证集提取脚本
 
-从HuggingFace或本地数据集的test划分中提取后k个样本，
+从HuggingFace或本地数据集的任意划分（train/test/validation等）中提取样本，
 转换为项目标准格式，保存为验证集供后续使用。
 
+支持三种提取模式:
+1. tail: 从末尾提取后k个样本
+2. head: 从开头提取前k个样本
+3. split: 按比例自动划分为训练集和验证集
+
 使用示例:
-    # 从HuggingFace数据集提取
+    # 模式1: 从末尾提取 (默认)
     python exp_scripts/extract_validation_data.py \
         --dataset-from hf \
         --dataset-name openai/gsm8k \
-        --dataset-alias gsm8k \
         --subset main \
         --split test \
         --num-samples 100 \
         --format-type gsm8k
 
-    # 从本地数据集提取
+    # 模式2: 从开头提取
     python exp_scripts/extract_validation_data.py \
-        --dataset-from local \
-        --dataset-name oasst1 \
-        --local-dir dataset/train/processed \
-        --split test \
-        --num-samples 500 \
-        --format-type standard
+        --dataset-from hf \
+        --dataset-name openai/gsm8k \
+        --subset main \
+        --split train \
+        --extraction-mode head \
+        --num-samples 1000 \
+        --format-type gsm8k
+
+    # 模式3: 按比例划分 (一次生成训练集和验证集)
+    python exp_scripts/extract_validation_data.py \
+        --dataset-from hf \
+        --dataset-name openai/gsm8k \
+        --subset main \
+        --split train \
+        --extraction-mode split \
+        --split-ratio 0.9 \
+        --format-type gsm8k
+
+    # 输出:
+    #   - dataset/train/processed/gsm8k_train_90per/data.jsonl (训练集90%)
+    #   - dataset/train/processed/gsm8k_val_10per/data.jsonl (验证集10%)
 """
 
 import argparse
@@ -33,7 +52,7 @@ import logging
 import os
 import sys
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Optional
 
 # 添加项目根目录到Python路径
 project_root = Path(__file__).parent.parent
@@ -130,35 +149,73 @@ def load_dataset_split(
         raise ValueError(f"不支持的数据来源: {dataset_from}，支持的值: 'hf', 'local'")
 
 
-def extract_last_k_samples(dataset: Dataset, k: int) -> Dataset:
+def extract_samples(dataset: Dataset, mode: str, num_samples: int = None, split_ratio: float = None) -> tuple[Dataset, int] | tuple[Dataset, int, Dataset, int]:
     """
-    提取数据集的后k个样本
+    从数据集中提取样本
 
     Args:
         dataset: 原始数据集
-        k: 要提取的样本数量
+        mode: 提取模式 ("head", "tail", "split")
+        num_samples: 要提取的样本数量 (head/tail模式使用)
+        split_ratio: 训练集比例 (split模式使用，如0.8表示80%训练20%验证)
 
     Returns:
-        提取后的数据集
+        - head/tail模式: (提取后的数据集, 起始索引)
+        - split模式: (训练集, 训练集起始索引, 验证集, 验证集起始索引)
     """
     total_samples = len(dataset)
 
-    if k > total_samples:
-        log.warning(f"请求提取 {k} 个样本，但数据集只有 {total_samples} 个样本，将使用全部数据")
-        k = total_samples
+    if mode == "tail":
+        # 从末尾提取
+        if num_samples > total_samples:
+            log.warning(f"请求提取 {num_samples} 个样本，但数据集只有 {total_samples} 个样本，将使用全部数据")
+            num_samples = total_samples
 
-    start_idx = total_samples - k
-    indices = list(range(start_idx, total_samples))
+        start_idx = total_samples - num_samples
+        indices = list(range(start_idx, total_samples))
+        log.info(f"[tail模式] 从位置 {start_idx} 开始提取 {num_samples} 个样本 (总共 {total_samples} 个)")
+        return dataset.select(indices), start_idx
 
-    log.info(f"从位置 {start_idx} 开始提取 {k} 个样本 (总共 {total_samples} 个)")
+    elif mode == "head":
+        # 从开头提取
+        if num_samples > total_samples:
+            log.warning(f"请求提取 {num_samples} 个样本，但数据集只有 {total_samples} 个样本，将使用全部数据")
+            num_samples = total_samples
 
-    return dataset.select(indices)
+        indices = list(range(num_samples))
+        log.info(f"[head模式] 从位置 0 开始提取 {num_samples} 个样本 (总共 {total_samples} 个)")
+        return dataset.select(indices), 0
+
+    elif mode == "split":
+        # 按比例划分
+        if split_ratio is None or not (0 < split_ratio < 1):
+            raise ValueError(f"split模式需要有效的split_ratio (0-1之间)，当前值: {split_ratio}")
+
+        train_size = int(total_samples * split_ratio)
+        val_size = total_samples - train_size
+
+        train_indices = list(range(train_size))
+        val_indices = list(range(train_size, total_samples))
+
+        train_dataset = dataset.select(train_indices)
+        val_dataset = dataset.select(val_indices)
+
+        log.info(f"[split模式] 按比例 {split_ratio:.1%} 划分数据集:")
+        log.info(f"  训练集: {train_size} 个样本 (索引 0-{train_size - 1})")
+        log.info(f"  验证集: {val_size} 个样本 (索引 {train_size}-{total_samples - 1})")
+
+        return train_dataset, 0, val_dataset, train_size
+
+    else:
+        raise ValueError(f"不支持的提取模式: {mode}，支持的值: 'head', 'tail', 'split'")
 
 
 def convert_to_standard_format(
     dataset: Dataset,
     format_type: str,
     dataset_alias: str,
+    split: str,
+    start_idx: int,
 ) -> Dataset:
     """
     将数据集转换为项目标准格式
@@ -167,6 +224,8 @@ def convert_to_standard_format(
         dataset: 原始数据集
         format_type: 数据格式类型
         dataset_alias: 数据集别名，用于生成dataset和id字段
+        split: 数据集划分名称，用于生成唯一ID
+        start_idx: 在原始数据集中的起始索引，用于生成唯一ID
 
     Returns:
         转换后的标准格式数据集
@@ -188,12 +247,14 @@ def convert_to_standard_format(
         if "messages" not in dataset.column_names:
             raise ValueError("标准格式数据必须包含 'messages' 字段")
 
-        # 确保有dataset和id字段
+        # 确保有dataset和id字段，使用原始索引生成唯一ID
         def add_metadata(example, idx):
             if "dataset" not in example:
                 example["dataset"] = dataset_alias
             if "id" not in example:
-                example["id"] = f"{dataset_alias}_{idx:06d}"
+                # 使用 split + 原始索引生成唯一ID
+                original_idx = start_idx + idx
+                example["id"] = f"{dataset_alias}_{split}_{original_idx:06d}"
             return example
 
         dataset = dataset.map(add_metadata, with_indices=True, desc="添加元数据字段")
@@ -202,7 +263,12 @@ def convert_to_standard_format(
     # 应用格式转换
     def convert_example(example, idx):
         try:
-            return converter(example, dataset_name=dataset_alias, example_index=idx)
+            # 使用原始索引生成唯一ID
+            original_idx = start_idx + idx
+            result = converter(example, dataset_name=dataset_alias, example_index=original_idx)
+            # 确保ID包含split信息
+            result["id"] = f"{dataset_alias}_{split}_{original_idx:06d}"
+            return result
         except Exception as e:
             log.error(f"转换样本 {idx} 失败: {e}")
             raise
@@ -286,7 +352,7 @@ def print_dataset_statistics(dataset: Dataset) -> None:
             source = example.get("dataset", "unknown")
             dataset_sources[source] = dataset_sources.get(source, 0) + 1
 
-        log.info(f"  数据集来源分布:")
+        log.info("  数据集来源分布:")
         for source, count in dataset_sources.items():
             log.info(f"    - {source}: {count} ({count / len(dataset) * 100:.1f}%)")
 
@@ -305,7 +371,7 @@ def print_dataset_statistics(dataset: Dataset) -> None:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="从数据集test划分提取后k个样本作为验证集",
+        description="从数据集的任意划分提取样本或按比例划分数据集",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
@@ -344,7 +410,7 @@ def main():
         "--split",
         type=str,
         default="test",
-        help="数据集划分 (默认: test)",
+        help="数据集划分，如 train、test、validation 等 (默认: test)",
     )
 
     parser.add_argument(
@@ -356,11 +422,40 @@ def main():
 
     # 提取配置
     parser.add_argument(
+        "--extraction-mode",
+        type=str,
+        default="tail",
+        choices=["head", "tail", "split"],
+        help="提取模式: head (从头提取), tail (从尾提取), split (按比例划分) (默认: tail)",
+    )
+
+    parser.add_argument(
         "--num-samples",
         "-k",
         type=int,
-        required=True,
-        help="要提取的样本数量 (从末尾开始)",
+        default=None,
+        help="要提取的样本数量 (head/tail模式必需)",
+    )
+
+    parser.add_argument(
+        "--split-ratio",
+        type=float,
+        default=0.8,
+        help="训练集比例 (split模式使用，默认: 0.8，即80%%训练20%%验证)",
+    )
+
+    parser.add_argument(
+        "--split-train-suffix",
+        type=str,
+        default="train",
+        help="split模式下训练集输出目录后缀 (默认: train)",
+    )
+
+    parser.add_argument(
+        "--split-val-suffix",
+        type=str,
+        default="val",
+        help="split模式下验证集输出目录后缀 (默认: val)",
     )
 
     # 格式配置
@@ -376,18 +471,22 @@ def main():
     parser.add_argument(
         "--output-dir",
         type=str,
-        default="dataset/val",
-        help="输出根目录 (默认: dataset/val)",
+        default="dataset/train/processed",
+        help="输出根目录 (默认: dataset/train/processed)",
     )
 
     parser.add_argument(
         "--output-name",
         type=str,
         default=None,
-        help="输出目录名称 (默认: {dataset_alias}_end{k})",
+        help="输出目录名称 (默认: {dataset_alias}_{split}_end{k})",
     )
 
     args = parser.parse_args()
+
+    # 验证参数
+    if args.extraction_mode in ["head", "tail"] and args.num_samples is None:
+        parser.error(f"{args.extraction_mode}模式需要指定 --num-samples 参数")
 
     # 处理dataset_alias
     if args.dataset_alias is None:
@@ -400,14 +499,6 @@ def main():
         args.format_type = infer_format_type(args.dataset_name)
         log.info(f"自动推断数据格式: {args.format_type}")
 
-    # 处理output_name
-    if args.output_name is None:
-        args.output_name = f"{args.dataset_alias}_end{args.num_samples}"
-
-    # 构建输出路径
-    output_dir = os.path.join(args.output_dir, args.output_name)
-    output_file = os.path.join(output_dir, "data.jsonl")
-
     # 打印配置信息
     log.info("=" * 60)
     log.info("提取配置:")
@@ -417,9 +508,12 @@ def main():
     if args.subset:
         log.info(f"  子集: {args.subset}")
     log.info(f"  划分: {args.split}")
-    log.info(f"  提取数量: {args.num_samples}")
+    log.info(f"  提取模式: {args.extraction_mode}")
+    if args.extraction_mode in ["head", "tail"]:
+        log.info(f"  提取数量: {args.num_samples}")
+    else:
+        log.info(f"  划分比例: {args.split_ratio:.1%} (训练) / {1 - args.split_ratio:.1%} (验证)")
     log.info(f"  格式类型: {args.format_type}")
-    log.info(f"  输出路径: {output_file}")
     log.info("=" * 60)
 
     try:
@@ -432,36 +526,119 @@ def main():
             local_dir=args.local_dir,
         )
 
-        # 2. 提取后k个样本
-        extracted_dataset = extract_last_k_samples(dataset, args.num_samples)
+        # 2. 根据模式提取样本
+        if args.extraction_mode == "split":
+            # split模式: 一次生成训练集和验证集
+            train_dataset, train_start_idx, val_dataset, val_start_idx = extract_samples(dataset=dataset, mode="split", split_ratio=args.split_ratio)
 
-        # 3. 转换为标准格式
-        standard_dataset = convert_to_standard_format(
-            dataset=extracted_dataset,
-            format_type=args.format_type,
-            dataset_alias=args.dataset_alias,
-        )
+            # 处理output_name，包含比例信息
+            if args.output_name is None:
+                train_percent = int(args.split_ratio * 100)
+                val_percent = 100 - train_percent
+                train_output_name = f"{args.dataset_alias}_{args.split_train_suffix}_{train_percent}per"
+                val_output_name = f"{args.dataset_alias}_{args.split_val_suffix}_{val_percent}per"
+            else:
+                train_output_name = f"{args.output_name}_{args.split_train_suffix}"
+                val_output_name = f"{args.output_name}_{args.split_val_suffix}"
 
-        # 4. 保存为JSONL
-        save_to_jsonl(standard_dataset, output_file)
+            train_output_file = os.path.join(args.output_dir, train_output_name, "data.jsonl")
+            val_output_file = os.path.join(args.output_dir, val_output_name, "data.jsonl")
 
-        # 5. 打印统计信息
-        print_dataset_statistics(standard_dataset)
+            log.info(f"  训练集输出: {train_output_file}")
+            log.info(f"  验证集输出: {val_output_file}")
+            log.info("=" * 60)
 
-        log.info("=" * 60)
-        log.info("✓ 验证集提取完成!")
-        log.info(f"输出位置: {output_file}")
-        log.info(f"样本数量: {len(standard_dataset)}")
-        log.info("")
-        log.info("可以通过以下配置加载此验证集:")
-        log.info("")
-        log.info("dataset:")
-        log.info("  datasets:")
-        log.info("    - dataset_from: local")
-        log.info(f"      dataset_name: {args.output_name}")
-        log.info("      format_type: standard")
-        log.info(f"  local_dataset_dir: {os.path.abspath(args.output_dir)}")
-        log.info("=" * 60)
+            # 转换训练集
+            log.info("\n处理训练集...")
+            train_standard = convert_to_standard_format(
+                dataset=train_dataset,
+                format_type=args.format_type,
+                dataset_alias=args.dataset_alias,
+                split=args.split,
+                start_idx=train_start_idx,
+            )
+            save_to_jsonl(train_standard, train_output_file)
+            print_dataset_statistics(train_standard)
+
+            # 转换验证集
+            log.info("\n处理验证集...")
+            val_standard = convert_to_standard_format(
+                dataset=val_dataset,
+                format_type=args.format_type,
+                dataset_alias=args.dataset_alias,
+                split=args.split,
+                start_idx=val_start_idx,
+            )
+            save_to_jsonl(val_standard, val_output_file)
+            print_dataset_statistics(val_standard)
+
+            # 打印总结
+            log.info("=" * 60)
+            log.info("✓ 数据集划分完成!")
+            log.info(f"训练集: {train_output_file} ({len(train_standard)} 个样本)")
+            log.info(f"验证集: {val_output_file} ({len(val_standard)} 个样本)")
+            log.info("")
+            log.info("可以通过以下配置加载:")
+            log.info("")
+            log.info("# 训练集")
+            log.info("dataset:")
+            log.info("  datasets:")
+            log.info("    - dataset_from: local")
+            log.info(f"      dataset_name: {train_output_name}")
+            log.info("      format_type: standard")
+            log.info(f"  local_dataset_dir: {os.path.abspath(args.output_dir)}")
+            log.info("")
+            log.info("# 验证集")
+            log.info("dataset:")
+            log.info("  datasets:")
+            log.info("    - dataset_from: local")
+            log.info(f"      dataset_name: {val_output_name}")
+            log.info("      format_type: standard")
+            log.info(f"  local_dataset_dir: {os.path.abspath(args.output_dir)}")
+            log.info("=" * 60)
+
+        else:
+            # head/tail模式: 提取单个数据集
+            extracted_dataset, start_idx = extract_samples(dataset=dataset, mode=args.extraction_mode, num_samples=args.num_samples)
+
+            # 处理output_name
+            if args.output_name is None:
+                mode_prefix = "head" if args.extraction_mode == "head" else "end"
+                args.output_name = f"{args.dataset_alias}_{args.split}_{mode_prefix}{args.num_samples}"
+
+            output_file = os.path.join(args.output_dir, args.output_name, "data.jsonl")
+            log.info(f"  输出路径: {output_file}")
+            log.info("=" * 60)
+
+            # 转换为标准格式
+            standard_dataset = convert_to_standard_format(
+                dataset=extracted_dataset,
+                format_type=args.format_type,
+                dataset_alias=args.dataset_alias,
+                split=args.split,
+                start_idx=start_idx,
+            )
+
+            # 保存为JSONL
+            save_to_jsonl(standard_dataset, output_file)
+
+            # 打印统计信息
+            print_dataset_statistics(standard_dataset)
+
+            log.info("=" * 60)
+            log.info("✓ 数据集提取完成!")
+            log.info(f"输出位置: {output_file}")
+            log.info(f"样本数量: {len(standard_dataset)}")
+            log.info("")
+            log.info("可以通过以下配置加载此数据集:")
+            log.info("")
+            log.info("dataset:")
+            log.info("  datasets:")
+            log.info("    - dataset_from: local")
+            log.info(f"      dataset_name: {args.output_name}")
+            log.info("      format_type: standard")
+            log.info(f"  local_dataset_dir: {os.path.abspath(args.output_dir)}")
+            log.info("=" * 60)
 
     except Exception as e:
         log.error(f"提取过程失败: {e}")

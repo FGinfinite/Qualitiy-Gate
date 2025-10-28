@@ -47,37 +47,23 @@ dataset:
   
   # 数据集列表（支持混合 local 和 hf 数据集）
   datasets:
-    # GSM8K 数据集 (7,473 个训练样本)
-    - dataset_from: "hf"                    # 数据源: "local" 或 "hf"
-      name: "openai/gsm8k"                  # HuggingFace 数据集路径
-      dataset_name: "gsm8k"                 # 数据集名称（用于标识）
-      subset: "main"                        # 子集名称（可选）
-      split: "train"                        # 数据集分割
-      format_type: "gsm8k"                  # 数据格式类型
-      use_shared_memory: false              # 是否使用共享内存（可选）
-      is_target_task: false                 # 是否为目标任务数据
-    
-    # HENDRYCKS_MATH 数据集 - 使用 __full_subset__ 自动加载所有 7 个子集 (7,500 个训练样本)
-    # 子集包括: algebra, counting_and_probability, geometry, intermediate_algebra, 
-    #          number_theory, prealgebra, precalculus
-    # - dataset_from: "hf"
-    #   name: "EleutherAI/hendrycks_math"
-    #   dataset_name: "hendrycks_math"
-    #   subset: "__full_subset__"             # 特殊值：加载所有子集
-    #   split: "train"
-    #   format_type: "hendrycks_math"
-    #   use_shared_memory: false
-
-    
-    # 可选：混合本地数据集示例
-    # - dataset_from: "local"
-    #   dataset_name: "oasst1"              # 对应 local_dataset_dir/oasst1 目录
-    #   format_type: "standard"             # 标准格式（已包含 messages 字段）
-    #   use_shared_memory: false
-
-    
+    # GSM8K 训练集 (90%, 约 6726 个样本) - 普通训练数据
     - dataset_from: "local"
-      dataset_name: "faker_dataset_24k"  # 根据你生成的数据集名称修改
+      dataset_name: "gsm8k_train_98per"   # 对应 local_dataset_dir/gsm8k_train_98per 目录
+      format_type: "standard"             # 标准格式（已包含 messages 字段）
+      use_shared_memory: false
+      is_target_task: false               # 普通训练数据，受 subset_ratio 影响
+    
+    # GSM8K 验证集 (10%, 约 749 个样本) - 目标任务数据
+    - dataset_from: "local"
+      dataset_name: "gsm8k_val_2per"     # 对应 local_dataset_dir/gsm8k_val_2per 目录
+      format_type: "standard"             # 标准格式（已包含 messages 字段）
+      use_shared_memory: false
+      is_target_task: true                # 目标任务数据，始终使用全部数据
+    
+    # 可选：其他数据集示例
+    - dataset_from: "local"
+      dataset_name: "faker_dataset_24k"
       format_type: "standard"
       use_shared_memory: false
       is_target_task: false
