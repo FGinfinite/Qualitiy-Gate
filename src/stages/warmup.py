@@ -164,6 +164,8 @@ def get_model_and_tokenizer(
         model.config.quality_loss_type = cfg.training.quality_loss_type
     if hasattr(cfg.training, "quality_loss_debug"):
         model.config.quality_loss_debug = cfg.training.quality_loss_debug
+    if hasattr(cfg.training, "quality_loss_balance"):
+        model.config.quality_loss_balance = cfg.training.quality_loss_balance
 
     # 损失平均策略参数
     if hasattr(cfg.training, "quality_loss_params"):

@@ -247,14 +247,16 @@ def encode_data(
         )
         mode_desc = "传统SFT编码"
 
-    # 使用多进程处理，移除原始列
+    # 使用多进程处理，移除原始列（保留 is_target_task）
+    columns_to_remove = [col for col in raw_datasets.column_names if col != "is_target_task"]
+
     lm_datasets = raw_datasets.map(
         encode_function,
         batched=False,
         num_proc=processing_num_workers,
         load_from_cache_file=not overwrite_cache,
         desc=f"对数据进行分词和格式化 - {mode_desc}",
-        remove_columns=raw_datasets.column_names,  # 移除所有原始列
+        remove_columns=columns_to_remove,  # 移除所有原始列，但保留 is_target_task
     )
 
     # 显式设置为torch格式

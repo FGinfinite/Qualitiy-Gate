@@ -296,6 +296,11 @@ def load_single_dataset(
         dataset = dataset.cast(standard_features)
         print(f"✓ 已统一 '{dataset_name}' 的 schema")
 
+    # 4. 添加 is_target_task 标签
+    is_target_task = dataset_config.get("is_target_task", False)
+    dataset = dataset.add_column("is_target_task", [int(is_target_task)] * len(dataset))
+    print(f"✓ 已为数据集 '{dataset_name}' 添加标签 is_target_task={is_target_task}")
+
     return dataset
 
 

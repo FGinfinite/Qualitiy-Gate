@@ -40,7 +40,7 @@ selector_model:
 
 output_dir: ${hydra:run.dir}
 
-# Dataset configuration
+  # Dataset configuration
 dataset:
   # 本地数据集根目录（所有 local 数据集的根路径）
   local_dataset_dir: "dataset/train/processed"
@@ -55,6 +55,7 @@ dataset:
       split: "train"                        # 数据集分割
       format_type: "gsm8k"                  # 数据格式类型
       use_shared_memory: false              # 是否使用共享内存（可选）
+      is_target_task: false                 # 是否为目标任务数据
     
     # HENDRYCKS_MATH 数据集 - 使用 __full_subset__ 自动加载所有 7 个子集 (7,500 个训练样本)
     # 子集包括: algebra, counting_and_probability, geometry, intermediate_algebra, 
@@ -79,6 +80,7 @@ dataset:
       dataset_name: "faker_dataset_24k"  # 根据你生成的数据集名称修改
       format_type: "standard"
       use_shared_memory: false
+      is_target_task: false
   
   # Common parameters
   subset_ratio: 0.25
@@ -113,6 +115,7 @@ training:
   # Quality loss configuration
   quality_loss_type: "linear"  # 线性损失（直接使用sigmoid后的good_ratio）
   quality_loss_debug: false  # Enable debug output for quality loss computation
+  quality_loss_balance: 1.0  # 质量损失平衡参数，范围 [0, 2]，用于调控训练数据和目标任务数据的损失权重
   quality_loss_params:
     # Loss averaging strategy
     sample_wise_averaging: true  # false: token-wise averaging, true: sample-wise averaging (avoid long sequence bias)

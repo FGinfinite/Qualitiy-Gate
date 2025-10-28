@@ -42,6 +42,8 @@ class QualityGateConfig(Qwen3Config):
         quality_loss_type: str = "linear",  # 质量损失类型（仅支持linear）
         # 损失平均策略
         sample_wise_averaging: bool = True,
+        # 目标任务数据引导
+        quality_loss_balance: float = 1.0,  # 质量损失平衡参数，范围 [0, 2]
         # 调试配置
         quality_loss_debug: bool = False,
         **kwargs,
@@ -56,6 +58,7 @@ class QualityGateConfig(Qwen3Config):
         # 质量损失配置
         self.quality_loss_type = quality_loss_type
         self.sample_wise_averaging = sample_wise_averaging
+        self.quality_loss_balance = quality_loss_balance
         self.quality_loss_debug = quality_loss_debug
 
 
@@ -408,17 +411,21 @@ def quality_classification_loss(
     router_logits: List[torch.Tensor],
     config: QualityGateConfig,
     attention_mask: Optional[torch.Tensor] = None,
+    is_target_task: Optional[torch.Tensor] = None,
     debug: bool = False,
 ) -> torch.Tensor:
     """
-    计算质量分类损失
+    计算质量分类损失（支持目标任务数据引导）
 
-    使用线性损失：直接使用sigmoid后的good_ratio作为损失，鼓励降低good_ratio
+    使用差异化损失策略：
+    - 对训练数据：鼓励降低 good_ratio (L_good)
+    - 对目标任务数据：鼓励提升 good_ratio (1 - L_good)
 
     Args:
         router_logits: 包含每层'quality_score'的张量列表
         config: 模型配置
         attention_mask: 注意力掩码，用于排除padding tokens (batch_size, seq_len)
+        is_target_task: 目标任务标签 (batch_size,)，0=训练数据，1=目标任务数据
         debug: 是否打印调试信息
 
     Returns:
@@ -428,6 +435,10 @@ def quality_classification_loss(
         print("\n=== 质量分类损失调试 ===")
         print(f"router_logits类型: {type(router_logits)}")
         print(f"层数量: {len(router_logits)}")
+        if is_target_task is not None:
+            print(f"is_target_task形状: {is_target_task.shape}")
+            print(f"目标任务样本数: {is_target_task.sum().item()}")
+            print(f"训练数据样本数: {(1 - is_target_task).sum().item()}")
 
     if len(router_logits) == 0:
         return torch.tensor(0.0, device="cpu")
@@ -451,43 +462,61 @@ def quality_classification_loss(
         if debug and layer_idx % 5 == 0:
             print(f"good_ratio 最小/最大/均值: {good_ratio.min().item():.4f}/{good_ratio.max().item():.4f}/{good_ratio.mean().item():.4f}")
 
-        # 线性损失：直接使用good_ratio作为损失
-        layer_loss_raw = good_ratio.squeeze(-1)  # (batch_size, seq_len)
+        # 根据配置选择平均化策略
+        if hasattr(config, "sample_wise_averaging") and config.sample_wise_averaging:
+            # Sample-wise averaging: 先计算每个样本的平均good_ratio，再应用差异化损失
+            batch_size = good_ratio.shape[0]
+            sample_losses = []
 
-        # 应用attention mask排除padding tokens
-        if attention_mask is not None:
-            if attention_mask.shape != layer_loss_raw.shape:
-                attention_mask_expanded = attention_mask
-            else:
-                attention_mask_expanded = attention_mask
+            for i in range(batch_size):
+                sample_good_ratio = good_ratio[i].squeeze(-1)  # (seq_len,)
 
-            masked_loss = layer_loss_raw * attention_mask_expanded.float()
-
-            # 根据配置选择平均化策略
-            if hasattr(config, "sample_wise_averaging") and config.sample_wise_averaging:
-                # Sample-wise averaging: 先计算每个样本的平均损失，再对样本求平均
-                batch_size = layer_loss_raw.shape[0]
-                sample_losses = []
-
-                for i in range(batch_size):
-                    sample_mask = attention_mask_expanded[i]
-                    sample_loss = masked_loss[i]
-                    valid_tokens_in_sample = sample_mask.sum()
-
-                    if valid_tokens_in_sample > 0:
-                        sample_avg_loss = sample_loss.sum() / valid_tokens_in_sample
-                        sample_losses.append(sample_avg_loss)
-
-                if sample_losses:
-                    layer_loss = torch.stack(sample_losses).mean()
+                # 计算该样本的平均 good_ratio
+                if attention_mask is not None:
+                    sample_mask = attention_mask[i]
+                    valid_tokens = sample_mask.sum()
+                    if valid_tokens > 0:
+                        avg_good_ratio = (sample_good_ratio * sample_mask.float()).sum() / valid_tokens
+                    else:
+                        avg_good_ratio = torch.tensor(0.0, device=quality_score.device)
                 else:
-                    layer_loss = torch.tensor(0.0, device=quality_score.device)
+                    avg_good_ratio = sample_good_ratio.mean()
 
-                if debug and layer_idx % 5 == 0:
-                    print(f"使用Sample-wise平均化策略，有效样本数量: {len(sample_losses)}")
+                # 根据 is_target_task 应用不同的损失
+                if is_target_task is not None:
+                    is_train = 1 - is_target_task[i].float()  # 1=训练数据, 0=目标任务
+                    # 训练数据损失：鼓励降低 good_ratio
+                    loss_train = is_train * config.quality_loss_balance * avg_good_ratio
+                    # 目标任务损失：鼓励提升 good_ratio（最小化 1 - good_ratio）
+                    loss_target = (1 - is_train) * (2 - config.quality_loss_balance) * (1 - avg_good_ratio)
+                    sample_loss = loss_train + loss_target
+                else:
+                    # 回退到原始逻辑（全部视为训练数据）
+                    sample_loss = avg_good_ratio
+
+                sample_losses.append(sample_loss)
+
+            if sample_losses:
+                layer_loss = torch.stack(sample_losses).mean()
             else:
-                # Token-wise averaging: 直接对所有有效token求和平均
-                valid_tokens = attention_mask_expanded.sum()
+                layer_loss = torch.tensor(0.0, device=quality_score.device)
+
+            if debug and layer_idx % 5 == 0:
+                print(f"使用Sample-wise平均化策略，有效样本数量: {len(sample_losses)}")
+                if is_target_task is not None and len(sample_losses) > 0:
+                    train_losses = [sample_losses[i].item() for i in range(len(sample_losses)) if is_target_task[i] == 0]
+                    target_losses = [sample_losses[i].item() for i in range(len(sample_losses)) if is_target_task[i] == 1]
+                    if train_losses:
+                        print(f"  训练数据平均损失: {sum(train_losses) / len(train_losses):.6f}")
+                    if target_losses:
+                        print(f"  目标任务平均损失: {sum(target_losses) / len(target_losses):.6f}")
+        else:
+            # Token-wise averaging: 简化处理（不推荐用于目标任务引导）
+            layer_loss_raw = good_ratio.squeeze(-1)  # (batch_size, seq_len)
+
+            if attention_mask is not None:
+                masked_loss = layer_loss_raw * attention_mask.float()
+                valid_tokens = attention_mask.sum()
 
                 if valid_tokens > 0:
                     layer_loss = masked_loss.sum() / valid_tokens
@@ -496,9 +525,8 @@ def quality_classification_loss(
 
                 if debug and layer_idx % 5 == 0:
                     print(f"使用Token-wise平均化策略，有效token数量: {valid_tokens.item()}")
-
-        else:
-            layer_loss = layer_loss_raw.mean()
+            else:
+                layer_loss = layer_loss_raw.mean()
 
         if debug and layer_idx % 5 == 0:
             print(f"层损失: {layer_loss.item():.6f}")
@@ -579,6 +607,9 @@ class QualityGateForCausalLM(QualityGatePreTrainedModel):
         cache_position: Optional[torch.LongTensor] = None,
         **loss_kwargs,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
+        # 提取 is_target_task 标签（如果存在）
+        is_target_task = loss_kwargs.pop("is_target_task", None)
+
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         if output_router_logits is None:
             output_router_logits = self.training
@@ -614,6 +645,7 @@ class QualityGateForCausalLM(QualityGatePreTrainedModel):
                 outputs.router_logits,
                 self.config,
                 attention_mask=attention_mask,
+                is_target_task=is_target_task,
                 debug=self.config.quality_loss_debug,
             )
 
