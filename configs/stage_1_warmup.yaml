@@ -8,7 +8,7 @@ defaults:
   - _self_
 
 # Define common directory template
-_target_dir_template_: ${now:%Y-%m-%d}/${now:%H-%M-%S}-batch=${training.batch_size}_lr=${training.learning_rate}_loss=${training.quality_loss_type}_lossWeight=${training.quality_loss_weight}_sampleWise=${training.quality_loss_params.sample_wise_averaging}_tag=${tag}
+_target_dir_template_: ${now:%Y-%m-%d}/${now:%H-%M-%S}-batch=${training.batch_size}_lr=${training.learning_rate}_loss=${training.quality_loss_type}_lossWeight=${training.quality_loss_weight}_lossBalance=${training.quality_loss_balance}_tag=${tag}
 
 hydra:
   run:
@@ -56,14 +56,14 @@ dataset:
     #   use_shared_memory: false              # 是否使用共享内存（可选）
 
 
-    # GSM8K 训练集 (90、8%, 约 6726 个样本) - 普通训练数据
+    # GSM8K 训练集 (98%) - 普通训练数据
     - dataset_from: "local"
       dataset_name: "gsm8k_train_98per"   # 对应 local_dataset_dir/gsm8k_train_98per 目录
       format_type: "standard"             # 标准格式（已包含 messages 字段）
       use_shared_memory: false
       is_target_task: false               # 普通训练数据，受 subset_ratio 影响
     
-    # GSM8K 验证集 (10%, 约 749 个样本) - 目标任务数据
+    # GSM8K 验证集 (2%) - 目标任务数据
     - dataset_from: "local"
       dataset_name: "gsm8k_val_2per"     # 对应 local_dataset_dir/gsm8k_val_2per 目录
       format_type: "standard"             # 标准格式（已包含 messages 字段）
