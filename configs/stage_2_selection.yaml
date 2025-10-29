@@ -57,13 +57,13 @@ dataset:
       format_type: "gsm8k"                  # 数据格式类型
       use_shared_memory: false              # 是否使用共享内存（可选）
 
-    # - dataset_from: "hf"
-    #   name: "EleutherAI/hendrycks_math"
-    #   dataset_name: "hendrycks_math"
-    #   subset: "__full_subset__"             # 特殊值：加载所有子集
-    #   split: "train"
-    #   format_type: "hendrycks_math"
-    #   use_shared_memory: false
+    - dataset_from: "hf"
+      name: "EleutherAI/hendrycks_math"
+      dataset_name: "hendrycks_math"
+      subset: "__full_subset__"             # 特殊值：加载所有子集
+      split: "train"
+      format_type: "hendrycks_math"
+      use_shared_memory: false
 
     - dataset_from: "local"
       dataset_name: "faker_dataset_24k"  

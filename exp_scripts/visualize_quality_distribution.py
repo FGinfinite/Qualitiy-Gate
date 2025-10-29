@@ -236,8 +236,15 @@ def prepare_data_from_router_data(router_data_dir: str) -> Tuple[Dict[str, np.nd
     return scores_dict, data_dict
 
 
-def plot_distributions(scores_dict: Dict[str, np.ndarray], dataset_names: List[str], output_path: str):
-    """绘制质量分数分布图"""
+def plot_distributions(scores_dict: Dict[str, np.ndarray], dataset_names: List[str], output_path: str, bin_width: float = 0.01):
+    """绘制质量分数分布图
+
+    Args:
+        scores_dict: 各方法的质量分数字典
+        dataset_names: 数据集名称列表
+        output_path: 输出图片路径
+        bin_width: 直方图bin宽度（默认0.01即1%）
+    """
     # 设置图表样式
     plt.style.use("seaborn-v0_8-whitegrid")
     fig, axes = plt.subplots(2, 2, figsize=(18, 14))
@@ -251,9 +258,6 @@ def plot_distributions(scores_dict: Dict[str, np.ndarray], dataset_names: List[s
     color_palette = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b", "#e377c2", "#7f7f7f"]
     dataset_colors = {dataset: color_palette[i % len(color_palette)] for i, dataset in enumerate(unique_datasets)}
 
-    # bins: 从0到1，每5%一个bin
-    bins = np.arange(0, 1.05, 0.05)
-
     method_names = [
         "Method 1: Full Method (Perplexity Weighted + Column Normalization)",
         "Method 2: Perplexity Weighted Only (No Column Normalization)",
@@ -265,6 +269,26 @@ def plot_distributions(scores_dict: Dict[str, np.ndarray], dataset_names: List[s
 
     for idx, (ax, method_name, method_key) in enumerate(zip(axes, method_names, method_keys)):
         scores = scores_dict[method_key]
+
+        # 🔧 为当前方法自适应计算bins和x轴范围
+        score_min = scores.min()
+        score_max = scores.max()
+        score_range = score_max - score_min
+
+        # 留一些边距（5%）
+        padding = score_range * 0.05
+        x_min = max(0, score_min - padding)
+        x_max = min(1, score_max + padding)
+
+        # 动态计算bins：使用用户指定的bin宽度
+        num_bins = int(np.ceil((x_max - x_min) / bin_width))
+        bins = np.linspace(x_min, x_max, num_bins + 1)
+
+        print(f"\n{method_name}:")
+        print(f"  数据范围: [{score_min:.4f}, {score_max:.4f}]")
+        print(f"  X轴范围: [{x_min:.4f}, {x_max:.4f}]")
+        print(f"  Bin宽度: {bin_width:.4f} ({bin_width * 100:.2f}%)")
+        print(f"  Bins数量: {num_bins}")
 
         # 为每个数据集绘制柱状图
         for dataset in unique_datasets:
@@ -288,9 +312,24 @@ def plot_distributions(scores_dict: Dict[str, np.ndarray], dataset_names: List[s
         ax.set_xlabel("Quality Score", fontsize=11, fontweight="bold")
         ax.set_ylabel("Number of Samples", fontsize=11, fontweight="bold")
 
-        # 设置x轴刻度（每5%）
-        ax.set_xticks(bins)
-        ax.set_xticklabels([f"{int(x * 100)}%" for x in bins], rotation=45, ha="right", fontsize=9)
+        # 🔧 设置自适应的x轴范围
+        ax.set_xlim(x_min, x_max)
+
+        # 🔧 设置自适应的x轴刻度（每隔1%显示一个标签，避免过于密集）
+        tick_step = 0.01  # 每隔1%显示一个刻度
+        tick_start = np.ceil(x_min / tick_step) * tick_step
+        tick_end = np.floor(x_max / tick_step) * tick_step
+        tick_positions = np.arange(tick_start, tick_end + tick_step / 2, tick_step)
+
+        # 如果刻度太少（<5个），就增加密度
+        if len(tick_positions) < 5:
+            tick_step = 0.005  # 改为每隔0.5%
+            tick_start = np.ceil(x_min / tick_step) * tick_step
+            tick_end = np.floor(x_max / tick_step) * tick_step
+            tick_positions = np.arange(tick_start, tick_end + tick_step / 2, tick_step)
+
+        ax.set_xticks(tick_positions)
+        ax.set_xticklabels([f"{x:.3f}" for x in tick_positions], rotation=45, ha="right", fontsize=9)
 
         # 设置y轴刻度
         ax.tick_params(axis="y", labelsize=9)
@@ -394,6 +433,7 @@ def main():
     parser = argparse.ArgumentParser(description="可视化质量分数分布")
     parser.add_argument("--router-data-dir", required=True, help="router_data目录路径")
     parser.add_argument("--output", default="quality_distribution.png", help="输出图片路径 (默认: quality_distribution.png)")
+    parser.add_argument("--bin-width", type=float, default=0.01, help="直方图bin宽度 (默认: 0.01即1%%)")
     parser.add_argument("--analyze", action="store_true", help="打印详细的分离度分析")
 
     args = parser.parse_args()
@@ -403,12 +443,13 @@ def main():
     print("=" * 80)
     print(f"Router Data 目录: {args.router_data_dir}")
     print(f"输出路径: {args.output}")
+    print(f"Bin 宽度: {args.bin_width} ({args.bin_width * 100:.2f}%)")
 
     # 加载数据并计算质量分数
     scores_dict, data_dict = prepare_data_from_router_data(args.router_data_dir)
 
     # 绘制分布图
-    plot_distributions(scores_dict, data_dict["dataset_names"], args.output)
+    plot_distributions(scores_dict, data_dict["dataset_names"], args.output, bin_width=args.bin_width)
 
     # 打印分离度分析
     if args.analyze:

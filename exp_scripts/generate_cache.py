@@ -90,6 +90,28 @@ def generate_trash_files(
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
+    # 查找已有文件的最大序号
+    existing_files = list(output_path.glob("faiss_cache_*.pt"))
+    start_index = 0
+
+    if existing_files:
+        # 提取所有序号
+        indices = []
+        for f in existing_files:
+            try:
+                # 文件名格式: faiss_cache_N.pt
+                index = int(f.stem.split("_")[-1])
+                indices.append(index)
+            except (ValueError, IndexError):
+                continue
+
+        if indices:
+            start_index = max(indices) + 1
+            print(f"🔍 发现 {len(existing_files)} 个已有文件，最大序号: {max(indices)}")
+            print(f"📌 从序号 {start_index} 开始生成新文件")
+    else:
+        print("📌 未发现已有文件，从序号 0 开始生成")
+
     # 解析大小
     total_bytes = parse_size(total_size)
     avg_file_size = total_bytes // num_files
@@ -111,8 +133,9 @@ def generate_trash_files(
             else:
                 file_size = avg_file_size
 
-            # 生成文件名
-            filename = f"faiss_cache_{i}.pt"
+            # 生成文件名（使用 start_index 偏移）
+            file_index = start_index + i
+            filename = f"faiss_cache_{file_index}.pt"
             filepath = output_path / filename
 
             # 生成并写入数据

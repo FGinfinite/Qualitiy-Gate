@@ -47,7 +47,16 @@ dataset:
   
   # 数据集列表（支持混合 local 和 hf 数据集）
   datasets:
-    # GSM8K 训练集 (90%, 约 6726 个样本) - 普通训练数据
+    # - dataset_from: "hf"                    # 数据源: "local" 或 "hf"
+    #   name: "openai/gsm8k"                  # HuggingFace 数据集路径
+    #   dataset_name: "gsm8k"                 # 数据集名称（用于标识）
+    #   subset: "main"                        # 子集名称（可选）
+    #   split: "train"                        # 数据集分割
+    #   format_type: "gsm8k"                  # 数据格式类型
+    #   use_shared_memory: false              # 是否使用共享内存（可选）
+
+
+    # GSM8K 训练集 (90、8%, 约 6726 个样本) - 普通训练数据
     - dataset_from: "local"
       dataset_name: "gsm8k_train_98per"   # 对应 local_dataset_dir/gsm8k_train_98per 目录
       format_type: "standard"             # 标准格式（已包含 messages 字段）
@@ -101,7 +110,7 @@ training:
   # Quality loss configuration
   quality_loss_type: "linear"  # 线性损失（直接使用sigmoid后的good_ratio）
   quality_loss_debug: false  # Enable debug output for quality loss computation
-  quality_loss_balance: 1.0  # 质量损失平衡参数，范围 [0, 2]，用于调控训练数据和目标任务数据的损失权重
+  quality_loss_balance: 0.2  # 质量损失平衡参数，范围 [0, 2]，用于调控训练数据和目标任务数据的损失权重
   quality_loss_params:
     # Loss averaging strategy
     sample_wise_averaging: true  # false: token-wise averaging, true: sample-wise averaging (avoid long sequence bias)
