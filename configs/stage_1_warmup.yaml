@@ -58,14 +58,14 @@ dataset:
 
     # GSM8K 训练集 (98%) - 普通训练数据
     - dataset_from: "local"
-      dataset_name: "gsm8k_train_98per"   # 对应 local_dataset_dir/gsm8k_train_98per 目录
+      dataset_name: "gsm8k_train_95per"   # 对应 local_dataset_dir/gsm8k_train_98per 目录
       format_type: "standard"             # 标准格式（已包含 messages 字段）
       use_shared_memory: false
       is_target_task: false               # 普通训练数据，受 subset_ratio 影响
     
     # GSM8K 验证集 (2%) - 目标任务数据
     - dataset_from: "local"
-      dataset_name: "gsm8k_val_2per"     # 对应 local_dataset_dir/gsm8k_val_2per 目录
+      dataset_name: "gsm8k_val_5per"     # 对应 local_dataset_dir/gsm8k_val_2per 目录
       format_type: "standard"             # 标准格式（已包含 messages 字段）
       use_shared_memory: false
       is_target_task: true                # 目标任务数据，始终使用全部数据
