@@ -56,26 +56,35 @@ dataset:
     #   use_shared_memory: false              # 是否使用共享内存（可选）
 
 
-    # GSM8K 训练集 (98%) - 普通训练数据
+    # GSM8K 训练集 (98%) - 普通训练数据 1.6k
     - dataset_from: "local"
-      dataset_name: "gsm8k_train_95per"   # 对应 local_dataset_dir/gsm8k_train_98per 目录
+      dataset_name: "gsm8k_train_80per"   # 对应 local_dataset_dir/gsm8k_train_98per 目录
       format_type: "standard"             # 标准格式（已包含 messages 字段）
       use_shared_memory: false
       is_target_task: false               # 普通训练数据，受 subset_ratio 影响
     
-    # GSM8K 验证集 (2%) - 目标任务数据
+    # GSM8K 验证集 (20%) - 目标任务数据 1.6k
     - dataset_from: "local"
-      dataset_name: "gsm8k_val_5per"     # 对应 local_dataset_dir/gsm8k_val_2per 目录
+      dataset_name: "gsm8k_val_20per"     # 对应 local_dataset_dir/gsm8k_val_2per 目录
       format_type: "standard"             # 标准格式（已包含 messages 字段）
       use_shared_memory: false
       is_target_task: true                # 目标任务数据，始终使用全部数据
     
-    # 可选：其他数据集示例
+    # 可选：其他数据集示例 2k
     - dataset_from: "local"
-      dataset_name: "faker_dataset_24k"
+      dataset_name: "faker_dataset_8k"
       format_type: "standard"
       use_shared_memory: false
       is_target_task: false
+
+    # 2k
+    - dataset_from: "hf"
+      name: "EleutherAI/hendrycks_math"
+      dataset_name: "hendrycks_math"
+      subset: "__full_subset__"             # 特殊值：加载所有子集
+      split: "train"
+      format_type: "hendrycks_math"
+      use_shared_memory: false
   
   # Common parameters
   subset_ratio: 0.25

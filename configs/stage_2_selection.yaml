@@ -66,7 +66,7 @@ dataset:
       use_shared_memory: false
 
     - dataset_from: "local"
-      dataset_name: "faker_dataset_24k"  
+      dataset_name: "faker_dataset_8k"  
       format_type: "standard"
       use_shared_memory: false
 
